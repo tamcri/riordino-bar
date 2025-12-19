@@ -1,8 +1,25 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+# ===============================
+# ENV / SECRETS (MAI su GitHub)
+# ===============================
+.env
+.env.local
+.env.*.local
 
-# dependencies
-/node_modules
-/.pnp
+# consenti solo il file di esempio
+!.env.example
+
+# ===============================
+# NEXT.JS BUILD
+# ===============================
+.next/
+out/
+build/
+
+# ===============================
+# DEPENDENCIES
+# ===============================
+node_modules/
+.pnp
 .pnp.*
 .yarn/*
 !.yarn/patches
@@ -10,32 +27,33 @@
 !.yarn/releases
 !.yarn/versions
 
-# testing
-/coverage
+# ===============================
+# TEST / COVERAGE
+# ===============================
+coverage/
 
-# next.js
-/.next/
-/out/
+# ===============================
+# VERCEL
+# ===============================
+.vercel/
 
-# production
-/build
+# ===============================
+# TYPESCRIPT
+# ===============================
+*.tsbuildinfo
+next-env.d.ts
 
-# misc
-.DS_Store
-*.pem
-
-# debug
+# ===============================
+# LOGS / DEBUG
+# ===============================
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
-.env*
-
-# vercel
-.vercel
-
-# typescript
-*.tsbuildinfo
-next-env.d.ts
+# ===============================
+# OS / EDITOR
+# ===============================
+.DS_Store
+Thumbs.db
+*.pem
