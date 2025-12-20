@@ -38,7 +38,8 @@ export async function POST(req: Request) {
   const input = await file.arrayBuffer();
 
   // ✅ ora weeks guida il calcolo (default 4)
-  const { xlsx } = await processReorderExcel(input, weeks);
+  const { xlsx } = await processReorderExcel(input);
+
 
   return new NextResponse(Buffer.from(xlsx), {
     headers: {

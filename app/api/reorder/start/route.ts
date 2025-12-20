@@ -36,7 +36,8 @@ export async function POST(req: Request) {
   const weeks = sanitizeWeeks(formData.get("weeks"));
 
   const input = await file.arrayBuffer();
-  const { xlsx, rows } = await processReorderExcel(input, weeks);
+  const { xlsx, rows } = await processReorderExcel(input);
+
 
   const jobId = crypto.randomUUID();
   const basePath = `${session.username}/${jobId}`;
