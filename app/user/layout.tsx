@@ -40,6 +40,13 @@ export default function UserLayout({ children }: { children: React.ReactNode }) 
             Order Tab
           </Link>
 
+          <Link
+           href="/user/order-gv"
+            className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-orange-500 text-white hover:bg-orange-600"
+            >
+           Order G&V
+            </Link>
+            
           {/* Qui aggiungeremo altre voci man mano */}
           {/* <Link href="/user/qualcosa" className="...">Nuova funzione</Link> */}
         </div>

@@ -1,5 +1,7 @@
 import ExcelJS from "exceljs";
 
+/* -------------------- utils -------------------- */
+
 function normalize(text: string) {
   return (text || "")
     .toLowerCase()
@@ -13,171 +15,282 @@ function normalize(text: string) {
     .trim();
 }
 
+function cellToNumber(v: any): number {
+  if (v == null) return 0;
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const t = v.replace(/\./g, "").replace(",", ".").replace(/\s/g, "");
+    const n = Number(t);
+    return Number.isFinite(n) ? n : 0;
+  }
+  if (typeof v === "object" && v) {
+    if (typeof v.result === "number") return v.result;
+    if (typeof v.result === "string") return cellToNumber(v.result);
+  }
+  return 0;
+}
+
+// IMPORTANT: per i codici articolo usa cell.text (preserva zeri iniziali ecc.)
+function cellToString(cell: ExcelJS.Cell): string {
+  const t = (cell.text || "").trim();
+  if (t) return t;
+
+  const v: any = cell.value;
+  if (v == null) return "";
+  if (typeof v === "string") return v.trim();
+  if (typeof v === "number") return String(v);
+  if (typeof v === "object" && v) {
+    if (typeof v.result === "string") return v.result.trim();
+    if (typeof v.result === "number") return String(v.result);
+  }
+  return "";
+}
+
+function findPvLabel(ws: ExcelJS.Worksheet): string {
+  const maxRows = Math.min(12, ws.rowCount || 12);
+  const maxCols = Math.min(60, ws.columnCount || 60);
+
+  for (let r = 1; r <= maxRows; r++) {
+    const row = ws.getRow(r);
+    for (let c = 1; c <= maxCols; c++) {
+      const txt = cellToString(row.getCell(c));
+      if (!txt) continue;
+      const low = txt.toLowerCase();
+      if (low.includes("gestioni") || low.includes(" via ") || low.includes("fondi")) {
+        return txt.trim();
+      }
+    }
+  }
+  return "Punto vendita";
+}
+
 function rowToStrings(row: ExcelJS.Row): string[] {
+  const raw = row.values as unknown[]; // 1-based
   const out: string[] = [];
-  row.eachCell({ includeEmpty: true }, (cell) => {
-    const v = cell?.value;
-    if (v == null) out.push("");
-    else if (typeof v === "string") out.push(v);
-    else if (typeof v === "number") out.push(String(v));
-    else if (typeof v === "object" && "text" in v) out.push(String((v as any).text || ""));
-    else out.push(String(v));
-  });
+  for (let i = 1; i < raw.length; i++) out.push(raw[i] ? String(raw[i]) : "");
   return out;
 }
 
-function toNumberSafe(v: any): number {
-  if (v == null) return 0;
-  if (typeof v === "number") return v;
-  const s = String(v).replace(",", ".").replace(/[^\d.-]/g, "").trim();
-  const n = Number(s);
-  return Number.isFinite(n) ? n : 0;
+function findColumnIndex(headers: string[], candidates: string[]) {
+  const normHeaders = headers.map((h) => normalize(h));
+  for (const cand of candidates) {
+    const c = normalize(cand);
+    const idx = normHeaders.findIndex((h) => h.includes(c));
+    if (idx !== -1) return idx;
+  }
+  return -1;
 }
 
-function sanitizeWeeks(weeks?: number): number {
-  const w = Number(weeks);
-  if (!Number.isFinite(w)) return 4;
-  const wi = Math.trunc(w);
-  if (wi < 1) return 1;
-  if (wi > 4) return 4;
-  return wi;
+/* -------------------- types -------------------- */
+
+export type PreviewRow = {
+  codArticolo: string;
+  descrizione: string;
+  qtaVenduta: number;
+  giacenza: number;
+  qtaOrdine: number;
+  pesoKg: number; // per anteprima (come già avevi)
+};
+
+/* -------------------- export pulito -------------------- */
+
+async function buildCleanWorkbook(pvLabel: string, rows: PreviewRow[]): Promise<Buffer> {
+
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("RIORDINO TAB");
+
+  // PV label in A1 (senza colonna vuota)
+  ws.mergeCells("A1:F1");
+  ws.getCell("A1").value = pvLabel;
+  ws.getCell("A1").font = { bold: true, size: 14 };
+  ws.getCell("A1").alignment = { vertical: "middle", horizontal: "left" };
+
+  const headerRow = 3;
+
+  const headers = [
+    "Cod. Articolo",
+    "Descrizione",
+    "Qtà Venduta",
+    "Giacenza",
+    "Qtà da ordinare",
+    "Qtà in peso (kg)", // ✅ in chilogrammi nel file scaricato
+  ];
+
+  ws.getRow(headerRow).values = headers;
+  ws.getRow(headerRow).font = { bold: true };
+
+  ws.getColumn(1).width = 16;
+  ws.getColumn(2).width = 52;
+  ws.getColumn(3).width = 14;
+  ws.getColumn(4).width = 12;
+  ws.getColumn(5).width = 16;
+  ws.getColumn(6).width = 12;
+
+  let r = headerRow + 1;
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+
+    // 10 pezzi = 200g => 1 pezzo = 20g
+    const pesoG = Math.round(row.qtaOrdine * 20);
+
+    ws.getRow(r).values = [
+  row.codArticolo,
+  row.descrizione,
+  row.qtaVenduta,
+  row.giacenza,
+  row.qtaOrdine,
+  row.pesoKg,
+];
+
+
+    // formati numerici
+    ws.getCell(r, 3).numFmt = "0";
+    ws.getCell(r, 4).numFmt = "0";
+    ws.getCell(r, 5).numFmt = "0";
+    ws.getCell(r, 6).numFmt = "0.0";
+
+
+    r++;
+  }
+
+  // Totali
+  const totalRow = r + 1;
+  ws.getCell(totalRow, 2).value = "TOTALI";
+  ws.getRow(totalRow).font = { bold: true };
+
+  const start = headerRow + 1;
+  const end = r - 1;
+
+  ws.getCell(totalRow, 3).value = { formula: `SUM(C${start}:C${end})` };
+  ws.getCell(totalRow, 4).value = { formula: `SUM(D${start}:D${end})` };
+  ws.getCell(totalRow, 5).value = { formula: `SUM(E${start}:E${end})` };
+  ws.getCell(totalRow, 6).value = { formula: `SUM(F${start}:F${end})` };
+
+  ws.getCell(totalRow, 6).numFmt = "0.0";
+
+
+  // bordi
+  const last = totalRow;
+  for (let rr = headerRow; rr <= last; rr++) {
+    for (let cc = 1; cc <= 6; cc++) {
+      ws.getCell(rr, cc).border = {
+        top: { style: "thin" },
+        left: { style: "thin" },
+        bottom: { style: "thin" },
+        right: { style: "thin" },
+      };
+    }
+  }
+
+  const out = await wb.xlsx.writeBuffer();
+  return Buffer.from(out as any);
 }
+
+/* -------------------- main -------------------- */
 
 export async function processReorderExcel(
-  input: ArrayBuffer,
-  weeks: number = 4
-): Promise<{
-  xlsx: Uint8Array;
-  rows: {
-    codArticolo: string;
-    descrizione: string;
-    qtaVenduta: number;
-    giacenza: number;
-    qtaOrdine: number;
-    pesoKg: number;
-  }[];
-}> {
-  const WEEKS = sanitizeWeeks(weeks);
-
+  input: ArrayBuffer
+): Promise<{ xlsx: Buffer; rows: PreviewRow[] }> {
   const workbook = new ExcelJS.Workbook();
-
-  // ✅ carico direttamente ArrayBuffer (niente Buffer)
   await workbook.xlsx.load(input);
 
-  const worksheet = workbook.worksheets[0];
-  if (!worksheet) throw new Error("Foglio Excel non trovato");
+  const ws = workbook.worksheets[0];
+  if (!ws) throw new Error("Foglio Excel non trovato");
 
-  // 1) Trova riga intestazioni nelle prime 30 righe
+  const pvLabel = findPvLabel(ws);
+
+  // trova riga intestazioni (prime 30 righe)
   let headerRowNumber = -1;
-  let cCod = -1;
-  let cDesc = -1;
-  let cVenduta = -1;
-  let cGiacenza = -1;
-  let cOrdine = -1;
-  let cPeso = -1;
+  let headers: string[] = [];
 
-  for (let r = 1; r <= Math.min(30, worksheet.rowCount); r++) {
-    const row = worksheet.getRow(r);
-    const cells = rowToStrings(row).map(normalize);
-
-    const idxCod =
-      cells.findIndex((x) => x.includes("cod") && x.includes("art")) ??
-      -1;
-    const idxDesc = cells.findIndex((x) => x.includes("descr")) ?? -1;
-
-    const idxVend =
-      cells.findIndex((x) => x.includes("vendut")) ??
-      cells.findIndex((x) => x.includes("qta vend")) ??
-      -1;
-
-    const idxGiac =
-      cells.findIndex((x) => x.includes("giac")) ??
-      cells.findIndex((x) => x.includes("giacenza bar")) ??
-      -1;
-
-    if (idxCod >= 0 && idxDesc >= 0 && idxVend >= 0 && idxGiac >= 0) {
+  for (let r = 1; r <= 30; r++) {
+    const row = ws.getRow(r);
+    const vals = rowToStrings(row);
+    const joined = normalize(vals.join(" | "));
+    if (joined.includes("vend") && joined.includes("giacen")) {
       headerRowNumber = r;
-
-      // ExcelJS è 1-based
-      cCod = idxCod + 1;
-      cDesc = idxDesc + 1;
-      cVenduta = idxVend + 1;
-      cGiacenza = idxGiac + 1;
-
-      // colonne output: se esistono le usiamo, altrimenti le creiamo in coda
-      const existingOrd = cells.findIndex((x) => x.includes("da ordinare"));
-      const existingPeso = cells.findIndex((x) => x.includes("peso") || x.includes("kg"));
-
-      cOrdine = existingOrd >= 0 ? existingOrd + 1 : worksheet.columnCount + 1;
-      cPeso = existingPeso >= 0 ? existingPeso + 1 : Math.max(worksheet.columnCount + 1, cOrdine + 1);
-
+      headers = vals;
       break;
     }
   }
 
-  if (headerRowNumber < 0) {
-    throw new Error(
-      "Intestazioni non trovate: servono almeno Cod. Articolo, Descrizione, Qtà Venduta, Giacenza BAR."
-    );
+  if (headerRowNumber === -1 || headers.length === 0) {
+    throw new Error("Non trovo la riga intestazioni (Venduta / Giacenza).");
   }
 
-  // Se abbiamo creato colonne nuove in coda, aggiorna la columnCount di fatto
-  const maxCol = Math.max(cCod, cDesc, cVenduta, cGiacenza, cOrdine, cPeso);
-  if (worksheet.columnCount < maxCol) {
-    worksheet.columns = Array.from({ length: maxCol }, (_, i) => worksheet.getColumn(i + 1));
-  }
+  // mappa colonne
+  const idxCod = findColumnIndex(headers, [
+    "cod. articolo",
+    "cod articolo",
+    "codice articolo",
+    "cod. art",
+    "cod art",
+    "articolo",
+  ]);
 
-  const rows: {
-    codArticolo: string;
-    descrizione: string;
-    qtaVenduta: number;
-    giacenza: number;
-    qtaOrdine: number;
-    pesoKg: number;
-  }[] = [];
+  const idxDesc = findColumnIndex(headers, ["descrizione", "desc", "descr"]);
+  const idxVend = findColumnIndex(headers, ["qta venduta", "qtà venduta", "venduta", "vendite"]);
+  const idxGiac = findColumnIndex(headers, ["giacenza bar", "giacenza", "giacenze"]);
 
-  // 2) Scorri righe dati
-  worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+  if (idxCod === -1) throw new Error("Colonna 'Cod. Articolo' non trovata.");
+  if (idxDesc === -1) throw new Error("Colonna 'Descrizione' non trovata.");
+  if (idxVend === -1) throw new Error("Colonna 'Qtà Venduta' non trovata.");
+  if (idxGiac === -1) throw new Error("Colonna 'Giacenza' non trovata.");
+
+  const cCod = idxCod + 1;
+  const cDesc = idxDesc + 1;
+  const cVend = idxVend + 1;
+  const cGiac = idxGiac + 1;
+
+  const rows: PreviewRow[] = [];
+
+  ws.eachRow((row, rowNumber) => {
     if (rowNumber <= headerRowNumber) return;
 
-    const codArticolo = String(row.getCell(cCod).value ?? "").trim();
-    const descrizione = String(row.getCell(cDesc).value ?? "").trim();
-    const venduta = toNumberSafe(row.getCell(cVenduta).value);
-    const giacenza = toNumberSafe(row.getCell(cGiacenza).value);
+    const codArticolo = cellToString(row.getCell(cCod));
+    const descrizione = cellToString(row.getCell(cDesc));
+    const qtaVenduta = cellToNumber(row.getCell(cVend).value);
+    const giacenza = cellToNumber(row.getCell(cGiac).value);
 
-    const hasSomeData =
-      codArticolo !== "" || descrizione !== "" || venduta !== 0 || giacenza !== 0;
+    const codNorm = normalize(codArticolo);
+    const descNorm = normalize(descrizione);
 
-    if (!hasSomeData) return;
+    // filtri righe spazzatura
+    if (!codArticolo && !descrizione) return;
 
-    // ✅ Regola: fabbisogno basato su periodo selezionato (1–4 settimane)
-    const fabbisogno = venduta * WEEKS;
+    // "pagina 13 di 13"
+    if ((codNorm.includes("pagina") || descNorm.includes("pagina")) && qtaVenduta === 0 && giacenza === 0) return;
+
+    // intestazioni ripetute dentro il file
+    if (codNorm.includes("cod") && codNorm.includes("art")) return;
+
+    // molti export hanno righe non-articolo con descrizione vuota e numeri zero
+    if (!codArticolo && qtaVenduta === 0 && giacenza === 0) return;
+
+    // LOGICA RIORDINO TAB: 4 settimane fisse (come prima)
+    const fabbisogno = qtaVenduta * 4;
     const mancante = Math.max(0, fabbisogno - giacenza);
-
-    // confezione = 10 pezzi, arrotonda sempre per eccesso
     const qtaOrdine = Math.ceil(mancante / 10) * 10;
 
-    // 10 pezzi = 0,2 kg => 1 pezzo = 0,02 kg
+    // anteprima resta in kg come UI attuale (0.02 kg per pezzo)
     const pesoKg = Number((qtaOrdine * 0.02).toFixed(1));
 
-    // Scrivi nel file SOLO le colonne richieste
-    row.getCell(cOrdine).value = qtaOrdine;
-    row.getCell(cPeso).value = pesoKg;
-
-    rows.push({ codArticolo, descrizione, qtaVenduta: venduta, giacenza, qtaOrdine, pesoKg });
+    rows.push({
+      codArticolo,
+      descrizione,
+      qtaVenduta,
+      giacenza,
+      qtaOrdine,
+      pesoKg,
+    });
   });
 
-  // ✅ Forza le intestazioni (evita che Excel le mostri come 0 dopo il save)
-  const headerRow = worksheet.getRow(headerRowNumber);
-  headerRow.getCell(cVenduta).value = "Qtà Venduta";
-  headerRow.getCell(cGiacenza).value = "Giacenza BAR";
-  headerRow.getCell(cOrdine).value = "Qtà da ordinare";
-  headerRow.getCell(cPeso).value = "Qtà in peso (kg)";
-  headerRow.commit?.();
-
-  const out = (await workbook.xlsx.writeBuffer()) as ArrayBuffer;
-  return { xlsx: new Uint8Array(out), rows };
+  const xlsx = await buildCleanWorkbook(pvLabel, rows);
+  return { xlsx, rows };
 }
+
+
 
 
 
