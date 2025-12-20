@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
 type PreviewRow = {
@@ -14,12 +14,20 @@ type PreviewRow = {
 
 export default function UserPage() {
   const router = useRouter();
+
   const [file, setFile] = useState<File | null>(null);
+  const [weeks, setWeeks] = useState<number>(4); // ✅ default: 4 settimane
+
   const [loading, setLoading] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [preview, setPreview] = useState<PreviewRow[]>([]);
   const [totalRows, setTotalRows] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
+
+  const weeksLabel = useMemo(() => {
+    if (weeks === 1) return "1 settimana";
+    return `${weeks} settimane`;
+  }, [weeks]);
 
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
@@ -39,10 +47,14 @@ export default function UserPage() {
     try {
       const fd = new FormData();
       fd.append("file", file);
+      fd.append("weeks", String(weeks)); // ✅ invio il periodo selezionato
 
-      const res = await fetch("/api/reorder/start", { method: "POST", body: fd });
+      const res = await fetch("/api/reorder/start", {
+        method: "POST",
+        body: fd,
+      });
+
       const json = await res.json();
-
       if (!res.ok || !json.ok) throw new Error(json.error || "Errore");
 
       setJobId(json.jobId);
@@ -57,7 +69,12 @@ export default function UserPage() {
 
   function downloadExcel() {
     if (!jobId) return;
-    window.location.href = `/api/reorder/excel?jobId=${encodeURIComponent(jobId)}`;
+
+    // ✅ passo weeks anche qui (utile se la route excel lo usa, o per coerenza)
+    const url = `/api/reorder/excel?jobId=${encodeURIComponent(jobId)}&weeks=${encodeURIComponent(
+      String(weeks)
+    )}`;
+    window.location.href = url;
   }
 
   return (
@@ -66,7 +83,8 @@ export default function UserPage() {
         <div>
           <h1 className="text-2xl font-semibold">Calcolo Riordino</h1>
           <p className="text-gray-600 mt-1">
-            Carica l’Excel, controlla l’anteprima, poi scarica il file compilato in Excel.
+            Carica l’Excel, scegli il periodo, controlla l’anteprima, poi scarica il file compilato in
+            Excel.
           </p>
         </div>
         <button onClick={logout} className="rounded-xl border px-4 py-2 hover:bg-gray-50">
@@ -75,18 +93,40 @@ export default function UserPage() {
       </div>
 
       <form onSubmit={startProcess} className="mt-6 space-y-4">
-        <div className="rounded-2xl border p-4">
-          <label className="block text-sm font-medium mb-2">File Excel (.xlsx)</label>
-          <input
-            type="file"
-            accept=".xlsx"
-            onChange={(e) => setFile(e.target.files?.[0] || null)}
-          />
-          {file && (
-            <p className="text-sm text-gray-600 mt-2">
-              Selezionato: <b>{file.name}</b>
-            </p>
-          )}
+        <div className="rounded-2xl border p-4 space-y-4">
+          <div>
+            <label className="block text-sm font-medium mb-2">File Excel (.xlsx)</label>
+            <input
+              type="file"
+              accept=".xlsx"
+              onChange={(e) => setFile(e.target.files?.[0] || null)}
+            />
+            {file && (
+              <p className="text-sm text-gray-600 mt-2">
+                Selezionato: <b>{file.name}</b>
+              </p>
+            )}
+          </div>
+
+          {/* ✅ Dropdown settimane */}
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+            <label className="block text-sm font-medium min-w-[180px]">Periodo di calcolo</label>
+
+            <select
+              className="rounded-xl border p-3 w-full sm:w-[260px]"
+              value={weeks}
+              onChange={(e) => setWeeks(Number(e.target.value))}
+            >
+              <option value={1}>1 Settimana</option>
+              <option value={2}>2 Settimane</option>
+              <option value={3}>3 Settimane</option>
+              <option value={4}>4 Settimane</option>
+            </select>
+
+            <span className="text-sm text-gray-600">
+              Selezionato: <b>{weeksLabel}</b>
+            </span>
+          </div>
         </div>
 
         <button
@@ -103,12 +143,9 @@ export default function UserPage() {
         <div className="mt-6 space-y-3">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
             <p className="text-gray-700">
-              Anteprima pronta. Righe elaborate: <b>{totalRows}</b> (mostro le prime 20)
+              Anteprima pronta ({weeksLabel}). Righe elaborate: <b>{totalRows}</b> (mostro le prime 20)
             </p>
-            <button
-              onClick={downloadExcel}
-              className="rounded-xl bg-black text-white px-4 py-2"
-            >
+            <button onClick={downloadExcel} className="rounded-xl bg-black text-white px-4 py-2">
               Scarica Excel
             </button>
           </div>
@@ -152,6 +189,7 @@ export default function UserPage() {
     </main>
   );
 }
+
 
 
 

@@ -14,43 +14,38 @@ function normalize(text: string) {
 }
 
 function rowToStrings(row: ExcelJS.Row): string[] {
-  const raw = row.values as unknown[]; // 1-based
   const out: string[] = [];
-  for (let i = 1; i < raw.length; i++) out.push(raw[i] ? String(raw[i]) : "");
+  row.eachCell({ includeEmpty: true }, (cell) => {
+    const v = cell?.value;
+    if (v == null) out.push("");
+    else if (typeof v === "string") out.push(v);
+    else if (typeof v === "number") out.push(String(v));
+    else if (typeof v === "object" && "text" in v) out.push(String((v as any).text || ""));
+    else out.push(String(v));
+  });
   return out;
 }
 
-function findColumnIndex(headers: string[], candidates: string[]) {
-  const normHeaders = headers.map((h) => normalize(h));
-  for (const cand of candidates) {
-    const c = normalize(cand);
-    const idx = normHeaders.findIndex((h) => h.includes(c));
-    if (idx !== -1) return idx;
-  }
-  return -1;
+function toNumberSafe(v: any): number {
+  if (v == null) return 0;
+  if (typeof v === "number") return v;
+  const s = String(v).replace(",", ".").replace(/[^\d.-]/g, "").trim();
+  const n = Number(s);
+  return Number.isFinite(n) ? n : 0;
 }
 
-function cellToNumber(val: unknown): number {
-  if (val === null || val === undefined) return 0;
-  if (typeof val === "number") return val;
-  if (typeof val === "string") {
-    const n = Number(val.replace(",", "."));
-    return Number.isFinite(n) ? n : 0;
-  }
-  return 0;
-}
-
-function cellToString(val: unknown): string {
-  if (val === null || val === undefined) return "";
-  // ExcelJS spesso usa oggetti tipo { richText } o { text }
-  if (typeof val === "object" && val !== null && "text" in (val as any)) {
-    return String((val as any).text ?? "").trim();
-  }
-  return String(val).trim();
+function sanitizeWeeks(weeks?: number): number {
+  const w = Number(weeks);
+  if (!Number.isFinite(w)) return 4;
+  const wi = Math.trunc(w);
+  if (wi < 1) return 1;
+  if (wi > 4) return 4;
+  return wi;
 }
 
 export async function processReorderExcel(
-  input: ArrayBuffer
+  input: ArrayBuffer,
+  weeks: number = 4
 ): Promise<{
   xlsx: Uint8Array;
   rows: {
@@ -62,6 +57,8 @@ export async function processReorderExcel(
     pesoKg: number;
   }[];
 }> {
+  const WEEKS = sanitizeWeeks(weeks);
+
   const workbook = new ExcelJS.Workbook();
 
   // ✅ carico direttamente ArrayBuffer (niente Buffer)
@@ -72,85 +69,63 @@ export async function processReorderExcel(
 
   // 1) Trova riga intestazioni nelle prime 30 righe
   let headerRowNumber = -1;
-  let headers: string[] = [];
-  const previewDebug: string[] = [];
+  let cCod = -1;
+  let cDesc = -1;
+  let cVenduta = -1;
+  let cGiacenza = -1;
+  let cOrdine = -1;
+  let cPeso = -1;
 
-  for (let r = 1; r <= 30; r++) {
+  for (let r = 1; r <= Math.min(30, worksheet.rowCount); r++) {
     const row = worksheet.getRow(r);
-    const vals = rowToStrings(row);
-    const joined = normalize(vals.join(" | "));
+    const cells = rowToStrings(row).map(normalize);
 
-    if (joined.replace(/\|/g, "").trim().length > 0) {
-      previewDebug.push(`R${r}: ${vals.join(" | ")}`);
-    }
+    const idxCod =
+      cells.findIndex((x) => x.includes("cod") && x.includes("art")) ??
+      -1;
+    const idxDesc = cells.findIndex((x) => x.includes("descr")) ?? -1;
 
-    // euristica: intestazione contiene "vend" e "giacen"
-    if (joined.includes("vend") && joined.includes("giacen")) {
+    const idxVend =
+      cells.findIndex((x) => x.includes("vendut")) ??
+      cells.findIndex((x) => x.includes("qta vend")) ??
+      -1;
+
+    const idxGiac =
+      cells.findIndex((x) => x.includes("giac")) ??
+      cells.findIndex((x) => x.includes("giacenza bar")) ??
+      -1;
+
+    if (idxCod >= 0 && idxDesc >= 0 && idxVend >= 0 && idxGiac >= 0) {
       headerRowNumber = r;
-      headers = vals;
+
+      // ExcelJS è 1-based
+      cCod = idxCod + 1;
+      cDesc = idxDesc + 1;
+      cVenduta = idxVend + 1;
+      cGiacenza = idxGiac + 1;
+
+      // colonne output: se esistono le usiamo, altrimenti le creiamo in coda
+      const existingOrd = cells.findIndex((x) => x.includes("da ordinare"));
+      const existingPeso = cells.findIndex((x) => x.includes("peso") || x.includes("kg"));
+
+      cOrdine = existingOrd >= 0 ? existingOrd + 1 : worksheet.columnCount + 1;
+      cPeso = existingPeso >= 0 ? existingPeso + 1 : Math.max(worksheet.columnCount + 1, cOrdine + 1);
+
       break;
     }
   }
 
-  if (headerRowNumber === -1 || headers.length === 0) {
+  if (headerRowNumber < 0) {
     throw new Error(
-      "Non trovo la riga intestazioni (Venduta / Giacenza). Prime righe viste:\n" +
-        previewDebug.slice(0, 10).join("\n")
+      "Intestazioni non trovate: servono almeno Cod. Articolo, Descrizione, Qtà Venduta, Giacenza BAR."
     );
   }
 
-  // 2) Trova colonne necessarie (varianti)
-  const idxCodArticolo = findColumnIndex(headers, [
-    "cod. articolo",
-    "cod articolo",
-    "codice articolo",
-    "cod. art",
-    "cod art",
-    "articolo", // fallback
-  ]);
-
-  const idxDescrizione = findColumnIndex(headers, ["descrizione", "desc", "descr"]);
-
-  const idxVenduta = findColumnIndex(headers, [
-    "qta venduta",
-    "qtà venduta",
-    "quantita venduta",
-    "venduta",
-    "vendite",
-  ]);
-
-  const idxGiacenza = findColumnIndex(headers, ["giacenza bar", "giacenza", "giacenze"]);
-
-  const idxOrdine = findColumnIndex(headers, [
-    "qta da ordinare",
-    "qtà da ordinare",
-    "quantita da ordinare",
-    "da ordinare",
-    "ordinare",
-  ]);
-
-  const idxPeso = findColumnIndex(headers, ["qta in peso", "qtà in peso", "peso", "kg"]);
-
-  if (idxCodArticolo === -1)
-    throw new Error("Colonna 'Cod. Articolo' non trovata. Intestazioni: " + headers.join(" | "));
-  if (idxDescrizione === -1)
-    throw new Error("Colonna 'Descrizione' non trovata. Intestazioni: " + headers.join(" | "));
-  if (idxVenduta === -1)
-    throw new Error("Colonna 'Qtà Venduta' non trovata. Intestazioni: " + headers.join(" | "));
-  if (idxGiacenza === -1)
-    throw new Error("Colonna 'Giacenza BAR' non trovata. Intestazioni: " + headers.join(" | "));
-  if (idxOrdine === -1)
-    throw new Error("Colonna 'Qtà da ordinare' non trovata. Intestazioni: " + headers.join(" | "));
-  if (idxPeso === -1)
-    throw new Error("Colonna 'Qtà in peso (kg)' non trovata. Intestazioni: " + headers.join(" | "));
-
-  // Indici Excel (1-based)
-  const cCodArticolo = idxCodArticolo + 1;
-  const cDescrizione = idxDescrizione + 1;
-  const cVenduta = idxVenduta + 1;
-  const cGiacenza = idxGiacenza + 1;
-  const cOrdine = idxOrdine + 1;
-  const cPeso = idxPeso + 1;
+  // Se abbiamo creato colonne nuove in coda, aggiorna la columnCount di fatto
+  const maxCol = Math.max(cCod, cDesc, cVenduta, cGiacenza, cOrdine, cPeso);
+  if (worksheet.columnCount < maxCol) {
+    worksheet.columns = Array.from({ length: maxCol }, (_, i) => worksheet.getColumn(i + 1));
+  }
 
   const rows: {
     codArticolo: string;
@@ -161,24 +136,22 @@ export async function processReorderExcel(
     pesoKg: number;
   }[] = [];
 
-  // 3) Elabora righe dati dalla riga dopo l’intestazione
-  worksheet.eachRow((row, rowNumber) => {
+  // 2) Scorri righe dati
+  worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
     if (rowNumber <= headerRowNumber) return;
 
-    const codArticolo = cellToString(row.getCell(cCodArticolo).value);
-    const descrizione = cellToString(row.getCell(cDescrizione).value);
+    const codArticolo = String(row.getCell(cCod).value ?? "").trim();
+    const descrizione = String(row.getCell(cDesc).value ?? "").trim();
+    const venduta = toNumberSafe(row.getCell(cVenduta).value);
+    const giacenza = toNumberSafe(row.getCell(cGiacenza).value);
 
-    const venduta = cellToNumber(row.getCell(cVenduta).value);
-    const giacenza = cellToNumber(row.getCell(cGiacenza).value);
-
-    // se la riga è vuota, saltala
     const hasSomeData =
       codArticolo !== "" || descrizione !== "" || venduta !== 0 || giacenza !== 0;
 
     if (!hasSomeData) return;
 
-    // Regola: copertura settimana corrente + 3 future => 4 settimane
-    const fabbisogno = venduta * 4;
+    // ✅ Regola: fabbisogno basato su periodo selezionato (1–4 settimane)
+    const fabbisogno = venduta * WEEKS;
     const mancante = Math.max(0, fabbisogno - giacenza);
 
     // confezione = 10 pezzi, arrotonda sempre per eccesso
@@ -193,16 +166,18 @@ export async function processReorderExcel(
 
     rows.push({ codArticolo, descrizione, qtaVenduta: venduta, giacenza, qtaOrdine, pesoKg });
   });
-    // ✅ Forza le intestazioni (evita che Excel le mostri come 0 dopo il save)
-const headerRow = worksheet.getRow(headerRowNumber);
-headerRow.getCell(cVenduta).value = "Qtà Venduta";
-headerRow.getCell(cGiacenza).value = "Giacenza BAR";
-headerRow.getCell(cOrdine).value = "Qtà da ordinare";
-headerRow.getCell(cPeso).value = "Qtà in peso (kg)";
-headerRow.commit?.();
+
+  // ✅ Forza le intestazioni (evita che Excel le mostri come 0 dopo il save)
+  const headerRow = worksheet.getRow(headerRowNumber);
+  headerRow.getCell(cVenduta).value = "Qtà Venduta";
+  headerRow.getCell(cGiacenza).value = "Giacenza BAR";
+  headerRow.getCell(cOrdine).value = "Qtà da ordinare";
+  headerRow.getCell(cPeso).value = "Qtà in peso (kg)";
+  headerRow.commit?.();
 
   const out = (await workbook.xlsx.writeBuffer()) as ArrayBuffer;
   return { xlsx: new Uint8Array(out), rows };
 }
+
 
 
