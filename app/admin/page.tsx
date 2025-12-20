@@ -3,11 +3,15 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
+type CreateRole = "amministrativo" | "punto_vendita";
+
 export default function AdminPage() {
   const router = useRouter();
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [role, setRole] = useState<CreateRole>("amministrativo"); // ✅ default sensato
+
   const [msg, setMsg] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -25,7 +29,7 @@ export default function AdminPage() {
       const res = await fetch("/api/users/create", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ username, password, role }), // ✅ invio ruolo
       });
 
       const json = await res.json();
@@ -36,7 +40,7 @@ export default function AdminPage() {
 
       setUsername("");
       setPassword("");
-      setMsg("Utente creato con successo");
+      setMsg(`Utente creato con successo (${role === "amministrativo" ? "Amministrativo" : "Punto Vendita"})`);
     } finally {
       setLoading(false);
     }
@@ -50,10 +54,7 @@ export default function AdminPage() {
           <p className="text-gray-600 mt-1">Crea nuovo utente</p>
         </div>
 
-        <button
-          onClick={logout}
-          className="rounded-xl border px-4 py-2 hover:bg-gray-50"
-        >
+        <button onClick={logout} className="rounded-xl border px-4 py-2 hover:bg-gray-50">
           Logout
         </button>
       </div>
@@ -65,6 +66,7 @@ export default function AdminPage() {
           value={username}
           onChange={(e) => setUsername(e.target.value)}
         />
+
         <input
           className="w-full rounded-xl border p-3"
           placeholder="Password"
@@ -72,6 +74,22 @@ export default function AdminPage() {
           value={password}
           onChange={(e) => setPassword(e.target.value)}
         />
+
+        {/* ✅ dropdown ruolo */}
+        <div>
+          <label className="block text-sm font-medium mb-2">Ruolo</label>
+          <select
+            className="w-full rounded-xl border p-3 bg-white"
+            value={role}
+            onChange={(e) => setRole(e.target.value as CreateRole)}
+          >
+            <option value="amministrativo">Amministrativo</option>
+            <option value="punto_vendita">Punto Vendita</option>
+          </select>
+          <p className="text-xs text-gray-500 mt-1">
+            Amministrativo: riordino e funzioni ufficio. Punto Vendita: riscontro/inventario.
+          </p>
+        </div>
 
         <button
           className="w-full rounded-xl bg-black text-white p-3 disabled:opacity-60"
@@ -85,4 +103,5 @@ export default function AdminPage() {
     </main>
   );
 }
+
 

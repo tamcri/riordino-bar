@@ -2,9 +2,11 @@ import crypto from "crypto";
 
 export const COOKIE_NAME = "rb_session";
 
+export type SessionRole = "admin" | "amministrativo" | "punto_vendita";
+
 export type SessionData = {
   username: string;
-  role: "admin" | "user";
+  role: SessionRole;
   iat: number;
 };
 
@@ -31,9 +33,16 @@ export function parseSessionValue(value?: string | null): SessionData | null {
 
   try {
     const json = Buffer.from(b64, "base64url").toString("utf8");
-    return JSON.parse(json) as SessionData;
+    const parsed = JSON.parse(json) as SessionData;
+
+    // ✅ hardening: evita ruoli "sporchi" da cookie vecchi o manomessi
+    if (!parsed?.username) return null;
+    if (!["admin", "amministrativo", "punto_vendita"].includes(parsed.role)) return null;
+
+    return parsed;
   } catch {
     return null;
   }
 }
+
 
