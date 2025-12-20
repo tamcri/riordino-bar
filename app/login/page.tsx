@@ -19,18 +19,27 @@ export default function LoginPage() {
     e.preventDefault();
     setMsg(null);
     setLoading(true);
+
     try {
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ username, password }),
       });
+
       const json = await res.json();
+
       if (!json.ok) {
         setMsg(json.error || "Errore login");
         return;
       }
-      router.push(json.role === "admin" ? "/admin" : "/user");
+
+      // ✅ redirect deciso dal backend in base al ruolo:
+      // admin -> /admin, amministrativo -> /user, punto_vendita -> /pv
+      const to = json.redirectTo || (json.role === "admin" ? "/admin" : "/user");
+      router.replace(to);
+    } catch (err: any) {
+      setMsg(err?.message || "Errore login");
     } finally {
       setLoading(false);
     }
@@ -48,6 +57,7 @@ export default function LoginPage() {
             placeholder="Username"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
+            autoComplete="username"
           />
           <input
             className="w-full rounded-xl border p-3"
@@ -55,6 +65,7 @@ export default function LoginPage() {
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
+            autoComplete="current-password"
           />
 
           <button
@@ -70,3 +81,4 @@ export default function LoginPage() {
     </main>
   );
 }
+
