@@ -1,3 +1,4 @@
+import { cookies } from "next/headers";
 import crypto from "crypto";
 
 export const COOKIE_NAME = "rb_session";
@@ -44,5 +45,23 @@ export function parseSessionValue(value?: string | null): SessionData | null {
     return null;
   }
 }
+// ...tutto il tuo codice invariato sopra...
 
+export async function getSession(): Promise<SessionData | null> {
+  const cookieStore = await cookies();
+  const raw = cookieStore.get(COOKIE_NAME)?.value ?? null;
+  return parseSessionValue(raw);
+}
+
+export async function requireSession(): Promise<SessionData> {
+  const session = await getSession();
+  if (!session) throw new Error("UNAUTHORIZED");
+  return session;
+}
+
+export async function requireRole(allowed: SessionRole[]): Promise<SessionData> {
+  const session = await requireSession();
+  if (!allowed.includes(session.role)) throw new Error("FORBIDDEN");
+  return session;
+}
 

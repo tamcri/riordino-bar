@@ -10,6 +10,8 @@ export default function UserLayout({ children }: { children: React.ReactNode }) 
 
   // (Il middleware già protegge /user, ma teniamo un fallback)
   const username = session?.username ?? "Utente";
+  const isAdmin = session?.role === "admin";
+
 
   return (
     <div className="min-h-screen bg-gray-100">
@@ -33,6 +35,16 @@ export default function UserLayout({ children }: { children: React.ReactNode }) 
       {/* Menu */}
       <nav className="bg-white border-b">
         <div className="mx-auto max-w-6xl px-6 py-3 flex items-center gap-3">
+          
+          {isAdmin && (
+          <Link
+            href="/admin"
+           className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-slate-900 text-white hover:bg-slate-800"
+           >
+            Admin
+           </Link>
+          )}
+
           <Link
             href="/user/order-tab"
             className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-blue-600 text-white hover:bg-blue-700"
@@ -46,6 +58,23 @@ export default function UserLayout({ children }: { children: React.ReactNode }) 
             >
            Order G&V
             </Link>
+
+            <Link
+           href="/user/history"
+           className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-slate-700 text-white hover:bg-slate-800"
+            >
+           Storico Ordini
+          </Link>
+
+          <Link
+         href="/user/items"
+         className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-slate-700 text-white hover:bg-slate-800"
+          >
+          Articoli
+          </Link>
+
+          
+
             
           {/* Qui aggiungeremo altre voci man mano */}
           {/* <Link href="/user/qualcosa" className="...">Nuova funzione</Link> */}

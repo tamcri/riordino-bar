@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import crypto from "crypto";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { processReorderExcel } from "@/lib/excel/reorder";
-import { uploadResult } from "@/lib/storage";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 function sanitizeWeeks(v: unknown): number {
   const n = Number(v);
@@ -21,7 +21,7 @@ export async function POST(req: Request) {
     ?.split("=")[1];
 
   const session = parseSessionValue(sessionCookie);
-  if (!session) {
+  if (!session || !["admin", "amministrativo"].includes(session.role)) {
     return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
   }
 
@@ -32,31 +32,82 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "File mancante" }, { status: 400 });
   }
 
-  // ✅ NEW: weeks da dropdown (default 4)
-  const weeks = sanitizeWeeks(formData.get("weeks"));
+  // ✅ NEW: pvId obbligatorio
+  const pvId = String(formData.get("pvId") ?? "").trim();
+  if (!pvId) {
+    return NextResponse.json({ ok: false, error: "Punto vendita mancante" }, { status: 400 });
+  }
 
+  // ✅ Validazione PV
+  const { data: pv, error: pvErr } = await supabaseAdmin
+    .from("pvs")
+    .select("id, code, name")
+    .eq("id", pvId)
+    .single();
+
+  if (pvErr || !pv) {
+    return NextResponse.json({ ok: false, error: "Punto vendita non valido" }, { status: 400 });
+  }
+
+  const pvLabel = `${pv.code} - ${pv.name}`;
+
+  const weeks = sanitizeWeeks(formData.get("weeks"));
   const input = await file.arrayBuffer();
+
   const { xlsx, rows } = await processReorderExcel(input);
 
+  const reorderId = crypto.randomUUID();
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
 
-  const jobId = crypto.randomUUID();
-  const basePath = `${session.username}/${jobId}`;
+  // ✅ NB: path include il PV, così lo storage è ordinato bene
+  const exportPath = `TAB/${pv.code}/${year}/${month}/${reorderId}.xlsx`;
 
-  await uploadResult(
-    `${basePath}/riordino.xlsx`,
-    xlsx,
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-  );
+  const { error: uploadErr } = await supabaseAdmin.storage
+    .from("reorders")
+    .upload(exportPath, xlsx, {
+      contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      upsert: false,
+    });
+
+  if (uploadErr) {
+    console.error("[TAB start] upload error:", uploadErr);
+    return NextResponse.json({ ok: false, error: "Errore upload Excel" }, { status: 500 });
+  }
+
+  const { error: insertErr } = await supabaseAdmin.from("reorders").insert({
+    id: reorderId,
+    created_by_username: session.username,
+    created_by_role: session.role,
+
+    // ✅ PV vero
+    pv_id: pv.id,
+    pv_label: pvLabel,
+
+    type: "TAB",
+    weeks,
+    export_path: exportPath,
+    tot_rows: rows.length,
+  });
+
+  if (insertErr) {
+    console.error("[TAB start] insert error:", insertErr);
+    return NextResponse.json({ ok: false, error: "Errore salvataggio storico" }, { status: 500 });
+  }
 
   return NextResponse.json({
     ok: true,
-    jobId,
+    reorderId,
     preview: rows.slice(0, 20),
     totalRows: rows.length,
-
-    // opzionale ma utile: ti torna indietro il periodo usato (così lo mostri in UI senza dubbi)
     weeks,
+    downloadUrl: `/api/reorder/history/${reorderId}/excel`,
   });
 }
+
+
+
+
 
 

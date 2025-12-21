@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 function n0(v: any): number {
   const n = Number(v);
@@ -8,7 +8,6 @@ function n0(v: any): number {
 }
 
 function eur(v: any): string {
-  // formato euro UI: "€ 12.34"
   return `€ ${n0(v).toFixed(2)}`;
 }
 
@@ -23,15 +22,44 @@ type PreviewRowGV = {
   valoreDaOrdinare: number | null;
 };
 
+type PV = {
+  id: string;
+  code: string;
+  name: string;
+};
+
 export default function OrderGVPage() {
   const [file, setFile] = useState<File | null>(null);
   const [weeks, setWeeks] = useState<number>(4);
 
+  // ✅ PV
+  const [pvs, setPvs] = useState<PV[]>([]);
+  const [pvId, setPvId] = useState<string>("");
+
   const [loading, setLoading] = useState(false);
-  const [jobId, setJobId] = useState<string | null>(null);
+  const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [preview, setPreview] = useState<PreviewRowGV[]>([]);
   const [totalRows, setTotalRows] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
+
+  // ✅ carica PV al mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/api/pvs/list");
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.ok) return;
+
+        const rows: PV[] = json.rows || [];
+        setPvs(rows);
+
+        if (!pvId && rows.length > 0) setPvId(rows[0].id);
+      } catch {
+        // silenzioso
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    })();
+  }, []);
 
   async function startProcess(e: React.FormEvent) {
     e.preventDefault();
@@ -39,14 +67,17 @@ export default function OrderGVPage() {
 
     setLoading(true);
     setError(null);
-    setJobId(null);
+    setDownloadUrl(null);
     setPreview([]);
     setTotalRows(0);
 
     try {
+      if (!pvId) throw new Error("Seleziona un Punto vendita");
+
       const fd = new FormData();
       fd.append("file", file);
       fd.append("weeks", String(weeks));
+      fd.append("pvId", pvId); // ✅ NEW
 
       const res = await fetch("/api/reorder/gv/start", { method: "POST", body: fd });
       const text = await res.text();
@@ -55,7 +86,7 @@ export default function OrderGVPage() {
       try {
         json = text ? JSON.parse(text) : null;
       } catch {
-        // non è JSON (probabilmente HTML di errore)
+        // non è JSON
       }
 
       if (!res.ok || !json?.ok) {
@@ -65,7 +96,7 @@ export default function OrderGVPage() {
         throw new Error(msg);
       }
 
-      setJobId(json.jobId);
+      setDownloadUrl(json.downloadUrl || null);
       setPreview(json.preview || []);
       setTotalRows(json.totalRows || 0);
     } catch (err: any) {
@@ -76,8 +107,8 @@ export default function OrderGVPage() {
   }
 
   function downloadExcel() {
-    if (!jobId) return;
-    window.location.href = `/api/reorder/gv/excel?jobId=${encodeURIComponent(jobId)}`;
+    if (!downloadUrl) return;
+    window.location.href = downloadUrl;
   }
 
   return (
@@ -85,12 +116,39 @@ export default function OrderGVPage() {
       <div>
         <h1 className="text-2xl font-semibold text-slate-900">Calcolo Riordino Gratta &amp; Vinci</h1>
         <p className="text-slate-600 mt-1">
-          Carica l’Excel G&amp;V, scegli il periodo, controlla l’anteprima, poi scarica il file compilato.
+          Seleziona il Punto vendita, carica l’Excel G&amp;V, scegli il periodo, controlla l’anteprima,
+          poi scarica il file compilato.
         </p>
       </div>
 
       <form onSubmit={startProcess} className="space-y-4">
         <div className="rounded-2xl border bg-white p-4 space-y-4">
+          {/* ✅ PV dropdown */}
+          <div>
+            <label className="block text-sm font-medium mb-2">Punto vendita</label>
+            <select
+              className="w-full rounded-xl border p-3 bg-white"
+              value={pvId}
+              onChange={(e) => setPvId(e.target.value)}
+              disabled={pvs.length === 0}
+            >
+              {pvs.length === 0 ? (
+                <option value="">Nessun PV disponibile (crealo in Admin)</option>
+              ) : (
+                pvs.map((pv) => (
+                  <option key={pv.id} value={pv.id}>
+                    {pv.code} - {pv.name}
+                  </option>
+                ))
+              )}
+            </select>
+            {pvs.length === 0 && (
+              <p className="text-xs text-gray-500 mt-1">
+                Vai in Admin → “Crea PV”, poi torna qui.
+              </p>
+            )}
+          </div>
+
           <div>
             <label className="block text-sm font-medium mb-2">File Excel G&amp;V (.xlsx)</label>
             <input
@@ -122,7 +180,8 @@ export default function OrderGVPage() {
 
         <button
           className="w-full rounded-xl bg-orange-500 text-white p-3 hover:bg-orange-600 disabled:opacity-60"
-          disabled={!file || loading}
+          disabled={!file || loading || !pvId}
+          title={!pvId ? "Seleziona un Punto vendita" : undefined}
         >
           {loading ? "Elaborazione..." : "Genera anteprima"}
         </button>
@@ -130,7 +189,7 @@ export default function OrderGVPage() {
         {error && <p className="text-sm text-red-600">{error}</p>}
       </form>
 
-      {jobId && (
+      {downloadUrl && (
         <div className="space-y-3">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
             <p className="text-gray-700">
@@ -151,11 +210,11 @@ export default function OrderGVPage() {
                   <th className="text-left p-3">Cod. Articolo</th>
                   <th className="text-left p-3">Descrizione</th>
                   <th className="text-left p-3">Qtà Venduta</th>
-                  <th className="text-left p-3">Valore Venduto</th>
+                  <th className="text-left p-3">Valore Venduto (€)</th>
                   <th className="text-left p-3">Giacenza BAR</th>
                   <th className="text-left p-3">Qtà da ordinare BAR</th>
                   <th className="text-left p-3">Qtà Conf.</th>
-                  <th className="text-left p-3">VALORE DA ORDINARE</th>
+                  <th className="text-left p-3">Valore da ordinare (€)</th>
                 </tr>
               </thead>
 
@@ -164,11 +223,9 @@ export default function OrderGVPage() {
                   <tr key={i} className="border-t">
                     <td className="p-3">{r.codArticolo || ""}</td>
                     <td className="p-3">{r.descrizione || ""}</td>
-
                     <td className="p-3">{n0(r.qtaVenduta)}</td>
                     <td className="p-3">{eur(r.valoreVenduto)}</td>
                     <td className="p-3">{n0(r.giacenzaBar)}</td>
-
                     <td className="p-3 font-medium">{n0(r.qtaOrdineBar)}</td>
                     <td className="p-3">{n0(r.qtaConf)}</td>
                     <td className="p-3 font-medium">{eur(r.valoreDaOrdinare)}</td>
@@ -180,7 +237,7 @@ export default function OrderGVPage() {
                     <td className="p-3 text-gray-500" colSpan={8}>
                       Nessuna riga da mostrare
                     </td>
-                  </tr>
+                    </tr>
                 )}
               </tbody>
             </table>
@@ -190,4 +247,6 @@ export default function OrderGVPage() {
     </div>
   );
 }
+
+
 
