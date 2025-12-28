@@ -4,13 +4,23 @@ import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { processReorderGVExcel } from "@/lib/excel/reorder_gv";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-function sanitizeWeeks(v: unknown): number {
+// ✅ days libero con limiti 1..21
+function sanitizeDays(v: unknown): number {
   const n = Number(v);
-  if (!Number.isFinite(n)) return 4;
-  const wi = Math.trunc(n);
-  if (wi < 1) return 1;
-  if (wi > 4) return 4;
-  return wi;
+  if (!Number.isFinite(n)) return 7; // default 7 giorni
+  const di = Math.trunc(n);
+  if (di < 1) return 1;
+  if (di > 21) return 21;
+  return di;
+}
+
+// ✅ per compatibilità DB: weeks sempre INTEGER
+function weeksFromDays(days: number): number {
+  const w = Math.ceil(days / 7);
+  // se vuoi tenere un range “sensato”:
+  if (w < 1) return 1;
+  if (w > 4) return 4;
+  return w;
 }
 
 export async function POST(req: Request) {
@@ -32,7 +42,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "File mancante" }, { status: 400 });
     }
 
-    // ✅ NEW: pvId obbligatorio
+    // ✅ pvId obbligatorio
     const pvId = String(formData.get("pvId") ?? "").trim();
     if (!pvId) {
       return NextResponse.json({ ok: false, error: "Punto vendita mancante" }, { status: 400 });
@@ -51,10 +61,14 @@ export async function POST(req: Request) {
 
     const pvLabel = `${pv.code} - ${pv.name}`;
 
-    const weeks = sanitizeWeeks(formData.get("weeks"));
+    // ✅ NEW: days (1..21)
+    const days = sanitizeDays(formData.get("days"));
+    const weeks = weeksFromDays(days); // ✅ sempre intero per DB
+
     const input = await file.arrayBuffer();
 
-    const { xlsx, rows } = await processReorderGVExcel(input, weeks);
+    // ✅ processReorderGVExcel riceve days
+    const { xlsx, rows } = await processReorderGVExcel(input, days);
 
     const reorderId = crypto.randomUUID();
     const now = new Date();
@@ -80,20 +94,20 @@ export async function POST(req: Request) {
       id: reorderId,
       created_by_username: session.username,
       created_by_role: session.role,
-
-      // ✅ PV vero
       pv_id: pv.id,
       pv_label: pvLabel,
-
       type: "GV",
-      weeks,
+      weeks, // ✅ INTEGER compatibile
       export_path: exportPath,
       tot_rows: rows.length,
     });
 
     if (insertErr) {
       console.error("[GV start] insert error:", insertErr);
-      return NextResponse.json({ ok: false, error: "Errore salvataggio storico" }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: `Errore salvataggio storico: ${insertErr.message}` },
+        { status: 500 }
+      );
     }
 
     return NextResponse.json({
@@ -101,17 +115,17 @@ export async function POST(req: Request) {
       reorderId,
       preview: rows.slice(0, 20),
       totalRows: rows.length,
-      weeks,
+      days,   // ✅ lo usi in UI
+      weeks,  // ✅ per storico/DB (intero)
       downloadUrl: `/api/reorder/history/${reorderId}/excel`,
     });
   } catch (err: any) {
     console.error("[GV start] ERROR:", err);
-    return NextResponse.json(
-      { ok: false, error: err?.message || "Errore interno" },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: err?.message || "Errore interno" }, { status: 500 });
   }
 }
+
+
 
 
 

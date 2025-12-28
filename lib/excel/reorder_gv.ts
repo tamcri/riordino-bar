@@ -29,7 +29,6 @@ function cellValueToString(v: any): string {
 }
 
 function getCellText(cell: ExcelJS.Cell): string {
-  // Non usare cell.text direttamente: su celle merge con valore null ExcelJS può crashare.
   const pick = (v: any): string => {
     if (v == null) return "";
     if (typeof v === "string") return v.trim();
@@ -37,21 +36,18 @@ function getCellText(cell: ExcelJS.Cell): string {
     if (typeof v === "boolean") return v ? "TRUE" : "FALSE";
 
     if (typeof v === "object") {
-      if (typeof v.text === "string") return v.text.trim(); // RichText / Hyperlink
+      if (typeof v.text === "string") return v.text.trim();
       if (Array.isArray(v.richText)) {
         return v.richText.map((x: any) => (x?.text ? String(x.text) : "")).join("").trim();
       }
-      if (typeof v.result === "string") return v.result.trim(); // Formula
+      if (typeof v.result === "string") return v.result.trim();
       if (typeof v.result === "number") return String(v.result);
     }
-
     return "";
   };
 
-  // 1) prova cell.value (safe)
   let s = pick(cell.value);
 
-  // 2) se è merged e vuota, prova il master
   if (!s) {
     const anyCell = cell as any;
     if (anyCell?.isMerged && anyCell?.master) {
@@ -59,19 +55,17 @@ function getCellText(cell: ExcelJS.Cell): string {
     }
   }
 
-  // 3) ultima spiaggia: prova cell.text ma protetto da try/catch
   if (!s) {
     try {
       const t = (cell as any).text;
       if (typeof t === "string") s = t.trim();
     } catch {
-      // ignora: ExcelJS può crashare su MergeValue.toString con valore null
+      // ignore
     }
   }
 
   return s;
 }
-
 
 function toNumber(v: any): number {
   if (v == null) return 0;
@@ -126,7 +120,6 @@ function findHeaderRow(ws: ExcelJS.Worksheet): number {
 
     const joined = parts.join(" | ");
 
-    // euristica: deve contenere le colonne chiave del template G&V
     if (
       joined.includes("cod") &&
       joined.includes("articolo") &&
@@ -241,19 +234,16 @@ async function buildCleanWorkbook(pvLabel: string, rows: PreviewRowGV[]): Promis
       row.valoreDaOrdinare,
     ];
 
-    // formati
     ws.getCell(r, 3).numFmt = "0";
-    ws.getCell(r, 4).numFmt = '€ #,##0.00';
+    ws.getCell(r, 4).numFmt = "€ #,##0.00";
     ws.getCell(r, 5).numFmt = "0";
     ws.getCell(r, 6).numFmt = "0";
     ws.getCell(r, 7).numFmt = "0";
-    ws.getCell(r, 8).numFmt = '€ #,##0.00';
-
+    ws.getCell(r, 8).numFmt = "€ #,##0.00";
 
     r++;
   }
 
-  // totali
   const totalRow = r + 1;
   ws.getCell(totalRow, 2).value = "TOTALI";
   ws.getRow(totalRow).font = { bold: true };
@@ -268,10 +258,9 @@ async function buildCleanWorkbook(pvLabel: string, rows: PreviewRowGV[]): Promis
   ws.getCell(totalRow, 7).value = { formula: `SUM(G${start}:G${end})` };
   ws.getCell(totalRow, 8).value = { formula: `SUM(H${start}:H${end})` };
 
-  ws.getCell(totalRow, 4).numFmt = '€ #,##0.00';
-  ws.getCell(totalRow, 8).numFmt = '€ #,##0.00';
+  ws.getCell(totalRow, 4).numFmt = "€ #,##0.00";
+  ws.getCell(totalRow, 8).numFmt = "€ #,##0.00";
 
-  // bordi
   const last = totalRow;
   for (let rr = headerRow; rr <= last; rr++) {
     for (let cc = 1; cc <= 8; cc++) {
@@ -292,9 +281,19 @@ async function buildCleanWorkbook(pvLabel: string, rows: PreviewRowGV[]): Promis
 
 export async function processReorderGVExcel(
   input: ArrayBuffer,
-  weeks: number = 4
+  days: number = 7
 ): Promise<{ xlsx: Buffer; rows: PreviewRowGV[] }> {
-  const w = Math.max(1, Math.min(4, Math.trunc(Number(weeks) || 4)));
+  // giorni selezionabili: 1..7 (default 7 = 1 settimana)
+  const d = Math.max(1, Math.min(7, Math.trunc(Number(days) || 7)));
+
+  // ✅ LEAD TIME G&V: consegna il giorno dopo
+  const leadTimeDays = 1;
+
+  // giorni effettivi da coprire
+  const effectiveDays = d + leadTimeDays;
+
+  // qtaVenduta è settimanale → convertiamo in settimane
+  const effectiveWeeks = effectiveDays / 7;
 
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(input);
@@ -317,7 +316,6 @@ export async function processReorderGVExcel(
   const idxValVend = findColIndexOnRow(ws, headerRow, (h) => h.includes("valore") && h.includes("venduto"));
   const idxGiacBar = findColIndexOnRow(ws, headerRow, (h) => h.includes("giacenza") && h.includes("bar"));
 
-  // FATTCONV può stare in riga diversa/merged → cerchiamo in range attorno all’header
   const idxFattconv = findColIndexInRowRange(ws, headerRow - 12, headerRow + 2, (h) => {
     const compact = h.replace(/[^a-z0-9]/g, "");
     return compact.includes("fattconv") || compact.includes("fattcon");
@@ -346,12 +344,10 @@ export async function processReorderGVExcel(
     const giacenzaBar = toNumber(row.getCell(idxGiacBar).value);
     const fattconv = Math.floor(toNumber(row.getCell(idxFattconv).value));
 
-    // filtri righe non-articolo
     const codNorm = normalize(codArticolo);
     const descrNorm = normalize(descrizione);
 
     if (!codArticolo && !descrizione) continue;
-
     if (codNorm.includes("cod") && codNorm.includes("articolo")) continue;
 
     if (
@@ -363,11 +359,10 @@ export async function processReorderGVExcel(
       continue;
     }
 
-    // Se non sembra un codice articolo e non ci sono numeri, scarta
     if (!codArticolo && qtaVenduta === 0 && giacenzaBar === 0) continue;
 
-    // ✅ LOGICA CORRETTA: Qtà Venduta è PER SETTIMANA → domanda = venduta * weeks
-    const domandaPeriodo = qtaVenduta * w;
+    // ✅ DOMANDA: venduto settimanale * settimane equivalenti ai giorni richiesti (+ lead time)
+    const domandaPeriodo = qtaVenduta * effectiveWeeks;
 
     const qtaTeorica = Math.max(0, Math.ceil(domandaPeriodo - giacenzaBar));
 
@@ -378,7 +373,6 @@ export async function processReorderGVExcel(
       qtaConf = Math.ceil(qtaTeorica / fattconv);
       qtaOrdineBar = qtaConf * fattconv;
     } else if (qtaTeorica > 0 && fattconv <= 0) {
-      // fallback raro
       qtaConf = 0;
       qtaOrdineBar = qtaTeorica;
     }
@@ -388,22 +382,23 @@ export async function processReorderGVExcel(
       qtaOrdineBar > 0 && unitValue > 0 ? round2(unitValue * qtaOrdineBar) : 0;
 
     rows.push({
-  codArticolo,
-  descrizione,
-  qtaVenduta: Number(qtaVenduta) || 0,
-  valoreVenduto: Number(valoreVenduto) || 0,
-  giacenzaBar: Number(giacenzaBar) || 0,
-  fattconv: Number(fattconv) || 0,
-  qtaOrdineBar: Number(qtaOrdineBar) || 0,
-  qtaConf: Number(qtaConf) || 0,
-  valoreDaOrdinare: Number(valoreDaOrdinare) || 0,
-});
-
+      codArticolo,
+      descrizione,
+      qtaVenduta: Number(qtaVenduta) || 0,
+      valoreVenduto: Number(valoreVenduto) || 0,
+      giacenzaBar: Number(giacenzaBar) || 0,
+      fattconv: Number(fattconv) || 0,
+      qtaOrdineBar: Number(qtaOrdineBar) || 0,
+      qtaConf: Number(qtaConf) || 0,
+      valoreDaOrdinare: Number(valoreDaOrdinare) || 0,
+    });
   }
 
   const xlsx = await buildCleanWorkbook(pvLabel, rows);
   return { xlsx, rows };
 }
+
+
 
 
 

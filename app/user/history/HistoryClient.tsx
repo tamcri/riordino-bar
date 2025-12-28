@@ -10,7 +10,14 @@ type Row = {
   pv_label: string;
   pv_id: string | null;
   type: "TAB" | "GV";
+
+  // ✅ weeks già c’è
   weeks: number;
+
+  // ✅ NEW: se hai aggiunto days in tabella, lo mostriamo.
+  // Se non esiste ancora a DB/endpoint, non rompe nulla.
+  days?: number | null;
+
   tot_rows: number | null;
   tot_order_qty: number | null;
   tot_weight_kg: number | null;
@@ -87,6 +94,12 @@ export default function HistoryClient() {
     setPvId("");
     setFrom("");
     setTo("");
+  }
+
+  function periodoLabel(r: Row) {
+    const d = Number(r.days);
+    if (Number.isFinite(d) && d > 0) return `${d} giorno/i`;
+    return `${r.weeks} sett.`;
   }
 
   return (
@@ -177,10 +190,15 @@ export default function HistoryClient() {
               <th className="text-left p-3">Data</th>
               <th className="text-left p-3">PV</th>
               <th className="text-left p-3">Tipo</th>
-              <th className="text-left p-3">Settimane</th>
+
+              {/* ✅ al posto di “Settimane” mostriamo Periodo */}
+              <th className="text-left p-3">Periodo</th>
+
               <th className="text-left p-3">Utente</th>
               <th className="text-left p-3">Righe</th>
-              <th className="text-left p-3"></th>
+
+              {/* ✅ azioni */}
+              <th className="text-left p-3">Azioni</th>
             </tr>
           </thead>
 
@@ -201,28 +219,75 @@ export default function HistoryClient() {
               </tr>
             )}
 
-            {rows.map((r) => (
-              <tr key={r.id} className="border-t">
-                <td className="p-3">{fmtDate(r.created_at)}</td>
-                <td className="p-3">{r.pv_label || "-"}</td>
-                <td className="p-3 font-medium">{r.type}</td>
-                <td className="p-3">{r.weeks}</td>
-                <td className="p-3">{r.created_by_username || "-"}</td>
-                <td className="p-3">{r.tot_rows ?? "-"}</td>
-                <td className="p-3">
-                  <a
-                    className="inline-flex items-center rounded-xl bg-orange-500 text-white px-3 py-2 hover:bg-orange-600"
-                    href={`/api/reorder/history/${encodeURIComponent(r.id)}/excel`}
-                  >
-                    Scarica
-                  </a>
-                </td>
-              </tr>
-            ))}
+            {rows.map((r) => {
+              const isTAB = r.type === "TAB";
+              const id = encodeURIComponent(r.id);
+
+              return (
+                <tr key={r.id} className="border-t">
+                  <td className="p-3">{fmtDate(r.created_at)}</td>
+                  <td className="p-3">{r.pv_label || "-"}</td>
+                  <td className="p-3 font-medium">{r.type}</td>
+
+                  <td className="p-3">{periodoLabel(r)}</td>
+
+                  <td className="p-3">{r.created_by_username || "-"}</td>
+                  <td className="p-3">{r.tot_rows ?? "-"}</td>
+
+                  <td className="p-3">
+                    <div className="flex flex-wrap gap-2">
+                      {/* Excel */}
+                      <a
+                        className="inline-flex items-center rounded-xl bg-orange-500 text-white px-3 py-2 hover:bg-orange-600"
+                        href={`/api/reorder/history/${id}/excel`}
+                      >
+                        Excel
+                      </a>
+
+                      {/* ✅ U88 solo TAB */}
+                      <a
+                        className={`inline-flex items-center rounded-xl px-3 py-2 ${
+                          isTAB
+                            ? "bg-blue-600 text-white hover:bg-blue-700"
+                            : "bg-gray-200 text-gray-500 pointer-events-none"
+                        }`}
+                        href={isTAB ? `/api/reorder/history/${id}/u88` : undefined}
+                        title={isTAB ? "Scarica U88 compilato" : "U88 disponibile solo per TAB"}
+                      >
+                        U88
+                      </a>
+                       {/* Order Tab (Excel compilato) - solo TAB */}
+<a
+  className={`inline-flex items-center rounded-xl px-3 py-2 ${
+    isTAB
+      ? "bg-emerald-600 text-white hover:bg-emerald-700"
+      : "bg-gray-200 text-gray-500 pointer-events-none"
+  }`}
+  href={isTAB ? `/api/reorder/history/${id}/order-tab` : undefined}
+  title={isTAB ? "Scarica Order Tab compilato" : "Order Tab disponibile solo per TAB"}
+>
+  Log
+</a>
+ {/* Log */}
+<a
+  className="inline-flex items-center rounded-xl bg-slate-700 text-white px-3 py-2 hover:bg-slate-800"
+  href={`/api/reorder/history/${id}/log`}
+>
+  Json
+</a>
+
+
+
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
     </div>
   );
 }
+
 

@@ -31,8 +31,9 @@ export async function GET(req: Request) {
   let q = supabaseAdmin
     .from("reorders")
     .select(
-      "id, created_at, created_by_username, created_by_role, pv_label, pv_id, type, weeks, tot_rows, tot_order_qty, tot_weight_kg, tot_value_eur"
-    )
+  "id, created_at, created_by_username, created_by_role, pv_label, pv_id, type, weeks, days, tot_rows, tot_order_qty, tot_weight_kg, tot_value_eur"
+)
+
     .order("created_at", { ascending: false })
     .limit(500);
 

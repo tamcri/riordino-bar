@@ -30,7 +30,9 @@ type PV = {
 
 export default function OrderGVPage() {
   const [file, setFile] = useState<File | null>(null);
-  const [weeks, setWeeks] = useState<number>(4);
+
+  // ✅ NEW: giorni liberi (1..21)
+  const [days, setDays] = useState<number>(7);
 
   // ✅ PV
   const [pvs, setPvs] = useState<PV[]>([]);
@@ -61,6 +63,14 @@ export default function OrderGVPage() {
     })();
   }, []);
 
+  function clampDays(v: number) {
+    if (!Number.isFinite(v)) return 7;
+    const n = Math.trunc(v);
+    if (n < 1) return 1;
+    if (n > 21) return 21;
+    return n;
+  }
+
   async function startProcess(e: React.FormEvent) {
     e.preventDefault();
     if (!file) return;
@@ -76,8 +86,10 @@ export default function OrderGVPage() {
 
       const fd = new FormData();
       fd.append("file", file);
-      fd.append("weeks", String(weeks));
-      fd.append("pvId", pvId); // ✅ NEW
+      fd.append("pvId", pvId);
+
+      // ✅ NEW: days
+      fd.append("days", String(clampDays(days)));
 
       const res = await fetch("/api/reorder/gv/start", { method: "POST", body: fd });
       const text = await res.text();
@@ -99,6 +111,9 @@ export default function OrderGVPage() {
       setDownloadUrl(json.downloadUrl || null);
       setPreview(json.preview || []);
       setTotalRows(json.totalRows || 0);
+
+      // se il server ritorna days, riallineo (evita valori fuori range)
+      if (typeof json.days === "number") setDays(clampDays(json.days));
     } catch (err: any) {
       setError(err.message || "Errore");
     } finally {
@@ -116,7 +131,7 @@ export default function OrderGVPage() {
       <div>
         <h1 className="text-2xl font-semibold text-slate-900">Calcolo Riordino Gratta &amp; Vinci</h1>
         <p className="text-slate-600 mt-1">
-          Seleziona il Punto vendita, carica l’Excel G&amp;V, scegli il periodo, controlla l’anteprima,
+          Seleziona il Punto vendita, carica l’Excel G&amp;V, imposta i giorni di copertura, controlla l’anteprima,
           poi scarica il file compilato.
         </p>
       </div>
@@ -143,19 +158,13 @@ export default function OrderGVPage() {
               )}
             </select>
             {pvs.length === 0 && (
-              <p className="text-xs text-gray-500 mt-1">
-                Vai in Admin → “Crea PV”, poi torna qui.
-              </p>
+              <p className="text-xs text-gray-500 mt-1">Vai in Admin → “Crea PV”, poi torna qui.</p>
             )}
           </div>
 
           <div>
             <label className="block text-sm font-medium mb-2">File Excel G&amp;V (.xlsx)</label>
-            <input
-              type="file"
-              accept=".xlsx"
-              onChange={(e) => setFile(e.target.files?.[0] || null)}
-            />
+            <input type="file" accept=".xlsx" onChange={(e) => setFile(e.target.files?.[0] || null)} />
             {file && (
               <p className="text-sm text-gray-600 mt-2">
                 Selezionato: <b>{file.name}</b>
@@ -163,19 +172,24 @@ export default function OrderGVPage() {
             )}
           </div>
 
+          {/* ✅ NEW: giorni liberi */}
           <div className="flex flex-col sm:flex-row sm:items-center gap-3">
-            <label className="block text-sm font-medium min-w-[180px]">Periodo di calcolo</label>
-            <select
+            <label className="block text-sm font-medium min-w-[180px]">Periodo di calcolo (giorni)</label>
+
+            <input
+              type="number"
+              min={1}
+              max={21}
+              step={1}
               className="rounded-xl border p-3 w-full sm:w-[260px]"
-              value={weeks}
-              onChange={(e) => setWeeks(Number(e.target.value))}
-            >
-              <option value={1}>1 Settimana</option>
-              <option value={2}>2 Settimane</option>
-              <option value={3}>3 Settimane</option>
-              <option value={4}>4 Settimane</option>
-            </select>
+              value={days}
+              onChange={(e) => setDays(clampDays(Number(e.target.value)))}
+            />
           </div>
+
+          <p className="text-xs text-gray-500">
+            Nota: per G&amp;V consideriamo anche <b>+1 giorno</b> di consegna (ordine entro le 11, arriva il giorno dopo).
+          </p>
         </div>
 
         <button
@@ -195,10 +209,7 @@ export default function OrderGVPage() {
             <p className="text-gray-700">
               Anteprima pronta. Righe elaborate: <b>{totalRows}</b> (mostro le prime 20)
             </p>
-            <button
-              onClick={downloadExcel}
-              className="rounded-xl bg-slate-900 text-white px-4 py-2"
-            >
+            <button onClick={downloadExcel} className="rounded-xl bg-slate-900 text-white px-4 py-2">
               Scarica Excel
             </button>
           </div>
@@ -237,7 +248,7 @@ export default function OrderGVPage() {
                     <td className="p-3 text-gray-500" colSpan={8}>
                       Nessuna riga da mostrare
                     </td>
-                    </tr>
+                  </tr>
                 )}
               </tbody>
             </table>
@@ -247,6 +258,7 @@ export default function OrderGVPage() {
     </div>
   );
 }
+
 
 
 

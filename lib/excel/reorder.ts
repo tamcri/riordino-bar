@@ -81,26 +81,31 @@ function findColumnIndex(headers: string[], candidates: string[]) {
   return -1;
 }
 
+function round2(n: number) {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
 /* -------------------- types -------------------- */
 
 export type PreviewRow = {
   codArticolo: string;
   descrizione: string;
   qtaVenduta: number;
+  valoreVenduto: number;      // ✅ serve per calcolare il valore da ordinare
   giacenza: number;
   qtaOrdine: number;
-  pesoKg: number; // per anteprima (come già avevi)
+  valoreDaOrdinare: number;   // ✅ NEW colonna
+  pesoKg: number;
 };
 
 /* -------------------- export pulito -------------------- */
 
 async function buildCleanWorkbook(pvLabel: string, rows: PreviewRow[]): Promise<Buffer> {
-
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet("RIORDINO TAB");
 
-  // PV label in A1 (senza colonna vuota)
-  ws.mergeCells("A1:F1");
+  // ✅ ora sono 7 colonne: A..G
+  ws.mergeCells("A1:G1");
   ws.getCell("A1").value = pvLabel;
   ws.getCell("A1").font = { bold: true, size: 14 };
   ws.getCell("A1").alignment = { vertical: "middle", horizontal: "left" };
@@ -113,7 +118,8 @@ async function buildCleanWorkbook(pvLabel: string, rows: PreviewRow[]): Promise<
     "Qtà Venduta",
     "Giacenza",
     "Qtà da ordinare",
-    "Qtà in peso (kg)", // ✅ in chilogrammi nel file scaricato
+    "Valore da ordinare",   // ✅ NEW
+    "Qtà in peso (kg)",
   ];
 
   ws.getRow(headerRow).values = headers;
@@ -124,32 +130,30 @@ async function buildCleanWorkbook(pvLabel: string, rows: PreviewRow[]): Promise<
   ws.getColumn(3).width = 14;
   ws.getColumn(4).width = 12;
   ws.getColumn(5).width = 16;
-  ws.getColumn(6).width = 12;
+  ws.getColumn(6).width = 18;
+  ws.getColumn(7).width = 12;
 
   let r = headerRow + 1;
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
 
-    // 10 pezzi = 200g => 1 pezzo = 20g
-    const pesoG = Math.round(row.qtaOrdine * 20);
-
     ws.getRow(r).values = [
-  row.codArticolo,
-  row.descrizione,
-  row.qtaVenduta,
-  row.giacenza,
-  row.qtaOrdine,
-  row.pesoKg,
-];
+      row.codArticolo,
+      row.descrizione,
+      row.qtaVenduta,
+      row.giacenza,
+      row.qtaOrdine,
+      row.valoreDaOrdinare,
+      row.pesoKg,
+    ];
 
-
-    // formati numerici
+    // formati
     ws.getCell(r, 3).numFmt = "0";
     ws.getCell(r, 4).numFmt = "0";
     ws.getCell(r, 5).numFmt = "0";
-    ws.getCell(r, 6).numFmt = "0.0";
-
+    ws.getCell(r, 6).numFmt = '€ #,##0.00';
+    ws.getCell(r, 7).numFmt = "0.0";
 
     r++;
   }
@@ -166,14 +170,15 @@ async function buildCleanWorkbook(pvLabel: string, rows: PreviewRow[]): Promise<
   ws.getCell(totalRow, 4).value = { formula: `SUM(D${start}:D${end})` };
   ws.getCell(totalRow, 5).value = { formula: `SUM(E${start}:E${end})` };
   ws.getCell(totalRow, 6).value = { formula: `SUM(F${start}:F${end})` };
+  ws.getCell(totalRow, 7).value = { formula: `SUM(G${start}:G${end})` };
 
-  ws.getCell(totalRow, 6).numFmt = "0.0";
-
+  ws.getCell(totalRow, 6).numFmt = '€ #,##0.00';
+  ws.getCell(totalRow, 7).numFmt = "0.0";
 
   // bordi
   const last = totalRow;
   for (let rr = headerRow; rr <= last; rr++) {
-    for (let cc = 1; cc <= 6; cc++) {
+    for (let cc = 1; cc <= 7; cc++) {
       ws.getCell(rr, cc).border = {
         top: { style: "thin" },
         left: { style: "thin" },
@@ -190,7 +195,9 @@ async function buildCleanWorkbook(pvLabel: string, rows: PreviewRow[]): Promise<
 /* -------------------- main -------------------- */
 
 export async function processReorderExcel(
-  input: ArrayBuffer
+  input: ArrayBuffer,
+  weeks: number = 4,
+  days?: number | null
 ): Promise<{ xlsx: Buffer; rows: PreviewRow[] }> {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(input);
@@ -233,6 +240,15 @@ export async function processReorderExcel(
   const idxVend = findColumnIndex(headers, ["qta venduta", "qtà venduta", "venduta", "vendite"]);
   const idxGiac = findColumnIndex(headers, ["giacenza bar", "giacenza", "giacenze"]);
 
+  // ✅ opzionale: valore venduto (se non c’è, non crashiamo)
+  const idxValVend = findColumnIndex(headers, [
+    "valore venduto",
+    "importo venduto",
+    "val venduto",
+    "valore",
+    "importo",
+  ]);
+
   if (idxCod === -1) throw new Error("Colonna 'Cod. Articolo' non trovata.");
   if (idxDesc === -1) throw new Error("Colonna 'Descrizione' non trovata.");
   if (idxVend === -1) throw new Error("Colonna 'Qtà Venduta' non trovata.");
@@ -242,6 +258,16 @@ export async function processReorderExcel(
   const cDesc = idxDesc + 1;
   const cVend = idxVend + 1;
   const cGiac = idxGiac + 1;
+  const cValVend = idxValVend !== -1 ? idxValVend + 1 : -1;
+
+  // ✅ periodo effettivo:
+  // - se days è valido: settimane equivalenti = days / 7 (es. 18 giorni = 2.57 settimane)
+  // - altrimenti usa weeks (1..4)
+  const wWeeks = Number.isFinite(weeks) ? Math.max(1, Math.min(4, Math.trunc(weeks))) : 4;
+  const wEq =
+    typeof days === "number" && Number.isFinite(days) && days > 0
+      ? Math.max(1 / 7, Math.min(21 / 7, days / 7))
+      : wWeeks;
 
   const rows: PreviewRow[] = [];
 
@@ -253,35 +279,47 @@ export async function processReorderExcel(
     const qtaVenduta = cellToNumber(row.getCell(cVend).value);
     const giacenza = cellToNumber(row.getCell(cGiac).value);
 
+    const valoreVenduto = cValVend !== -1 ? cellToNumber(row.getCell(cValVend).value) : 0;
+
     const codNorm = normalize(codArticolo);
     const descNorm = normalize(descrizione);
 
     // filtri righe spazzatura
     if (!codArticolo && !descrizione) return;
 
-    // "pagina 13 di 13"
-    if ((codNorm.includes("pagina") || descNorm.includes("pagina")) && qtaVenduta === 0 && giacenza === 0) return;
+    if (
+      (codNorm.includes("pagina") || descNorm.includes("pagina")) &&
+      qtaVenduta === 0 &&
+      giacenza === 0
+    )
+      return;
 
-    // intestazioni ripetute dentro il file
     if (codNorm.includes("cod") && codNorm.includes("art")) return;
 
-    // molti export hanno righe non-articolo con descrizione vuota e numeri zero
     if (!codArticolo && qtaVenduta === 0 && giacenza === 0) return;
 
-    // LOGICA RIORDINO TAB: 4 settimane fisse (come prima)
-    const fabbisogno = qtaVenduta * 4;
-    const mancante = Math.max(0, fabbisogno - giacenza);
+    // ✅ fabbisogno con periodo variabile
+    const fabbisogno = qtaVenduta * wEq;
+
+    // ✅ ti serve arrotondare bene: prima calcolo mancante, poi a pacchi da 10
+    const mancante = Math.max(0, Math.ceil(fabbisogno - giacenza));
     const qtaOrdine = Math.ceil(mancante / 10) * 10;
 
-    // anteprima resta in kg come UI attuale (0.02 kg per pezzo)
+    // ✅ valore da ordinare
+    const unitValue = qtaVenduta > 0 ? valoreVenduto / qtaVenduta : 0;
+    const valoreDaOrdinare = qtaOrdine > 0 && unitValue > 0 ? round2(unitValue * qtaOrdine) : 0;
+
+    // peso in kg (0.02 kg per pezzo)
     const pesoKg = Number((qtaOrdine * 0.02).toFixed(1));
 
     rows.push({
       codArticolo,
       descrizione,
       qtaVenduta,
+      valoreVenduto,
       giacenza,
       qtaOrdine,
+      valoreDaOrdinare,
       pesoKg,
     });
   });
@@ -289,6 +327,11 @@ export async function processReorderExcel(
   const xlsx = await buildCleanWorkbook(pvLabel, rows);
   return { xlsx, rows };
 }
+
+
+
+
+
 
 
 
