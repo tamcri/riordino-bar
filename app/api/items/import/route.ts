@@ -14,24 +14,13 @@ function normDesc(v: any): string {
   return String(v ?? "").trim();
 }
 
-function findHeaderIndexes(rowVals: any[]) {
-  const cells = rowVals.map((v) => String(v ?? "").trim().toLowerCase());
-
-  const codeIdx = cells.findIndex((t) =>
-    ["cod", "codice", "codice articolo", "cod. articolo", "code", "articolo", "codarticolo"].some((k) =>
-      t.includes(k)
-    )
-  );
-
-  const descIdx = cells.findIndex((t) =>
-    ["descr", "descrizione", "description", "articolo descrizione"].some((k) => t.includes(k))
-  );
-
-  if (codeIdx >= 0 && descIdx >= 0 && codeIdx !== descIdx) return { codeIdx, descIdx };
-  return null;
+function isUuid(v: string | null) {
+  if (!v) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 }
 
-async function getExistingCodes(category: "TAB" | "GV", codes: string[]) {
+// ====== LEGACY (TAB/GV) ======
+async function getExistingCodesLegacy(category: "TAB" | "GV", codes: string[]) {
   const existing = new Set<string>();
   const chunkSize = 500;
 
@@ -51,136 +40,239 @@ async function getExistingCodes(category: "TAB" | "GV", codes: string[]) {
 }
 
 export async function POST(req: Request) {
-  const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
-  if (!session || session.role !== "admin") {
-    return NextResponse.json({ ok: false, error: "Solo admin può importare articoli" }, { status: 401 });
-  }
-
-  const formData = await req.formData();
-  const file = formData.get("file") as File | null;
-  const categoryRaw = String(formData.get("category") ?? "").toUpperCase();
-
-  if (!file) return NextResponse.json({ ok: false, error: "File mancante" }, { status: 400 });
-  if (!["TAB", "GV"].includes(categoryRaw)) {
-    return NextResponse.json({ ok: false, error: "Categoria non valida" }, { status: 400 });
-  }
-
-  const category = categoryRaw as "TAB" | "GV";
-  const input = await file.arrayBuffer();     // ✅ ArrayBuffer
-const buf = Buffer.from(input);             // ✅ Buffer (se ti serve per altro)
-
-
-  // 1) prova a leggere come Excel generico (header-based)
-  let extracted: { code: string; description: string }[] = [];
-
   try {
-    const wb = new ExcelJS.Workbook();
-    await wb.xlsx.load(input);
+    const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
+    if (!session || session.role !== "admin") {
+      return NextResponse.json({ ok: false, error: "Solo admin può importare articoli" }, { status: 401 });
+    }
 
-    const ws = wb.worksheets[0];
-    if (ws) {
-      let header: { codeIdx: number; descIdx: number } | null = null;
+    const formData = await req.formData();
+    const file = formData.get("file") as File | null;
 
-      // trova riga header
-      for (let r = 1; r <= Math.min(ws.rowCount, 60); r++) {
-        const row = ws.getRow(r);
-        const vals = row.values as any[];
-        const found = findHeaderIndexes(vals);
-        if (found) {
-          header = found;
-          // dalla riga successiva prendo i dati
-          for (let rr = r + 1; rr <= ws.rowCount; rr++) {
+    // NEW
+    const category_id = String(formData.get("category_id") ?? "").trim() || null;
+    const subcategory_id = String(formData.get("subcategory_id") ?? "").trim() || null;
+
+    // LEGACY
+    const legacyCategoryRaw = String(formData.get("category") ?? "").toUpperCase().trim(); // TAB | GV
+
+    if (!file) return NextResponse.json({ ok: false, error: "File mancante" }, { status: 400 });
+
+    const useNew = isUuid(category_id);
+
+    if (!useNew) {
+      if (!["TAB", "GV"].includes(legacyCategoryRaw)) {
+        return NextResponse.json(
+          { ok: false, error: "Categoria non valida. Usa category_id (nuovo) oppure category=TAB|GV (legacy)." },
+          { status: 400 }
+        );
+      }
+    } else {
+      if (subcategory_id && !isUuid(subcategory_id)) {
+        return NextResponse.json({ ok: false, error: "subcategory_id non valido" }, { status: 400 });
+      }
+
+      // category_id deve esistere
+      const { data: catRow, error: catErr } = await supabaseAdmin
+        .from("categories")
+        .select("id")
+        .eq("id", category_id as string)
+        .maybeSingle();
+
+      if (catErr) return NextResponse.json({ ok: false, error: catErr.message }, { status: 500 });
+      if (!catRow) return NextResponse.json({ ok: false, error: "Categoria non trovata" }, { status: 400 });
+
+      // subcategory deve appartenere alla category
+      if (subcategory_id) {
+        const { data: subRow, error: subErr } = await supabaseAdmin
+          .from("subcategories")
+          .select("id, category_id")
+          .eq("id", subcategory_id)
+          .maybeSingle();
+
+        if (subErr) return NextResponse.json({ ok: false, error: subErr.message }, { status: 500 });
+        if (!subRow) return NextResponse.json({ ok: false, error: "Sottocategoria non trovata" }, { status: 400 });
+        if (subRow.category_id !== category_id) {
+          return NextResponse.json(
+            { ok: false, error: "La sottocategoria non appartiene alla categoria selezionata" },
+            { status: 400 }
+          );
+        }
+      }
+    }
+
+    const input = await file.arrayBuffer();
+
+    // 1) Excel generico (header-based robusto)
+    let extracted: { code: string; description: string }[] = [];
+
+    try {
+      const wb = new ExcelJS.Workbook();
+      await wb.xlsx.load(input);
+
+      const ws = wb.worksheets[0];
+      if (ws) {
+        const cellText = (row: ExcelJS.Row, col: number) =>
+          String(((row.getCell(col) as any)?.text ?? row.getCell(col).value ?? "")).trim().toLowerCase();
+
+        let headerRow = -1;
+        let codeCol = -1;
+        let descCol = -1;
+
+        for (let r = 1; r <= Math.min(ws.rowCount, 60); r++) {
+          const row = ws.getRow(r);
+          for (let c = 1; c <= Math.min(ws.columnCount || 30, 30); c++) {
+            const t = cellText(row, c);
+            if (codeCol === -1 && ["codice", "cod", "codice articolo", "cod. articolo", "code", "articolo"].some(k => t.includes(k))) {
+              codeCol = c;
+            }
+            if (descCol === -1 && ["descrizione", "descr", "description"].some(k => t.includes(k))) {
+              descCol = c;
+            }
+          }
+
+          if (codeCol !== -1 && descCol !== -1 && codeCol !== descCol) {
+            headerRow = r;
+            break;
+          } else {
+            codeCol = -1;
+            descCol = -1;
+          }
+        }
+
+        if (headerRow !== -1) {
+          for (let rr = headerRow + 1; rr <= ws.rowCount; rr++) {
             const row2 = ws.getRow(rr);
-            const v = row2.values as any[];
-            const code = normCode(v[header.codeIdx] ?? v[header.codeIdx + 1]); // exceljs row.values è 1-based spesso
-            const desc = normDesc(v[header.descIdx] ?? v[header.descIdx + 1]);
+
+            const code = normCode((row2.getCell(codeCol) as any)?.text ?? row2.getCell(codeCol).value);
+            const desc = normDesc((row2.getCell(descCol) as any)?.text ?? row2.getCell(descCol).value);
 
             if (!code && !desc) continue;
-            // filtri anti-sporco tipici
+
             const low = `${code} ${desc}`.toLowerCase();
             if (low.includes("pagina") && low.includes("di")) continue;
 
             if (code) extracted.push({ code, description: desc || code });
           }
-          break;
         }
       }
+    } catch {
+      // fallback sotto
     }
-  } catch {
-    // se fallisce, vediamo fallback sotto
-  }
 
-  // 2) fallback per gestionale TAB: usa il parser già robusto che hai
-  if (extracted.length === 0 && category === "TAB") {
-    const { rows } = await processReorderExcel(input);
+    // 2) fallback TAB gestionale (solo legacy TAB)
+    const legacyCategory = legacyCategoryRaw as "TAB" | "GV";
+    if (!useNew && extracted.length === 0 && legacyCategory === "TAB") {
+      const { rows } = await processReorderExcel(input);
+      extracted = rows
+        .map((r: any) => ({
+          code: normCode(r.codArticolo),
+          description: normDesc(r.descrizione),
+        }))
+        .filter((x) => x.code);
+    }
 
-    extracted = rows
-      .map((r: any) => ({
-        code: normCode(r.codArticolo),
-        description: normDesc(r.descrizione),
-      }))
-      .filter((x) => x.code);
-  }
+    if (extracted.length === 0) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            "Non sono riuscito a trovare colonne Codice/Descrizione. Usa un Excel con intestazioni (Codice Articolo, Descrizione).",
+        },
+        { status: 400 }
+      );
+    }
 
-  // se ancora vuoto → errore chiaro
-  if (extracted.length === 0) {
+    // dedup
+    const map = new Map<string, { code: string; description: string }>();
+    for (const r of extracted) {
+      const code = normCode(r.code);
+      const description = normDesc(r.description) || code;
+      if (!code) continue;
+      map.set(code, { code, description });
+    }
+    const rows = Array.from(map.values());
+    const codes = rows.map((r) => r.code);
+
+    const now = new Date().toISOString();
+
+    // ===== NEW MODE: upsert su (category_id, code) =====
+    if (useNew) {
+      const payload = rows.map((r) => ({
+        category_id,
+        subcategory_id: subcategory_id || null,
+        code: r.code,
+        description: r.description,
+        is_active: true,
+        updated_at: now,
+      }));
+
+      const { error: upErr } = await supabaseAdmin
+        .from("items")
+        .upsert(payload, { onConflict: "category_id,code" });
+
+      if (upErr) {
+        console.error("[items/import][new] upsert error:", upErr);
+        return NextResponse.json({ ok: false, error: upErr.message || "Errore import" }, { status: 500 });
+      }
+
+      // conteggi: li stimiamo leggendo gli esistenti prima (veloce e chiaro)
+      // se vuoi, li rendiamo precisi con una query aggiuntiva; qui restiamo semplici.
+      return NextResponse.json({
+        ok: true,
+        mode: "new",
+        category_id,
+        subcategory_id: subcategory_id || null,
+        total: rows.length,
+        inserted: null,
+        updated: null,
+      });
+    }
+
+    // ===== LEGACY MODE: invariato =====
+    let existingSet: Set<string>;
+    try {
+      existingSet = await getExistingCodesLegacy(legacyCategory, codes);
+    } catch (e: any) {
+      console.error("[items/import][legacy] existing fetch error:", e);
+      return NextResponse.json({ ok: false, error: "Errore lettura DB" }, { status: 500 });
+    }
+
+    const inserted = rows.filter((r) => !existingSet.has(r.code)).length;
+    const updated = rows.filter((r) => existingSet.has(r.code)).length;
+
+    const payload = rows.map((r) => ({
+      category: legacyCategory,
+      code: r.code,
+      description: r.description,
+      is_active: true,
+      updated_at: now,
+    }));
+
+    const { error: upErr } = await supabaseAdmin
+      .from("items")
+      .upsert(payload, { onConflict: "category,code" });
+
+    if (upErr) {
+      console.error("[items/import][legacy] upsert error:", upErr);
+      return NextResponse.json({ ok: false, error: upErr.message || "Errore import" }, { status: 500 });
+    }
+
+    return NextResponse.json({
+      ok: true,
+      mode: "legacy",
+      category: legacyCategory,
+      total: rows.length,
+      inserted,
+      updated,
+    });
+  } catch (e: any) {
+    console.error("[items/import] FATAL:", e);
     return NextResponse.json(
-      {
-        ok: false,
-        error:
-          "Non sono riuscito a trovare colonne Codice/Descrizione. Usa un Excel con intestazioni (Codice Articolo, Descrizione) oppure carica il gestionale TAB.",
-      },
-      { status: 400 }
+      { ok: false, error: e?.message || String(e) || "Errore interno" },
+      { status: 500 }
     );
   }
-
-  // normalizza + dedup (category+code)
-  const map = new Map<string, { code: string; description: string }>();
-  for (const r of extracted) {
-    const code = normCode(r.code);
-    const description = normDesc(r.description) || code;
-    if (!code) continue;
-    map.set(code, { code, description });
-  }
-
-  const rows = Array.from(map.values());
-
-  // conta inseriti/aggiornati
-  const codes = rows.map((r) => r.code);
-  let existingSet: Set<string>;
-  try {
-    existingSet = await getExistingCodes(category, codes);
-  } catch (e: any) {
-    console.error("[items/import] existing fetch error:", e);
-    return NextResponse.json({ ok: false, error: "Errore lettura DB" }, { status: 500 });
-  }
-
-  const inserted = rows.filter((r) => !existingSet.has(r.code)).length;
-  const updated = rows.filter((r) => existingSet.has(r.code)).length;
-
-  // upsert
-  const payload = rows.map((r) => ({
-    category,
-    code: r.code,
-    description: r.description,
-    is_active: true, // import = riattiva automaticamente
-    updated_at: new Date().toISOString(),
-  }));
-
-  const { error: upErr } = await supabaseAdmin
-    .from("items")
-    .upsert(payload, { onConflict: "category,code" });
-
-  if (upErr) {
-    console.error("[items/import] upsert error:", upErr);
-    return NextResponse.json({ ok: false, error: upErr.message || "Errore import" }, { status: 500 });
-  }
-
-  return NextResponse.json({
-    ok: true,
-    category,
-    total: rows.length,
-    inserted,
-    updated,
-  });
 }
+
+

@@ -12,7 +12,6 @@ export default function UserLayout({ children }: { children: React.ReactNode }) 
   const username = session?.username ?? "Utente";
   const isAdmin = session?.role === "admin";
 
-
   return (
     <div className="min-h-screen bg-gray-100">
       {/* Top bar */}
@@ -34,15 +33,14 @@ export default function UserLayout({ children }: { children: React.ReactNode }) 
 
       {/* Menu */}
       <nav className="bg-white border-b">
-        <div className="mx-auto max-w-6xl px-6 py-3 flex items-center gap-3">
-          
+        <div className="mx-auto max-w-6xl px-6 py-3 flex items-center gap-3 flex-wrap">
           {isAdmin && (
-          <Link
-            href="/admin"
-           className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-slate-900 text-white hover:bg-slate-800"
-           >
-            Admin
-           </Link>
+            <Link
+              href="/admin"
+              className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-slate-900 text-white hover:bg-slate-800"
+            >
+              Admin
+            </Link>
           )}
 
           <Link
@@ -53,29 +51,42 @@ export default function UserLayout({ children }: { children: React.ReactNode }) 
           </Link>
 
           <Link
-           href="/user/order-gv"
+            href="/user/order-gv"
             className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-orange-500 text-white hover:bg-orange-600"
-            >
-           Order G&V
-            </Link>
-
-            <Link
-           href="/user/history"
-           className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-slate-700 text-white hover:bg-slate-800"
-            >
-           Storico Ordini
+          >
+            Order G&amp;V
           </Link>
 
           <Link
-         href="/user/items"
-         className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-slate-700 text-white hover:bg-slate-800"
+            href="/user/history"
+            className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-slate-700 text-white hover:bg-slate-800"
           >
-          Articoli
+            Storico Ordini
           </Link>
 
-          
+          <Link
+            href="/user/items"
+            className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-slate-700 text-white hover:bg-slate-800"
+          >
+            Articoli
+          </Link>
 
-            
+          {/* ✅ Inventario */}
+          <Link
+            href="/user/inventories"
+            className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-emerald-600 text-white hover:bg-emerald-700"
+          >
+            Inventario
+          </Link>
+
+          {/* ✅ Storico Inventari */}
+          <Link
+            href="/user/inventories/history"
+            className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-emerald-700 text-white hover:bg-emerald-800"
+          >
+            Storico Inventari
+          </Link>
+
           {/* Qui aggiungeremo altre voci man mano */}
           {/* <Link href="/user/qualcosa" className="...">Nuova funzione</Link> */}
         </div>
@@ -86,3 +97,4 @@ export default function UserLayout({ children }: { children: React.ReactNode }) 
     </div>
   );
 }
+

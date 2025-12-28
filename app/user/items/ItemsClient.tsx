@@ -2,16 +2,22 @@
 
 import { useEffect, useMemo, useState } from "react";
 
+type Category = { id: string; name: string; slug: string; is_active: boolean };
+type Subcategory = { id: string; category_id: string; name: string; slug: string; is_active: boolean };
+
 type Item = {
   id: string;
-  category: "TAB" | "GV";
   code: string;
   description: string;
   is_active: boolean;
+  category_id: string | null;
+  subcategory_id: string | null;
 };
 
 export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
-  const [category, setCategory] = useState<"TAB" | "GV">("TAB");
+  // filtri
+  const [categoryId, setCategoryId] = useState<string>(""); // obbligatoria lato UX (ma DB per ora nullable)
+  const [subcategoryId, setSubcategoryId] = useState<string>(""); // opzionale
   const [active, setActive] = useState<"1" | "0" | "all">("1");
   const [q, setQ] = useState("");
 
@@ -24,15 +30,48 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   const [file, setFile] = useState<File | null>(null);
   const [importing, setImporting] = useState(false);
 
+  // categorie
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [subcategories, setSubcategories] = useState<Subcategory[]>([]);
+
+  // admin: crea categoria/sottocategoria
+  const [newCatName, setNewCatName] = useState("");
+  const [newSubName, setNewSubName] = useState("");
+  const [newSubCatId, setNewSubCatId] = useState("");
+
   const qs = useMemo(() => {
     const p = new URLSearchParams();
-    p.set("category", category);
+    if (categoryId) p.set("category_id", categoryId);
+    if (subcategoryId) p.set("subcategory_id", subcategoryId);
     p.set("active", active);
     if (q.trim()) p.set("q", q.trim());
     return `?${p.toString()}`;
-  }, [category, active, q]);
+  }, [categoryId, subcategoryId, active, q]);
 
-  async function load() {
+  async function loadCategories() {
+    const res = await fetch("/api/categories/list", { cache: "no-store" });
+    const json = await res.json().catch(() => null);
+    if (res.ok && json?.ok && Array.isArray(json?.rows)) {
+      setCategories(json.rows);
+      // se non selezionata, metto la prima attiva
+      if (!categoryId) {
+        const first = json.rows.find((c: Category) => c.is_active) || json.rows[0];
+        if (first?.id) setCategoryId(first.id);
+      }
+    }
+  }
+
+  async function loadSubcategories(catId: string) {
+    if (!catId) {
+      setSubcategories([]);
+      return;
+    }
+    const res = await fetch(`/api/subcategories/list?category_id=${encodeURIComponent(catId)}`, { cache: "no-store" });
+    const json = await res.json().catch(() => null);
+    if (res.ok && json?.ok && Array.isArray(json?.rows)) setSubcategories(json.rows);
+  }
+
+  async function loadItems() {
     setLoading(true);
     setError(null);
     try {
@@ -49,7 +88,19 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   }
 
   useEffect(() => {
-    load();
+    loadCategories();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    loadSubcategories(categoryId);
+    // reset subcategory quando cambia categoria
+    setSubcategoryId("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [categoryId]);
+
+  useEffect(() => {
+    loadItems();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [qs]);
 
@@ -57,13 +108,19 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     e.preventDefault();
     if (!file) return;
 
+    if (!categoryId) {
+      setError("Seleziona una categoria prima di importare.");
+      return;
+    }
+
     setImporting(true);
     setMsg(null);
     setError(null);
 
     try {
       const fd = new FormData();
-      fd.append("category", category);
+      fd.append("category_id", categoryId);
+      fd.append("subcategory_id", subcategoryId || "");
       fd.append("file", file);
 
       const res = await fetch("/api/items/import", { method: "POST", body: fd });
@@ -71,9 +128,9 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
 
       if (!res.ok || !json?.ok) throw new Error(json?.error || "Import fallito");
 
-      setMsg(`Import OK (${category}) — Tot: ${json.total}, Inseriti: ${json.inserted}, Aggiornati: ${json.updated}`);
+      setMsg(`Import OK — Tot: ${json.total}, Inseriti: ${json.inserted}, Aggiornati: ${json.updated}`);
       setFile(null);
-      await load();
+      await loadItems();
     } catch (e: any) {
       setError(e.message || "Errore import");
     } finally {
@@ -98,7 +155,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
       alert(json?.error || "Errore aggiornamento");
       return;
     }
-    load();
+    loadItems();
   }
 
   async function editDescription(item: Item) {
@@ -118,18 +175,129 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
       alert(json?.error || "Errore aggiornamento");
       return;
     }
-    load();
+    loadItems();
+  }
+
+  async function createCategory(e: React.FormEvent) {
+    e.preventDefault();
+    setMsg(null);
+    setError(null);
+
+    const name = newCatName.trim();
+    if (!name) return setError("Nome categoria obbligatorio.");
+
+    const res = await fetch("/api/categories/create", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok || !json?.ok) return setError(json?.error || "Errore creazione categoria");
+
+    setNewCatName("");
+    await loadCategories();
+    setMsg("Categoria creata.");
+  }
+
+  async function createSubcategory(e: React.FormEvent) {
+    e.preventDefault();
+    setMsg(null);
+    setError(null);
+
+    const name = newSubName.trim();
+    if (!newSubCatId) return setError("Seleziona la categoria padre.");
+    if (!name) return setError("Nome sottocategoria obbligatorio.");
+
+    const res = await fetch("/api/subcategories/create", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ category_id: newSubCatId, name }),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok || !json?.ok) return setError(json?.error || "Errore creazione sottocategoria");
+
+    setNewSubName("");
+    setMsg("Sottocategoria creata.");
+    if (newSubCatId === categoryId) await loadSubcategories(categoryId);
   }
 
   return (
     <div className="space-y-4">
+      {/* admin: crea categoria/sottocategoria */}
+      {isAdmin && (
+        <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+          <form onSubmit={createCategory} className="space-y-2">
+            <div className="font-semibold">Crea Categoria</div>
+            <input
+              className="w-full rounded-xl border p-3"
+              placeholder="Es. Food"
+              value={newCatName}
+              onChange={(e) => setNewCatName(e.target.value)}
+            />
+            <button className="rounded-xl bg-slate-900 text-white px-4 py-2">
+              Crea
+            </button>
+          </form>
+
+          <form onSubmit={createSubcategory} className="space-y-2">
+            <div className="font-semibold">Crea Sottocategoria</div>
+            <select
+              className="w-full rounded-xl border p-3 bg-white"
+              value={newSubCatId}
+              onChange={(e) => setNewSubCatId(e.target.value)}
+            >
+              <option value="">— Seleziona categoria padre —</option>
+              {categories.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+            <input
+              className="w-full rounded-xl border p-3"
+              placeholder="Es. Cornetti"
+              value={newSubName}
+              onChange={(e) => setNewSubName(e.target.value)}
+            />
+            <button className="rounded-xl bg-slate-900 text-white px-4 py-2">
+              Crea
+            </button>
+          </form>
+        </div>
+      )}
+
       {/* filtri */}
-      <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-4 gap-3">
-        <div>
+      <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-5 gap-3">
+        <div className="md:col-span-2">
           <label className="block text-sm font-medium mb-2">Categoria</label>
-          <select className="w-full rounded-xl border p-3 bg-white" value={category} onChange={(e) => setCategory(e.target.value as any)}>
-            <option value="TAB">TAB</option>
-            <option value="GV">GV</option>
+          <select
+            className="w-full rounded-xl border p-3 bg-white"
+            value={categoryId}
+            onChange={(e) => setCategoryId(e.target.value)}
+          >
+            <option value="">— Seleziona —</option>
+            {categories.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="md:col-span-2">
+          <label className="block text-sm font-medium mb-2">Sottocategoria</label>
+          <select
+            className="w-full rounded-xl border p-3 bg-white"
+            value={subcategoryId}
+            onChange={(e) => setSubcategoryId(e.target.value)}
+            disabled={!categoryId}
+          >
+            <option value="">— Nessuna —</option>
+            {subcategories.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
           </select>
         </div>
 
@@ -142,7 +310,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
           </select>
         </div>
 
-        <div className="md:col-span-2">
+        <div className="md:col-span-5">
           <label className="block text-sm font-medium mb-2">Cerca</label>
           <input className="w-full rounded-xl border p-3" placeholder="Codice o descrizione..." value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
@@ -155,19 +323,20 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
             <div>
               <div className="font-semibold">Import articoli (Excel)</div>
               <div className="text-sm text-gray-600">
-                Supporta Excel pulito (colonne Codice/Descrizione) e gestionale (auto-detect; TAB ha fallback robusto).
+                Seleziona categoria/sottocategoria e importa. (Excel: Codice/Descrizione)
               </div>
             </div>
-            <button
-              className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60"
-              disabled={!file || importing}
-            >
+            <button className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60" disabled={!file || importing}>
               {importing ? "Importo..." : "Importa"}
             </button>
           </div>
 
           <input type="file" accept=".xlsx" onChange={(e) => setFile(e.target.files?.[0] || null)} />
-          {file && <div className="text-sm text-gray-600">Selezionato: <b>{file.name}</b></div>}
+          {file && (
+            <div className="text-sm text-gray-600">
+              Selezionato: <b>{file.name}</b>
+            </div>
+          )}
         </form>
       )}
 
@@ -225,3 +394,4 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     </div>
   );
 }
+
