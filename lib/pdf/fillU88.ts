@@ -208,7 +208,8 @@ function safeSetTextMany(
   form: any,
   idx: { byNorm: Map<string, string>; all: string[] },
   candidates: Array<string | null | undefined>,
-  value: string
+  value: string,
+  font: any
 ): { ok: boolean; reason?: string; resolved?: string | null; tried?: string[] } {
   const tried = uniqNonEmpty(candidates);
 
@@ -219,7 +220,12 @@ function safeSetTextMany(
       if (t !== "PDFTextField") {
         return { ok: false, reason: `NOT_TEXT_FIELD(${t})`, resolved: name, tried };
       }
-      form.getTextField(name).setText(value);
+      const tf = form.getTextField(name);
+      tf.setText(value);
+
+      // ✅ FIX: su Vercel spesso serve aggiornare appearance PER CAMPO
+      if (typeof tf.updateAppearances === "function") tf.updateAppearances(font);
+
       return { ok: true, resolved: name, tried };
     } catch {
       // continuo
@@ -236,7 +242,12 @@ function safeSetTextMany(
         if (t !== "PDFTextField") {
           return { ok: false, reason: `NOT_TEXT_FIELD(${t})`, resolved: hit, tried };
         }
-        form.getTextField(hit).setText(value);
+        const tf = form.getTextField(hit);
+        tf.setText(value);
+
+        // ✅ FIX: su Vercel spesso serve aggiornare appearance PER CAMPO
+        if (typeof tf.updateAppearances === "function") tf.updateAppearances(font);
+
         return { ok: true, resolved: hit, tried };
       } catch (e: any) {
         return { ok: false, reason: `EXCEPTION(${e?.message || String(e)})`, resolved: hit, tried };
@@ -246,6 +257,7 @@ function safeSetTextMany(
 
   return { ok: false, reason: "NO_FIELD", resolved: null, tried };
 }
+
 
 /* -------------------- main -------------------- */
 
@@ -334,7 +346,7 @@ export async function fillU88Pdf(
     const guessKG = bestRow ? (kgBySuffix.get(bestRow.suffixNorm) || null) : null;
     const guessGR = bestRow ? (grBySuffix.get(bestRow.suffixNorm) || null) : null;
 
-    const wImp = safeSetTextMany(form, nameIndex, [guessIMPORTO], moneyIT(importo));
+    const wImp = safeSetTextMany(form, nameIndex, [guessIMPORTO], moneyIT(importo), font);
 
     if (wImp.ok && wImp.resolved) {
       const suf = impSuffixByNameNorm.get(norm(wImp.resolved));
@@ -356,8 +368,8 @@ export async function fillU88Pdf(
       grInt = Math.round(safeKg * 1000);
     }
 
-    const wKg = safeSetTextMany(form, nameIndex, [guessKG], kgInt > 0 ? String(kgInt) : "");
-    const wGr = safeSetTextMany(form, nameIndex, [guessGR], grInt > 0 ? String(grInt) : "");
+    const wKg = safeSetTextMany(form, nameIndex, [guessKG], kgInt > 0 ? String(kgInt) : "", font);
+    const wGr = safeSetTextMany(form, nameIndex, [guessGR], grInt > 0 ? String(grInt) : "", font);
 
     const found = { KG: wKg.ok, GR: wGr.ok, IMPORTO: wImp.ok };
 
@@ -386,7 +398,8 @@ export async function fillU88Pdf(
   form.updateFieldAppearances(font);
 
   form.flatten();
-  const pdf = await pdfDoc.save();
+  const pdf = await pdfDoc.save({ useObjectStreams: false });
+
 
   return { pdf, missing };
 }

@@ -9,6 +9,9 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { fillU88Pdf, type U88Item } from "@/lib/pdf/fillU88";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export const runtime = "nodejs";
 
 /* -------------------- auth -------------------- */
