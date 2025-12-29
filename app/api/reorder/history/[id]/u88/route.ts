@@ -82,7 +82,7 @@ function cellToNumber(cell: ExcelJS.Cell): number {
 
 function findHeaderRow(ws: ExcelJS.Worksheet): number {
   // nel nostro export di solito è 3, ma se un domani cambia lo troviamo comunque
-  const max = Math.min(20, ws.rowCount || 20);
+  const max = Math.min(40, ws.rowCount || 40);
   for (let r = 1; r <= max; r++) {
     const row = ws.getRow(r);
     const parts: string[] = [];
@@ -140,26 +140,41 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
     return NextResponse.json({ ok: false, error: "U88 disponibile solo per TAB" }, { status: 400 });
   }
 
+  console.log("[U88] reorderId:", reorderId);
+  console.log("[U88] export_path:", reorder.export_path);
+
   // 2) scarico l’xlsx generato (quello “pulito”)
-  const { data: fileBlob, error: dErr } = await supabaseAdmin.storage
-    .from("reorders")
-    .download(reorder.export_path);
+  const { data: fileBlob, error: dErr } = await supabaseAdmin.storage.from("reorders").download(reorder.export_path);
 
   if (dErr || !fileBlob) {
     console.error("[U88] download xlsx error:", dErr);
     return NextResponse.json({ ok: false, error: "Errore download Excel" }, { status: 500 });
   }
 
+  console.log("[U88] xlsx blob size:", fileBlob.size);
+
   const ab = await fileBlob.arrayBuffer();
 
-  // 3) leggo righe da Excel (foglio “RIORDINO TAB”)
+  // 3) leggo righe da Excel
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(ab);
 
-  const ws = wb.worksheets[0];
+  const sheetNames = wb.worksheets.map((s) => s.name);
+  console.log("[U88] sheets:", sheetNames);
+
+  // preferisci un foglio che contenga "riordino", altrimenti il primo
+  const ws =
+    wb.worksheets.find((s) => normalize(s.name).includes("riordino")) ||
+    wb.worksheets.find((s) => normalize(s.name).includes("tab")) ||
+    wb.worksheets[0];
+
   if (!ws) return NextResponse.json({ ok: false, error: "Excel non valido" }, { status: 400 });
 
+  console.log("[U88] using sheet:", ws.name, "rowCount:", ws.rowCount, "colCount:", ws.columnCount);
+
   const headerRow = findHeaderRow(ws);
+  console.log("[U88] headerRow:", headerRow);
+
   if (headerRow === -1) {
     return NextResponse.json({ ok: false, error: "Header non trovato nel file riordino TAB" }, { status: 400 });
   }
@@ -171,6 +186,8 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
   const cValOrd = findColumn(ws, headerRow, (h) => h.includes("valore") && h.includes("ordinare"));
   const cPeso = findColumn(ws, headerRow, (h) => h.includes("peso") || (h.includes("qta") && h.includes("peso")));
 
+  console.log("[U88] columns:", { cCod, cDesc, cQtaOrd, cValOrd, cPeso });
+
   if (cDesc === -1 || cQtaOrd === -1) {
     return NextResponse.json(
       { ok: false, error: "Mancano colonne chiave nel file (Descrizione / Qtà da ordinare)" },
@@ -181,7 +198,12 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
   const firstDataRow = headerRow + 1;
 
   const items: U88Item[] = [];
+  let scannedRows = 0;
+  let skippedZero = 0;
+
   for (let r = firstDataRow; r <= ws.rowCount; r++) {
+    scannedRows++;
+
     const descr = cellToText(ws.getCell(r, cDesc)).trim();
     const cod = cCod !== -1 ? cellToText(ws.getCell(r, cCod)).trim() : "";
 
@@ -190,7 +212,11 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
 
     const qtaOrd = cellToNumber(ws.getCell(r, cQtaOrd));
     if (!cod && !descr) continue;
-    if (qtaOrd <= 0) continue;
+
+    if (qtaOrd <= 0) {
+      skippedZero++;
+      continue;
+    }
 
     const valoreDaOrdinare = cValOrd !== -1 ? cellToNumber(ws.getCell(r, cValOrd)) : 0;
 
@@ -205,34 +231,55 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
     });
   }
 
+  console.log("[U88] scannedRows:", scannedRows, "skippedZero:", skippedZero, "items:", items.length);
+
+  // FAIL-FAST: niente PDF vuoto
+  if (items.length === 0) {
+    console.error("[U88] Nessuna riga valida trovata nell'Excel.", {
+      headerRow,
+      cCod,
+      cDesc,
+      cQtaOrd,
+      cValOrd,
+      cPeso,
+      rowCount: ws.rowCount,
+      export_path: reorder.export_path,
+    });
+
+    return NextResponse.json(
+      {
+        ok: false,
+        error:
+          "U88 non compilato: nell'Excel non risultano righe con 'Qtà da ordinare' > 0. Controlla l'ordine o l'export salvato.",
+      },
+      { status: 422 }
+    );
+  }
+
   // 4) carico template U88 da filesystem
   const templatePath = path.join(process.cwd(), "lib", "pdf", "templates", "U88.pdf");
   const templateBytes = await fs.readFile(templatePath);
 
   // 5) compilo pdf
-  const { pdf, missing } = await fillU88Pdf(
-  new Uint8Array(templateBytes),
-  items
-);
+  const { pdf, missing } = await fillU88Pdf(new Uint8Array(templateBytes), items);
 
-if (missing.length > 0) {
-  console.log("❌ U88 – ARTICOLI NON MATCHATI:", missing.length);
-  console.log(JSON.stringify(missing, null, 2));
+  if (missing.length > 0) {
+    console.log("[U88] ARTICOLI NON MATCHATI:", missing.length);
+    console.log(JSON.stringify(missing.slice(0, 20), null, 2)); // non spammare troppo
+  }
+
+  const outName = `U88_${reorder?.pv_label || "PV"}_${reorderId}.pdf`
+    .replace(/\s+/g, "_")
+    .replace(/[^\w\-\.]/g, "");
+
+  return new NextResponse(Buffer.from(pdf), {
+    status: 200,
+    headers: {
+      "content-type": "application/pdf",
+      "content-disposition": `attachment; filename="${outName}"`,
+      "cache-control": "no-store",
+    },
+  });
 }
-const outName = `U88_${reorder?.pv_label || "PV"}_${reorderId}.pdf`
-  .replace(/\s+/g, "_")
-  .replace(/[^\w\-\.]/g, "");
 
-
-return new NextResponse(Buffer.from(pdf), {
-  status: 200,
-  headers: {
-    "content-type": "application/pdf",
-    "content-disposition": `attachment; filename="${outName}"`,
-
-    "cache-control": "no-store",
-  },
-});
-
-}
 
