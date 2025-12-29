@@ -1,3 +1,4 @@
+// File: app/api/reorder/history/[id]/u88/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import path from "path";
@@ -38,6 +39,7 @@ function cellToText(cell: ExcelJS.Cell): string {
   if (v == null) return "";
   if (typeof v === "string") return v.trim();
   if (typeof v === "number") return String(v);
+
   if (typeof v === "object") {
     if (typeof v.result === "string") return v.result.trim();
     if (typeof v.result === "number") return String(v.result);
@@ -60,7 +62,6 @@ function cellToNumber(cell: ExcelJS.Cell): number {
   }
 
   if (typeof v === "object") {
-    // formula: ExcelJS non calcola, legge solo result se presente
     if (typeof v.result === "number" && Number.isFinite(v.result)) return v.result;
     if (typeof v.result === "string") {
       const t = v.result.replace(/\./g, "").replace(",", ".").replace(/\s/g, "");
@@ -80,7 +81,7 @@ function cellToNumber(cell: ExcelJS.Cell): number {
 }
 
 function findHeaderRow(ws: ExcelJS.Worksheet): number {
-  const max = Math.min(20, ws.rowCount || 20);
+  const max = Math.min(40, ws.rowCount || 40);
   for (let r = 1; r <= max; r++) {
     const row = ws.getRow(r);
     const parts: string[] = [];
@@ -150,18 +151,23 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
 
   const ab = await fileBlob.arrayBuffer();
 
-  // 3) leggo righe da Excel
+  // 3) leggo righe da Excel (foglio “RIORDINO TAB”)
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(ab);
 
-  const ws = wb.worksheets[0];
+  // ✅ FIX: su Vercel non fidarti di worksheets[0]. Prendi per nome.
+  const ws = wb.getWorksheet("RIORDINO TAB") || wb.worksheets[0];
   if (!ws) return NextResponse.json({ ok: false, error: "Excel non valido" }, { status: 400 });
 
   const headerRow = findHeaderRow(ws);
   if (headerRow === -1) {
-    return NextResponse.json({ ok: false, error: "Header non trovato nel file riordino TAB" }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: `Header non trovato nel foglio "${ws.name || "?"}"` },
+      { status: 400 }
+    );
   }
 
+  // colonne per NOME (robuste)
   const cCod = findColumn(ws, headerRow, (h) => h.includes("cod") && h.includes("articolo"));
   const cDesc = findColumn(ws, headerRow, (h) => h.includes("descrizione"));
   const cQtaOrd = findColumn(ws, headerRow, (h) => h.includes("qta") && h.includes("ordinare"));
@@ -178,25 +184,20 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
   const firstDataRow = headerRow + 1;
 
   const items: U88Item[] = [];
-  let scanned = 0;
-  let positive = 0;
-
   for (let r = firstDataRow; r <= ws.rowCount; r++) {
-    scanned++;
-
     const descr = cellToText(ws.getCell(r, cDesc)).trim();
     const cod = cCod !== -1 ? cellToText(ws.getCell(r, cCod)).trim() : "";
 
+    // stop su TOTALI (evita di leggere la riga somme)
     if (normalize(descr) === "totali") break;
 
     const qtaOrd = cellToNumber(ws.getCell(r, cQtaOrd));
     if (!cod && !descr) continue;
     if (qtaOrd <= 0) continue;
 
-    positive++;
-
     const valoreDaOrdinare = cValOrd !== -1 ? cellToNumber(ws.getCell(r, cValOrd)) : 0;
 
+    // peso in kg: dal file pulito oppure fallback
     const pesoKgFromFile = cPeso !== -1 ? cellToNumber(ws.getCell(r, cPeso)) : 0;
     const pesoKg = pesoKgFromFile > 0 ? pesoKgFromFile : Number((qtaOrd * 0.02).toFixed(1));
 
@@ -207,9 +208,10 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
     });
   }
 
-  // ✅ FAIL-FAST: evita PDF “vuoto”
+  // ✅ Se items è vuoto, NON generare PDF “bianco”: è il bug che stai vedendo.
   if (items.length === 0) {
-    console.error("[U88] items vuoto. scanned:", scanned, "positive(qta>0):", positive, {
+    console.log("[U88] items=0 -> PDF vuoto. Debug:", {
+      sheetName: ws.name,
       headerRow,
       cCod,
       cDesc,
@@ -218,18 +220,18 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
       cPeso,
       export_path: reorder.export_path,
     });
-
     return NextResponse.json(
       {
         ok: false,
         error:
-          "U88 non compilato: nell’Excel non risultano righe con “Qtà da ordinare” > 0. Su Vercel spesso succede se la colonna è una FORMULA senza result (ExcelJS non calcola).",
-        hint:
-          "Soluzione: nell’export Excel salva valori (non formule) oppure scrivi anche i result delle formule. In alternativa apri il file in Excel e salvalo (cache dei risultati).",
+          "U88 non compilato: nessuna riga con 'Qtà da ordinare' > 0 trovata nel file Excel. (Controlla foglio/colonne/valori)",
       },
-      { status: 422 }
+      { status: 400 }
     );
   }
+
+  // log minimo utile su Vercel
+  console.log("[U88] items letti:", items.length, "prime 3:", items.slice(0, 3));
 
   // 4) carico template U88 da filesystem
   const templatePath = path.join(process.cwd(), "lib", "pdf", "templates", "U88.pdf");
@@ -240,7 +242,7 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
 
   if (missing.length > 0) {
     console.log("❌ U88 – ARTICOLI NON MATCHATI:", missing.length);
-    console.log(JSON.stringify(missing, null, 2));
+    console.log(JSON.stringify(missing.slice(0, 20), null, 2)); // non stampare 3000 righe…
   }
 
   const outName = `U88_${reorder?.pv_label || "PV"}_${reorderId}.pdf`
@@ -256,6 +258,7 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
     },
   });
 }
+
 
 
 
