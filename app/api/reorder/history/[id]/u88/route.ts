@@ -11,12 +11,14 @@ import { fillU88Pdf, type U88Item } from "@/lib/pdf/fillU88";
 
 export const runtime = "nodejs";
 
-/* -------------------- helpers -------------------- */
+/* -------------------- auth -------------------- */
 
 function getSessionFromCookies() {
   const raw = cookies().get(COOKIE_NAME)?.value || "";
   return parseSessionValue(raw);
 }
+
+/* -------------------- utils -------------------- */
 
 function normalize(text: string) {
   return (text || "")
@@ -39,7 +41,6 @@ function cellToText(cell: ExcelJS.Cell): string {
   if (v == null) return "";
   if (typeof v === "string") return v.trim();
   if (typeof v === "number") return String(v);
-
   if (typeof v === "object") {
     if (typeof v.result === "string") return v.result.trim();
     if (typeof v.result === "number") return String(v.result);
@@ -81,7 +82,7 @@ function cellToNumber(cell: ExcelJS.Cell): number {
 }
 
 function findHeaderRow(ws: ExcelJS.Worksheet): number {
-  const max = Math.min(40, ws.rowCount || 40);
+  const max = Math.min(20, ws.rowCount || 20);
   for (let r = 1; r <= max; r++) {
     const row = ws.getRow(r);
     const parts: string[] = [];
@@ -89,6 +90,7 @@ function findHeaderRow(ws: ExcelJS.Worksheet): number {
       const s = normalize(cellToText(cell));
       if (s) parts.push(s);
     });
+
     const joined = parts.join(" | ");
     if (
       joined.includes("cod") &&
@@ -106,12 +108,87 @@ function findHeaderRow(ws: ExcelJS.Worksheet): number {
 function findColumn(ws: ExcelJS.Worksheet, headerRow: number, predicate: (h: string) => boolean): number {
   const row = ws.getRow(headerRow);
   let found = -1;
+
   row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
     const h = normalize(cellToText(cell));
     if (!h) return;
     if (found === -1 && predicate(h)) found = colNumber;
   });
+
   return found;
+}
+
+/**
+ * Converte quello che arriva da Supabase Storage in Uint8Array robusto.
+ */
+async function toUint8Array(data: any): Promise<Uint8Array> {
+  if (!data) throw new Error("Storage download: file vuoto/undefined");
+
+  // già Uint8Array
+  if (data instanceof Uint8Array) return data;
+
+  // ArrayBuffer
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+
+  // Blob (supabase.storage.download tipicamente ritorna Blob su Node)
+  if (typeof data.arrayBuffer === "function") {
+    const ab = await data.arrayBuffer();
+    return new Uint8Array(ab);
+  }
+
+  // Stream (fallback)
+  if (data.body && typeof data.body.getReader === "function") {
+    const reader = data.body.getReader();
+    const chunks: Uint8Array[] = [];
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) chunks.push(value);
+    }
+    const total = chunks.reduce((s, c) => s + c.length, 0);
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const c of chunks) {
+      out.set(c, offset);
+      offset += c.length;
+    }
+    return out;
+  }
+
+  throw new Error(`Storage download: tipo non gestito (${Object.prototype.toString.call(data)})`);
+}
+
+/**
+ * ExcelJS su Vercel è instabile se gli passi Buffer (a volte Buffer non esiste).
+ * Qui carichiamo SOLO con ArrayBuffer/Uint8Array.
+ */
+async function loadExcelWithFallback(workbook: ExcelJS.Workbook, bytes: Uint8Array) {
+  // ArrayBuffer “pulito” (senza offset strani)
+  const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+
+  // 1) Prova ArrayBuffer
+  try {
+    await workbook.xlsx.load(ab as ArrayBuffer);
+    return;
+  } catch (e1: any) {
+    console.error("[U88] ExcelJS load(ArrayBuffer) FAIL:", e1?.message || e1);
+  }
+
+  // 2) Prova Uint8Array diretto (alcune versioni lo accettano)
+  try {
+    // @ts-ignore
+    await workbook.xlsx.load(bytes);
+    return;
+  } catch (e2: any) {
+    console.error("[U88] ExcelJS load(Uint8Array) FAIL:", e2?.message || e2);
+  }
+
+  // Debug minimo senza Buffer
+  console.error("[U88] XLSX DEBUG size:", bytes.length);
+  console.error("[U88] XLSX DEBUG first bytes:", Array.from(bytes.slice(0, 12))); // deve iniziare con 80,75 (= 'P','K')
+  console.error("[U88] XLSX DEBUG last bytes:", Array.from(bytes.slice(-12)));
+
+  throw new Error("ExcelJS non riesce a leggere l'XLSX (file corrotto/troncato o formato non supportato su Vercel)");
 }
 
 /* -------------------- handler -------------------- */
@@ -124,7 +201,7 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
 
   const reorderId = ctx.params.id;
 
-  // 1) prendo lo storico
+  // 1) storico
   const { data: reorder, error: rErr } = await supabaseAdmin
     .from("reorders")
     .select("id,type,export_path,pv_label,created_by_username")
@@ -139,35 +216,51 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
     return NextResponse.json({ ok: false, error: "U88 disponibile solo per TAB" }, { status: 400 });
   }
 
-  // 2) scarico l’xlsx generato (quello “pulito”)
-  const { data: fileBlob, error: dErr } = await supabaseAdmin.storage
-    .from("reorders")
-    .download(reorder.export_path);
+  // 2) download xlsx pulito
+  const { data: fileBlob, error: dErr } = await supabaseAdmin.storage.from("reorders").download(reorder.export_path);
 
   if (dErr || !fileBlob) {
     console.error("[U88] download xlsx error:", dErr);
     return NextResponse.json({ ok: false, error: "Errore download Excel" }, { status: 500 });
   }
 
-  const ab = await fileBlob.arrayBuffer();
+  // 3) bytes
+  let xlsxBytes: Uint8Array;
+  try {
+    xlsxBytes = await toUint8Array(fileBlob);
+  } catch (e: any) {
+    console.error("[U88] toUint8Array error:", e);
+    return NextResponse.json({ ok: false, error: e?.message || "Errore lettura bytes Excel" }, { status: 500 });
+  }
 
-  // 3) leggo righe da Excel (foglio “RIORDINO TAB”)
-  const wb = new ExcelJS.Workbook();
-  await wb.xlsx.load(ab);
-
-  // ✅ FIX: su Vercel non fidarti di worksheets[0]. Prendi per nome.
-  const ws = wb.getWorksheet("RIORDINO TAB") || wb.worksheets[0];
-  if (!ws) return NextResponse.json({ ok: false, error: "Excel non valido" }, { status: 400 });
-
-  const headerRow = findHeaderRow(ws);
-  if (headerRow === -1) {
+  // guardrail: XLSX è zip => deve iniziare con PK (0x50 0x4B)
+  if (xlsxBytes.length < 4 || xlsxBytes[0] !== 0x50 || xlsxBytes[1] !== 0x4b) {
+    console.error("[U88] NOT XLSX - first bytes:", Array.from(xlsxBytes.slice(0, 24)));
     return NextResponse.json(
-      { ok: false, error: `Header non trovato nel foglio "${ws.name || "?"}"` },
-      { status: 400 }
+      { ok: false, error: "Il file scaricato da Supabase non è un XLSX valido (non inizia con PK). Controlla i log Vercel." },
+      { status: 500 }
     );
   }
 
-  // colonne per NOME (robuste)
+  // 4) leggo excel
+  const wb = new ExcelJS.Workbook();
+  try {
+    await loadExcelWithFallback(wb, xlsxBytes);
+  } catch (e: any) {
+    return NextResponse.json(
+      { ok: false, error: e?.message || "Errore lettura XLSX con ExcelJS (vedi log Vercel)" },
+      { status: 500 }
+    );
+  }
+
+  const ws = wb.worksheets[0];
+  if (!ws) return NextResponse.json({ ok: false, error: "Excel non valido (worksheet mancante)" }, { status: 400 });
+
+  const headerRow = findHeaderRow(ws);
+  if (headerRow === -1) {
+    return NextResponse.json({ ok: false, error: "Header non trovato nel file riordino TAB" }, { status: 400 });
+  }
+
   const cCod = findColumn(ws, headerRow, (h) => h.includes("cod") && h.includes("articolo"));
   const cDesc = findColumn(ws, headerRow, (h) => h.includes("descrizione"));
   const cQtaOrd = findColumn(ws, headerRow, (h) => h.includes("qta") && h.includes("ordinare"));
@@ -188,7 +281,7 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
     const descr = cellToText(ws.getCell(r, cDesc)).trim();
     const cod = cCod !== -1 ? cellToText(ws.getCell(r, cCod)).trim() : "";
 
-    // stop su TOTALI (evita di leggere la riga somme)
+    // stop su TOTALI
     if (normalize(descr) === "totali") break;
 
     const qtaOrd = cellToNumber(ws.getCell(r, cQtaOrd));
@@ -197,7 +290,6 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
 
     const valoreDaOrdinare = cValOrd !== -1 ? cellToNumber(ws.getCell(r, cValOrd)) : 0;
 
-    // peso in kg: dal file pulito oppure fallback
     const pesoKgFromFile = cPeso !== -1 ? cellToNumber(ws.getCell(r, cPeso)) : 0;
     const pesoKg = pesoKgFromFile > 0 ? pesoKgFromFile : Number((qtaOrd * 0.02).toFixed(1));
 
@@ -208,47 +300,30 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
     });
   }
 
-  // ✅ Se items è vuoto, NON generare PDF “bianco”: è il bug che stai vedendo.
   if (items.length === 0) {
-    console.log("[U88] items=0 -> PDF vuoto. Debug:", {
-      sheetName: ws.name,
-      headerRow,
-      cCod,
-      cDesc,
-      cQtaOrd,
-      cValOrd,
-      cPeso,
-      export_path: reorder.export_path,
-    });
     return NextResponse.json(
-      {
-        ok: false,
-        error:
-          "U88 non compilato: nessuna riga con 'Qtà da ordinare' > 0 trovata nel file Excel. (Controlla foglio/colonne/valori)",
-      },
+      { ok: false, error: "Nessuna riga con Qtà da ordinare > 0 trovata nel file Excel" },
       { status: 400 }
     );
   }
 
-  // log minimo utile su Vercel
-  console.log("[U88] items letti:", items.length, "prime 3:", items.slice(0, 3));
-
-  // 4) carico template U88 da filesystem
+  // 5) template U88
   const templatePath = path.join(process.cwd(), "lib", "pdf", "templates", "U88.pdf");
   const templateBytes = await fs.readFile(templatePath);
 
-  // 5) compilo pdf
+  // 6) compilo pdf
   const { pdf, missing } = await fillU88Pdf(new Uint8Array(templateBytes), items);
 
   if (missing.length > 0) {
     console.log("❌ U88 – ARTICOLI NON MATCHATI:", missing.length);
-    console.log(JSON.stringify(missing.slice(0, 20), null, 2)); // non stampare 3000 righe…
+    console.log(JSON.stringify(missing, null, 2));
   }
 
   const outName = `U88_${reorder?.pv_label || "PV"}_${reorderId}.pdf`
     .replace(/\s+/g, "_")
     .replace(/[^\w\-\.]/g, "");
 
+  // NB: qui Buffer lo uso SOLO per rispondere col PDF (Node runtime lo supporta; se mai desse no, lo convertiamo)
   return new NextResponse(Buffer.from(pdf), {
     status: 200,
     headers: {
@@ -258,6 +333,9 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
     },
   });
 }
+
+
+
 
 
 
