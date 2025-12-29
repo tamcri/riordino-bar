@@ -91,10 +91,10 @@ export type PreviewRow = {
   codArticolo: string;
   descrizione: string;
   qtaVenduta: number;
-  valoreVenduto: number;      // ✅ serve per calcolare il valore da ordinare
+  valoreVenduto: number; // ✅ serve per calcolare il valore da ordinare
   giacenza: number;
   qtaOrdine: number;
-  valoreDaOrdinare: number;   // ✅ NEW colonna
+  valoreDaOrdinare: number; // ✅ NEW colonna
   pesoKg: number;
 };
 
@@ -118,7 +118,7 @@ async function buildCleanWorkbook(pvLabel: string, rows: PreviewRow[]): Promise<
     "Qtà Venduta",
     "Giacenza",
     "Qtà da ordinare",
-    "Valore da ordinare",   // ✅ NEW
+    "Valore da ordinare", // ✅ NEW
     "Qtà in peso (kg)",
   ];
 
@@ -134,6 +134,13 @@ async function buildCleanWorkbook(pvLabel: string, rows: PreviewRow[]): Promise<
   ws.getColumn(7).width = 12;
 
   let r = headerRow + 1;
+
+  // ✅ Totali calcolati lato JS (niente formule -> Vercel safe)
+  let totVend = 0;
+  let totGiac = 0;
+  let totOrd = 0;
+  let totValOrd = 0;
+  let totPeso = 0;
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
@@ -152,8 +159,14 @@ async function buildCleanWorkbook(pvLabel: string, rows: PreviewRow[]): Promise<
     ws.getCell(r, 3).numFmt = "0";
     ws.getCell(r, 4).numFmt = "0";
     ws.getCell(r, 5).numFmt = "0";
-    ws.getCell(r, 6).numFmt = '€ #,##0.00';
+    ws.getCell(r, 6).numFmt = "€ #,##0.00";
     ws.getCell(r, 7).numFmt = "0.0";
+
+    totVend += Number(row.qtaVenduta || 0);
+    totGiac += Number(row.giacenza || 0);
+    totOrd += Number(row.qtaOrdine || 0);
+    totValOrd += Number(row.valoreDaOrdinare || 0);
+    totPeso += Number(row.pesoKg || 0);
 
     r++;
   }
@@ -163,16 +176,17 @@ async function buildCleanWorkbook(pvLabel: string, rows: PreviewRow[]): Promise<
   ws.getCell(totalRow, 2).value = "TOTALI";
   ws.getRow(totalRow).font = { bold: true };
 
-  const start = headerRow + 1;
-  const end = r - 1;
+  // ✅ numeri reali (non formule)
+  ws.getCell(totalRow, 3).value = totVend;
+  ws.getCell(totalRow, 4).value = totGiac;
+  ws.getCell(totalRow, 5).value = totOrd;
+  ws.getCell(totalRow, 6).value = round2(totValOrd);
+  ws.getCell(totalRow, 7).value = round2(totPeso);
 
-  ws.getCell(totalRow, 3).value = { formula: `SUM(C${start}:C${end})` };
-  ws.getCell(totalRow, 4).value = { formula: `SUM(D${start}:D${end})` };
-  ws.getCell(totalRow, 5).value = { formula: `SUM(E${start}:E${end})` };
-  ws.getCell(totalRow, 6).value = { formula: `SUM(F${start}:F${end})` };
-  ws.getCell(totalRow, 7).value = { formula: `SUM(G${start}:G${end})` };
-
-  ws.getCell(totalRow, 6).numFmt = '€ #,##0.00';
+  ws.getCell(totalRow, 3).numFmt = "0";
+  ws.getCell(totalRow, 4).numFmt = "0";
+  ws.getCell(totalRow, 5).numFmt = "0";
+  ws.getCell(totalRow, 6).numFmt = "€ #,##0.00";
   ws.getCell(totalRow, 7).numFmt = "0.0";
 
   // bordi
@@ -327,6 +341,7 @@ export async function processReorderExcel(
   const xlsx = await buildCleanWorkbook(pvLabel, rows);
   return { xlsx, rows };
 }
+
 
 
 
