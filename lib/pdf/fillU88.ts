@@ -258,6 +258,50 @@ function safeSetTextMany(
   return { ok: false, reason: "NO_FIELD", resolved: null, tried };
 }
 
+/* -------------------- ultimate fallback: draw on page -------------------- */
+
+function drawTextInField(
+  pdfDoc: PDFDocument,
+  form: any,
+  fieldName: string,
+  text: string,
+  font: any,
+  fontSize = 9
+): { ok: boolean; reason?: string } {
+  try {
+    const field = form.getField(fieldName);
+    const t = field?.constructor?.name;
+
+    if (t !== "PDFTextField") return { ok: false, reason: `NOT_TEXT_FIELD(${t})` };
+
+    const tf = form.getTextField(fieldName);
+    const widgets = tf.acroField.getWidgets();
+    if (!widgets || widgets.length === 0) return { ok: false, reason: "NO_WIDGETS" };
+
+    for (const w of widgets) {
+      const page = w.getPage();
+      const rect = w.getRectangle(); // { x, y, width, height }
+
+      const paddingX = 2;
+      const paddingY = 2;
+
+      // baseline dentro il rettangolo
+      const x = rect.x + paddingX;
+      const y = rect.y + rect.height - fontSize - paddingY;
+
+      page.drawText(text || "", {
+        x,
+        y,
+        size: fontSize,
+        font,
+      });
+    }
+
+    return { ok: true };
+  } catch (e: any) {
+    return { ok: false, reason: `EXCEPTION(${e?.message || String(e)})` };
+  }
+}
 
 /* -------------------- main -------------------- */
 
@@ -268,7 +312,7 @@ export async function fillU88Pdf(
   const pdfDoc = await PDFDocument.load(templatePdfBytes);
   const form = pdfDoc.getForm();
 
-  // ✅ FIX: su Vercel spesso senza questa riga il testo NON diventa visibile dopo flatten
+  // ✅ Font embedded (utile sia per appearance che per drawText)
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
 
   const fields = form.getFields();
@@ -343,16 +387,21 @@ export async function fillU88Pdf(
     }
 
     const guessIMPORTO = bestRow ? bestRow.name : null;
-    const guessKG = bestRow ? (kgBySuffix.get(bestRow.suffixNorm) || null) : null;
-    const guessGR = bestRow ? (grBySuffix.get(bestRow.suffixNorm) || null) : null;
+    const guessKG = bestRow ? kgBySuffix.get(bestRow.suffixNorm) || null : null;
+    const guessGR = bestRow ? grBySuffix.get(bestRow.suffixNorm) || null : null;
 
+    // Importo: provo setText + fallback draw
     const wImp = safeSetTextMany(form, nameIndex, [guessIMPORTO], moneyIT(importo), font);
+    if (guessIMPORTO) {
+      drawTextInField(pdfDoc, form, guessIMPORTO, moneyIT(importo), font, 9);
+    }
 
     if (wImp.ok && wImp.resolved) {
       const suf = impSuffixByNameNorm.get(norm(wImp.resolved));
       if (suf) usedSuffix.add(suf);
     }
 
+    // split kg/gr
     let kgInt = 0;
     let grInt = 0;
 
@@ -368,8 +417,15 @@ export async function fillU88Pdf(
       grInt = Math.round(safeKg * 1000);
     }
 
-    const wKg = safeSetTextMany(form, nameIndex, [guessKG], kgInt > 0 ? String(kgInt) : "", font);
-    const wGr = safeSetTextMany(form, nameIndex, [guessGR], grInt > 0 ? String(grInt) : "", font);
+    const kgText = kgInt > 0 ? String(kgInt) : "";
+    const grText = grInt > 0 ? String(grInt) : "";
+
+    const wKg = safeSetTextMany(form, nameIndex, [guessKG], kgText, font);
+    const wGr = safeSetTextMany(form, nameIndex, [guessGR], grText, font);
+
+    // Fallback definitivo: stampo SEMPRE se ho il nome campo
+    if (guessKG) drawTextInField(pdfDoc, form, guessKG, kgText, font, 9);
+    if (guessGR) drawTextInField(pdfDoc, form, guessGR, grText, font, 9);
 
     const found = { KG: wKg.ok, GR: wGr.ok, IMPORTO: wImp.ok };
 
@@ -394,15 +450,21 @@ export async function fillU88Pdf(
     }
   }
 
-  // ✅ FIX: genera le appearance prima del flatten (è la differenza tra “si vede” e “vuoto”)
-  form.updateFieldAppearances(font);
+  // Appearance best-effort (non più critico, ma lo lasciamo)
+  try {
+    form.updateFieldAppearances(font);
+  } catch {}
 
-  form.flatten();
+  // Flatten best-effort (ora che abbiamo disegnato testo “vero” non è più vitale)
+  try {
+    form.flatten();
+  } catch {}
+
   const pdf = await pdfDoc.save({ useObjectStreams: false });
-
 
   return { pdf, missing };
 }
+
 
 
 
