@@ -1,5 +1,5 @@
 // File: lib/pdf/fillU88.ts
-import { PDFDocument } from "pdf-lib";
+import { PDFDocument, StandardFonts } from "pdf-lib";
 
 /* -------------------- normalize -------------------- */
 
@@ -256,6 +256,9 @@ export async function fillU88Pdf(
   const pdfDoc = await PDFDocument.load(templatePdfBytes);
   const form = pdfDoc.getForm();
 
+  // ✅ FIX: su Vercel spesso senza questa riga il testo NON diventa visibile dopo flatten
+  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+
   const fields = form.getFields();
   const names = fields.map((f) => f.getName());
 
@@ -284,7 +287,6 @@ export async function fillU88Pdf(
   for (const e of entries.GR) grBySuffix.set(e.suffixNorm, e.name);
   for (const e of entries.IMPORTO) impBySuffix.set(e.suffixNorm, e.name);
 
-  // ✅ Mappa: nomeCampoIMPORTO (norm) -> suffixNorm, per marcare usedSuffix quando scrivo davvero
   const impSuffixByNameNorm = new Map<string, string>();
   for (const e of entries.IMPORTO) {
     impSuffixByNameNorm.set(norm(e.name), e.suffixNorm);
@@ -328,21 +330,17 @@ export async function fillU88Pdf(
       }
     }
 
-    // candidati basati su bestRow (se c’è)
     const guessIMPORTO = bestRow ? bestRow.name : null;
     const guessKG = bestRow ? (kgBySuffix.get(bestRow.suffixNorm) || null) : null;
     const guessGR = bestRow ? (grBySuffix.get(bestRow.suffixNorm) || null) : null;
 
-    // scrivo importo (robusto)
     const wImp = safeSetTextMany(form, nameIndex, [guessIMPORTO], moneyIT(importo));
 
-    // ✅ FIX CRITICO: se ho scritto IMPORTO, quella riga è usata. Stop sovrascritture.
     if (wImp.ok && wImp.resolved) {
       const suf = impSuffixByNameNorm.get(norm(wImp.resolved));
       if (suf) usedSuffix.add(suf);
     }
 
-    // kg/gr
     let kgInt = 0;
     let grInt = 0;
 
@@ -384,11 +382,15 @@ export async function fillU88Pdf(
     }
   }
 
+  // ✅ FIX: genera le appearance prima del flatten (è la differenza tra “si vede” e “vuoto”)
+  form.updateFieldAppearances(font);
+
   form.flatten();
   const pdf = await pdfDoc.save();
 
   return { pdf, missing };
 }
+
 
 
 
