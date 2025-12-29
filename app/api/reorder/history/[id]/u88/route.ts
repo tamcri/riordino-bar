@@ -105,7 +105,11 @@ function findHeaderRow(ws: ExcelJS.Worksheet): number {
   return -1;
 }
 
-function findColumn(ws: ExcelJS.Worksheet, headerRow: number, predicate: (h: string) => boolean): number {
+function findColumn(
+  ws: ExcelJS.Worksheet,
+  headerRow: number,
+  predicate: (h: string) => boolean
+): number {
   const row = ws.getRow(headerRow);
   let found = -1;
 
@@ -119,24 +123,28 @@ function findColumn(ws: ExcelJS.Worksheet, headerRow: number, predicate: (h: str
 }
 
 /**
- * Converte quello che arriva da Supabase Storage in Uint8Array robusto.
+ * Converte qualunque cosa (Blob/ArrayBuffer/Uint8Array/Buffer) in Buffer.
+ * Questo è IL punto che su Vercel ti salva la vita.
  */
-async function toUint8Array(data: any): Promise<Uint8Array> {
+async function toNodeBuffer(data: any): Promise<Buffer> {
   if (!data) throw new Error("Storage download: file vuoto/undefined");
 
-  // già Uint8Array
-  if (data instanceof Uint8Array) return data;
+  // Buffer già pronto
+  if (typeof Buffer !== "undefined" && Buffer.isBuffer(data)) return data;
+
+  // Uint8Array
+  if (data instanceof Uint8Array) return Buffer.from(data);
 
   // ArrayBuffer
-  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (data instanceof ArrayBuffer) return Buffer.from(new Uint8Array(data));
 
-  // Blob (supabase.storage.download tipicamente ritorna Blob su Node)
+  // Blob (Supabase su Vercel spesso torna Blob)
   if (typeof data.arrayBuffer === "function") {
     const ab = await data.arrayBuffer();
-    return new Uint8Array(ab);
+    return Buffer.from(new Uint8Array(ab));
   }
 
-  // Stream (fallback)
+  // Response-like con body stream (fallback raro)
   if (data.body && typeof data.body.getReader === "function") {
     const reader = data.body.getReader();
     const chunks: Uint8Array[] = [];
@@ -145,51 +153,25 @@ async function toUint8Array(data: any): Promise<Uint8Array> {
       if (done) break;
       if (value) chunks.push(value);
     }
-    const total = chunks.reduce((s, c) => s + c.length, 0);
-    const out = new Uint8Array(total);
-    let offset = 0;
-    for (const c of chunks) {
-      out.set(c, offset);
-      offset += c.length;
-    }
-    return out;
+    return Buffer.concat(chunks.map((c) => Buffer.from(c)));
   }
 
   throw new Error(`Storage download: tipo non gestito (${Object.prototype.toString.call(data)})`);
 }
 
-/**
- * ExcelJS su Vercel è instabile se gli passi Buffer (a volte Buffer non esiste).
- * Qui carichiamo SOLO con ArrayBuffer/Uint8Array.
- */
-async function loadExcelWithFallback(workbook: ExcelJS.Workbook, bytes: Uint8Array) {
-  // ArrayBuffer “pulito” (senza offset strani)
-  const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-
-  // 1) Prova ArrayBuffer
-  try {
-    await workbook.xlsx.load(ab as ArrayBuffer);
-    return;
-  } catch (e1: any) {
-    console.error("[U88] ExcelJS load(ArrayBuffer) FAIL:", e1?.message || e1);
+function assertXlsx(buf: Buffer) {
+  if (buf.length < 4 || buf[0] !== 0x50 || buf[1] !== 0x4b) {
+    const head = buf.slice(0, 200).toString("utf8");
+    throw new Error(`File scaricato NON è ZIP/XLSX (manca PK). Inizio: ${JSON.stringify(head)}`);
   }
 
-  // 2) Prova Uint8Array diretto (alcune versioni lo accettano)
-  try {
-    // @ts-ignore
-    await workbook.xlsx.load(bytes);
-    return;
-  } catch (e2: any) {
-    console.error("[U88] ExcelJS load(Uint8Array) FAIL:", e2?.message || e2);
+  // Heuristica: molti XLSX contengono stringhe note vicine all'inizio (non garantito, ma utile)
+  const slice = buf.slice(0, Math.min(buf.length, 200000)).toString("latin1");
+  if (!slice.includes("[Content_Types].xml") && !slice.includes("xl/workbook.xml")) {
+    throw new Error("File è ZIP ma NON sembra un XLSX valido (mancano marker [Content_Types].xml / xl/workbook.xml)");
   }
-
-  // Debug minimo senza Buffer
-  console.error("[U88] XLSX DEBUG size:", bytes.length);
-  console.error("[U88] XLSX DEBUG first bytes:", Array.from(bytes.slice(0, 12))); // deve iniziare con 80,75 (= 'P','K')
-  console.error("[U88] XLSX DEBUG last bytes:", Array.from(bytes.slice(-12)));
-
-  throw new Error("ExcelJS non riesce a leggere l'XLSX (file corrotto/troncato o formato non supportato su Vercel)");
 }
+
 
 /* -------------------- handler -------------------- */
 
@@ -216,45 +198,55 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
     return NextResponse.json({ ok: false, error: "U88 disponibile solo per TAB" }, { status: 400 });
   }
 
-  // 2) download xlsx pulito
-  const { data: fileBlob, error: dErr } = await supabaseAdmin.storage.from("reorders").download(reorder.export_path);
+  // 2) download excel pulito
+  const { data: fileBlob, error: dErr } = await supabaseAdmin.storage
+    .from("reorders")
+    .download(reorder.export_path);
 
   if (dErr || !fileBlob) {
     console.error("[U88] download xlsx error:", dErr);
     return NextResponse.json({ ok: false, error: "Errore download Excel" }, { status: 500 });
   }
 
-  // 3) bytes
-  let xlsxBytes: Uint8Array;
+  let xlsxBuf: Buffer;
   try {
-    xlsxBytes = await toUint8Array(fileBlob);
+    xlsxBuf = await toNodeBuffer(fileBlob);
+    console.log("[U88] xlsx size:", xlsxBuf.length);
+    console.log("[U88] xlsx sig:", xlsxBuf.slice(0, 2).toString("utf8"));
+    assertXlsx(xlsxBuf);
   } catch (e: any) {
-    console.error("[U88] toUint8Array error:", e);
-    return NextResponse.json({ ok: false, error: e?.message || "Errore lettura bytes Excel" }, { status: 500 });
-  }
-
-  // guardrail: XLSX è zip => deve iniziare con PK (0x50 0x4B)
-  if (xlsxBytes.length < 4 || xlsxBytes[0] !== 0x50 || xlsxBytes[1] !== 0x4b) {
-    console.error("[U88] NOT XLSX - first bytes:", Array.from(xlsxBytes.slice(0, 24)));
+    console.error("[U88] bytes error:", e);
     return NextResponse.json(
-      { ok: false, error: "Il file scaricato da Supabase non è un XLSX valido (non inizia con PK). Controlla i log Vercel." },
+      { ok: false, error: e?.message || "Errore lettura bytes Excel (Vercel)" },
       { status: 500 }
     );
   }
 
-  // 4) leggo excel
-  const wb = new ExcelJS.Workbook();
-  try {
-    await loadExcelWithFallback(wb, xlsxBytes);
-  } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: e?.message || "Errore lettura XLSX con ExcelJS (vedi log Vercel)" },
-      { status: 500 }
-    );
-  }
+  // 3) leggo excel (fallback robusto su Vercel: scrivo in /tmp e leggo da file)
+const wb = new ExcelJS.Workbook();
+
+const tmpPath = path.join("/tmp", `reorder_${reorderId}.xlsx`);
+
+try {
+  await fs.writeFile(tmpPath, xlsxBuf);
+  await wb.xlsx.readFile(tmpPath);
+} catch (e: any) {
+  console.error("[U88] ExcelJS readFile error:", e);
+  console.error("[U88] first 200 bytes as text:", xlsxBuf.slice(0, 200).toString("utf8"));
+  return NextResponse.json(
+    { ok: false, error: "ExcelJS non riesce a leggere l'XLSX (readFile) su Vercel (vedi log)" },
+    { status: 500 }
+  );
+} finally {
+  // cleanup best-effort
+  try { await fs.unlink(tmpPath); } catch {}
+}
+
 
   const ws = wb.worksheets[0];
-  if (!ws) return NextResponse.json({ ok: false, error: "Excel non valido (worksheet mancante)" }, { status: 400 });
+  if (!ws) {
+    return NextResponse.json({ ok: false, error: "Excel non valido (worksheet mancante)" }, { status: 400 });
+  }
 
   const headerRow = findHeaderRow(ws);
   if (headerRow === -1) {
@@ -281,7 +273,6 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
     const descr = cellToText(ws.getCell(r, cDesc)).trim();
     const cod = cCod !== -1 ? cellToText(ws.getCell(r, cCod)).trim() : "";
 
-    // stop su TOTALI
     if (normalize(descr) === "totali") break;
 
     const qtaOrd = cellToNumber(ws.getCell(r, cQtaOrd));
@@ -293,11 +284,7 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
     const pesoKgFromFile = cPeso !== -1 ? cellToNumber(ws.getCell(r, cPeso)) : 0;
     const pesoKg = pesoKgFromFile > 0 ? pesoKgFromFile : Number((qtaOrd * 0.02).toFixed(1));
 
-    items.push({
-      descrizione: descr,
-      pesoKg,
-      valoreDaOrdinare,
-    });
+    items.push({ descrizione: descr, pesoKg, valoreDaOrdinare });
   }
 
   if (items.length === 0) {
@@ -307,11 +294,11 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
     );
   }
 
-  // 5) template U88
+  // 4) template PDF
   const templatePath = path.join(process.cwd(), "lib", "pdf", "templates", "U88.pdf");
   const templateBytes = await fs.readFile(templatePath);
 
-  // 6) compilo pdf
+  // 5) compilo PDF
   const { pdf, missing } = await fillU88Pdf(new Uint8Array(templateBytes), items);
 
   if (missing.length > 0) {
@@ -323,7 +310,6 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
     .replace(/\s+/g, "_")
     .replace(/[^\w\-\.]/g, "");
 
-  // NB: qui Buffer lo uso SOLO per rispondere col PDF (Node runtime lo supporta; se mai desse no, lo convertiamo)
   return new NextResponse(Buffer.from(pdf), {
     status: 200,
     headers: {
@@ -333,6 +319,10 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
     },
   });
 }
+
+
+
+
 
 
 
