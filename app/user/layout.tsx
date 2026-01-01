@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
 import { parseSessionValue, COOKIE_NAME } from "@/lib/auth";
 import UserTopBarClient from "../../components/UserTopBarClient";
 
@@ -8,9 +9,21 @@ export default function UserLayout({ children }: { children: React.ReactNode }) 
   const raw = cookieStore.get(COOKIE_NAME)?.value;
   const session = parseSessionValue(raw);
 
-  // (Il middleware già protegge /user, ma teniamo un fallback)
-  const username = session?.username ?? "Utente";
-  const isAdmin = session?.role === "admin";
+  // se non loggato, fuori
+  if (!session) redirect("/login");
+
+  const username = session.username ?? "Utente";
+  const role = session.role ?? null;
+
+  // ✅ PV non deve stare in /user
+  if (role === "punto_vendita") {
+    redirect("/pv");
+  }
+
+  const isAdmin = role === "admin";
+  const isAmministrativo = role === "amministrativo";
+
+  const showAdminArea = isAdmin || isAmministrativo;
 
   return (
     <div className="min-h-screen bg-gray-100">
@@ -43,52 +56,51 @@ export default function UserLayout({ children }: { children: React.ReactNode }) 
             </Link>
           )}
 
-          <Link
-            href="/user/order-tab"
-            className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-blue-600 text-white hover:bg-blue-700"
-          >
-            Order Tab
-          </Link>
+          {showAdminArea && (
+            <>
+              <Link
+                href="/user/order-tab"
+                className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-blue-600 text-white hover:bg-blue-700"
+              >
+                Order Tab
+              </Link>
 
-          <Link
-            href="/user/order-gv"
-            className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-orange-500 text-white hover:bg-orange-600"
-          >
-            Order G&amp;V
-          </Link>
+              <Link
+                href="/user/order-gv"
+                className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-orange-500 text-white hover:bg-orange-600"
+              >
+                Order G&amp;V
+              </Link>
 
-          <Link
-            href="/user/history"
-            className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-slate-700 text-white hover:bg-slate-800"
-          >
-            Storico Ordini
-          </Link>
+              <Link
+                href="/user/history"
+                className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-slate-700 text-white hover:bg-slate-800"
+              >
+                Storico Ordini
+              </Link>
 
-          <Link
-            href="/user/items"
-            className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-slate-700 text-white hover:bg-slate-800"
-          >
-            Articoli
-          </Link>
+              <Link
+                href="/user/items"
+                className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-slate-700 text-white hover:bg-slate-800"
+              >
+                Articoli
+              </Link>
 
-          {/* ✅ Inventario */}
-          <Link
-            href="/user/inventories"
-            className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-emerald-600 text-white hover:bg-emerald-700"
-          >
-            Inventario
-          </Link>
+              <Link
+                href="/user/inventories"
+                className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-emerald-600 text-white hover:bg-emerald-700"
+              >
+                Inventario
+              </Link>
 
-          {/* ✅ Storico Inventari */}
-          <Link
-            href="/user/inventories/history"
-            className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-emerald-700 text-white hover:bg-emerald-800"
-          >
-            Storico Inventari
-          </Link>
-
-          {/* Qui aggiungeremo altre voci man mano */}
-          {/* <Link href="/user/qualcosa" className="...">Nuova funzione</Link> */}
+              <Link
+                href="/user/inventories/history"
+                className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-emerald-700 text-white hover:bg-emerald-800"
+              >
+                Storico Inventari
+              </Link>
+            </>
+          )}
         </div>
       </nav>
 
@@ -97,4 +109,7 @@ export default function UserLayout({ children }: { children: React.ReactNode }) 
     </div>
   );
 }
+
+
+
 

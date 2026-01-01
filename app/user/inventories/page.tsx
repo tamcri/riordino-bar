@@ -2,8 +2,8 @@ import InventoryClient from "./InventoryClient";
 import { requireRole } from "@/lib/auth";
 
 export default async function InventoriesPage() {
-  // accesso: admin, amministrativo, punto_vendita
-  await requireRole(["admin", "amministrativo", "punto_vendita"]);
+  // accesso: SOLO admin, amministrativo
+  await requireRole(["admin", "amministrativo"]);
 
   return (
     <main className="min-h-screen bg-gray-100">
@@ -18,3 +18,4 @@ export default async function InventoriesPage() {
     </main>
   );
 }
+

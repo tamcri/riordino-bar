@@ -30,12 +30,35 @@ type InventoryLine = {
   qty: number;
 };
 
+type MeResponse = {
+  ok: boolean;
+  username?: string;
+  role?: string;
+  pv_id?: string | null;
+  error?: string;
+};
+
+type MeState = {
+  role: "admin" | "amministrativo" | "punto_vendita" | null;
+  username: string | null;
+  pv_id: string | null;
+  isPv: boolean;
+};
+
 export default function InventoryHistoryClient() {
+  const [me, setMe] = useState<MeState>({
+    role: null,
+    username: null,
+    pv_id: null,
+    isPv: false,
+  });
+
   const [pvs, setPvs] = useState<Pv[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [subcategories, setSubcategories] = useState<Subcategory[]>([]);
 
-  const [pvId, setPvId] = useState<string>(""); // "" = tutti
+  // filtri
+  const [pvId, setPvId] = useState<string>(""); // "" = tutti (solo admin/amministrativo)
   const [categoryId, setCategoryId] = useState<string>(""); // "" = tutte
   const [subcategoryId, setSubcategoryId] = useState<string>(""); // "" = tutte/nessuna
 
@@ -49,8 +72,38 @@ export default function InventoryHistoryClient() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
 
-  // subcategorie: le mostriamo solo se esiste una categoria selezionata
+  // modal compare
+  const [compareOpen, setCompareOpen] = useState(false);
+  const [compareTarget, setCompareTarget] = useState<InventoryGroup | null>(null);
+  const [compareFile, setCompareFile] = useState<File | null>(null);
+  const [compareLoading, setCompareLoading] = useState(false);
+  const [compareError, setCompareError] = useState<string | null>(null);
+  const [compareMsg, setCompareMsg] = useState<string | null>(null);
+  const [compareDownloadUrl, setCompareDownloadUrl] = useState<string | null>(null);
+
   const canUseSubcategories = useMemo(() => !!categoryId, [categoryId]);
+
+  const canCompare = me.role === "admin" || me.role === "amministrativo";
+
+  async function fetchMe(): Promise<MeState> {
+    const res = await fetch("/api/me", { cache: "no-store" });
+    const json: MeResponse = await res.json().catch(() => ({ ok: false, error: "Errore parsing" }));
+
+    if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore autenticazione");
+
+    const role = (json.role || "").toString() as MeState["role"];
+    const pv_id = json.pv_id ?? null;
+
+    const isPv = role === "punto_vendita";
+    if (isPv && !pv_id) throw new Error("Utente punto vendita senza PV assegnato (pv_id mancante).");
+
+    return {
+      role: role ?? null,
+      username: json.username ?? null,
+      pv_id,
+      isPv,
+    };
+  }
 
   async function loadPvs() {
     const res = await fetch("/api/pvs/list", { cache: "no-store" });
@@ -64,7 +117,6 @@ export default function InventoryHistoryClient() {
     const json = await res.json().catch(() => null);
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore caricamento categorie");
     setCategories(json.rows || []);
-    // ✅ NON setto più una categoria di default: vogliamo poter vedere “tutte”
   }
 
   async function loadSubcategories(catId: string) {
@@ -80,7 +132,7 @@ export default function InventoryHistoryClient() {
     setSubcategories(json.rows || []);
   }
 
-  async function loadList() {
+  async function loadList(effectiveMe: MeState) {
     setLoading(true);
     setError(null);
     setRows([]);
@@ -91,13 +143,17 @@ export default function InventoryHistoryClient() {
     try {
       const params = new URLSearchParams();
 
-      // ✅ category_id opzionale
       if (categoryId) params.set("category_id", categoryId);
 
-      // ✅ pv_id opzionale
-      if (pvId) params.set("pv_id", pvId);
+      // PV:
+      // - PV mode: pv_id forzato
+      // - admin/amministrativo: pv_id opzionale
+      if (effectiveMe.isPv) {
+        if (effectiveMe.pv_id) params.set("pv_id", effectiveMe.pv_id);
+      } else {
+        if (pvId) params.set("pv_id", pvId);
+      }
 
-      // ✅ subcategory ha senso solo se category è selezionata
       if (categoryId && subcategoryId) params.set("subcategory_id", subcategoryId);
 
       const qs = params.toString();
@@ -113,13 +169,18 @@ export default function InventoryHistoryClient() {
     }
   }
 
-  async function loadDetail(g: InventoryGroup) {
+  async function loadDetail(g: InventoryGroup, effectiveMe: MeState) {
     setSelected(g);
     setDetail([]);
     setDetailError(null);
     setDetailLoading(true);
 
     try {
+      // extra sicurezza
+      if (effectiveMe.isPv && effectiveMe.pv_id && g.pv_id !== effectiveMe.pv_id) {
+        throw new Error("Non autorizzato.");
+      }
+
       const params = new URLSearchParams();
       params.set("pv_id", g.pv_id);
       params.set("category_id", g.category_id);
@@ -138,11 +199,95 @@ export default function InventoryHistoryClient() {
     }
   }
 
+  function openCompare(g: InventoryGroup) {
+    setCompareTarget(g);
+    setCompareFile(null);
+    setCompareOpen(true);
+    setCompareError(null);
+    setCompareMsg(null);
+    setCompareDownloadUrl(null);
+  }
+
+  function closeCompare() {
+    setCompareOpen(false);
+    setCompareTarget(null);
+    setCompareFile(null);
+    setCompareError(null);
+    setCompareMsg(null);
+    setCompareDownloadUrl(null);
+    setCompareLoading(false);
+  }
+
+  async function startCompare() {
+    if (!compareTarget) return;
+    if (!compareFile) {
+      setCompareError("Carica prima il file del gestionale.");
+      return;
+    }
+
+    setCompareLoading(true);
+    setCompareError(null);
+    setCompareMsg(null);
+    setCompareDownloadUrl(null);
+
+    try {
+      // Placeholder: domani lo implementiamo davvero
+      // L’idea: carichi il file gestionale, e il server confronta vs inventario PV già salvato in DB.
+      const fd = new FormData();
+      fd.append("file", compareFile);
+
+      // chiavi inventario da confrontare
+      fd.append("pv_id", compareTarget.pv_id);
+      fd.append("category_id", compareTarget.category_id);
+      fd.append("inventory_date", compareTarget.inventory_date);
+      if (compareTarget.subcategory_id) fd.append("subcategory_id", compareTarget.subcategory_id);
+
+      const res = await fetch("/api/inventories/compare", { method: "POST", body: fd });
+      const text = await res.text();
+      let json: any = null;
+
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        // non json
+      }
+
+      if (!res.ok || !json?.ok) {
+        const msg = json?.error || `Comparazione non disponibile (endpoint /api/inventories/compare).`;
+        throw new Error(msg);
+      }
+
+      // ci aspettiamo: { ok:true, downloadUrl:"/api/.../excel" }
+      setCompareMsg("Comparazione completata.");
+      setCompareDownloadUrl(json.downloadUrl || null);
+    } catch (e: any) {
+      setCompareError(e?.message || "Errore comparazione");
+    } finally {
+      setCompareLoading(false);
+    }
+  }
+
+  // bootstrap
   useEffect(() => {
     (async () => {
       try {
         setLoading(true);
-        await Promise.all([loadPvs(), loadCategories()]);
+        setError(null);
+
+        const meState = await fetchMe();
+        setMe(meState);
+
+        // se PV, filtro PV “implicito”: teniamo pvId come stringa (solo per UI, ma non mostriamo select)
+        if (meState.isPv && meState.pv_id) setPvId(meState.pv_id);
+
+        await loadCategories();
+
+        if (!meState.isPv) {
+          await loadPvs();
+        }
+
+        // prima lista
+        await loadList(meState);
       } catch (e: any) {
         setError(e?.message || "Errore");
       } finally {
@@ -152,47 +297,71 @@ export default function InventoryHistoryClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // quando cambia categoria -> ricarica sottocategorie (o resetta se vuota)
+  // quando cambia categoria -> ricarica sottocategorie
   useEffect(() => {
     (async () => {
       try {
+        if (!me.role) return;
         setError(null);
-        await loadSubcategories(categoryId); // se categoryId="" resetta e basta
+        await loadSubcategories(categoryId);
       } catch (e: any) {
         setError(e?.message || "Errore");
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [categoryId]);
+  }, [categoryId, me.role]);
 
-  // trigger lista quando cambiano filtri
+  // trigger lista quando cambiano filtri (usa me in state, niente fetchMe ripetuto)
   useEffect(() => {
-    loadList();
+    (async () => {
+      try {
+        if (!me.role) return;
+        await loadList(me);
+      } catch (e: any) {
+        setError(e?.message || "Errore");
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pvId, categoryId, subcategoryId]);
+  }, [pvId, categoryId, subcategoryId, me.role]);
 
   return (
     <div className="space-y-4">
       {/* filtri */}
       <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-3 gap-3">
-        <div>
-          <label className="block text-sm font-medium mb-2">Punto Vendita (opzionale)</label>
-          <select className="w-full rounded-xl border p-3 bg-white" value={pvId} onChange={(e) => setPvId(e.target.value)}>
-            <option value="">— Tutti i PV —</option>
-            {pvs.map((pv) => (
-              <option key={pv.id} value={pv.id}>
-                {pv.code} — {pv.name}
-              </option>
-            ))}
-          </select>
-          <p className="text-xs text-gray-500 mt-1">
-            Se lasci “Tutti i PV”, vedrai gli inventari (eventualmente filtrati per categoria) di tutti i punti vendita.
-          </p>
-        </div>
+        {/* PV filter: SOLO admin/amministrativo */}
+        {!me.isPv ? (
+          <div>
+            <label className="block text-sm font-medium mb-2">Punto Vendita (opzionale)</label>
+            <select
+              className="w-full rounded-xl border p-3 bg-white"
+              value={pvId}
+              onChange={(e) => setPvId(e.target.value)}
+            >
+              <option value="">— Tutti i PV —</option>
+              {pvs.map((pv) => (
+                <option key={pv.id} value={pv.id}>
+                  {pv.code} — {pv.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : (
+          <div>
+            <label className="block text-sm font-medium mb-2">Punto Vendita</label>
+            <div className="w-full rounded-xl border p-3 bg-gray-50 text-gray-700">
+              Il tuo Punto Vendita (filtro automatico)
+            </div>
+            <p className="text-xs text-gray-500 mt-1">Non puoi cambiare PV.</p>
+          </div>
+        )}
 
         <div>
           <label className="block text-sm font-medium mb-2">Categoria</label>
-          <select className="w-full rounded-xl border p-3 bg-white" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
+          <select
+            className="w-full rounded-xl border p-3 bg-white"
+            value={categoryId}
+            onChange={(e) => setCategoryId(e.target.value)}
+          >
             <option value="">— Tutte le categorie —</option>
             {categories.map((c) => (
               <option key={c.id} value={c.id}>
@@ -200,9 +369,6 @@ export default function InventoryHistoryClient() {
               </option>
             ))}
           </select>
-          <p className="text-xs text-gray-500 mt-1">
-            Se lasci “Tutte”, vedrai gli inventari di qualsiasi categoria (eventualmente filtrati per PV).
-          </p>
         </div>
 
         <div>
@@ -220,11 +386,6 @@ export default function InventoryHistoryClient() {
               </option>
             ))}
           </select>
-          {!canUseSubcategories ? (
-            <p className="text-xs text-gray-500 mt-1">Seleziona prima una categoria per usare le sottocategorie.</p>
-          ) : (
-            <p className="text-xs text-gray-500 mt-1">Facoltativo: restringe l’inventario a una sola sottocategoria.</p>
-          )}
         </div>
       </div>
 
@@ -243,13 +404,14 @@ export default function InventoryHistoryClient() {
               <th className="text-right p-3 w-28">Pezzi</th>
               <th className="text-left p-3 w-36">Creato da</th>
               <th className="text-left p-3 w-32"></th>
+              {canCompare && <th className="text-left p-3 w-32"></th>}
             </tr>
           </thead>
 
           <tbody>
             {loading && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={8}>
+                <td className="p-3 text-gray-500" colSpan={canCompare ? 9 : 8}>
                   Caricamento...
                 </td>
               </tr>
@@ -257,7 +419,7 @@ export default function InventoryHistoryClient() {
 
             {!loading && rows.length === 0 && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={8}>
+                <td className="p-3 text-gray-500" colSpan={canCompare ? 9 : 8}>
                   Nessun inventario trovato con questi filtri.
                 </td>
               </tr>
@@ -277,11 +439,30 @@ export default function InventoryHistoryClient() {
                   <td className="p-3 text-right">{r.lines_count}</td>
                   <td className="p-3 text-right font-semibold">{r.qty_sum}</td>
                   <td className="p-3">{r.created_by_username ?? "—"}</td>
+
                   <td className="p-3">
-                    <button className="rounded-xl border px-3 py-2 hover:bg-gray-50" onClick={() => loadDetail(r)}>
+                    <button
+                      className="rounded-xl border px-3 py-2 hover:bg-gray-50"
+                      onClick={async () => {
+                        await loadDetail(r, me);
+                      }}
+                    >
                       Dettaglio
                     </button>
                   </td>
+
+                  {canCompare && (
+                    <td className="p-3">
+                      <button
+                        className="rounded-xl bg-slate-900 text-white px-3 py-2 hover:bg-slate-800 disabled:opacity-60"
+                        onClick={() => openCompare(r)}
+                        disabled={!canCompare}
+                        title="Carica file del gestionale e compara"
+                      >
+                        Compara
+                      </button>
+                    </td>
+                  )}
                 </tr>
               );
             })}
@@ -289,7 +470,7 @@ export default function InventoryHistoryClient() {
         </table>
       </div>
 
-      {/* dettaglio righe */}
+      {/* dettaglio */}
       {selected && (
         <div className="rounded-2xl border bg-white p-4 space-y-3">
           <div className="flex items-start justify-between gap-3">
@@ -346,13 +527,77 @@ export default function InventoryHistoryClient() {
               </table>
             </div>
           )}
+        </div>
+      )}
 
-          <div className="text-xs text-gray-500">
-            Prossimo step (Riscontro): qui useremo questo inventario selezionato per confrontarlo con il gestionale.
+      {/* MODAL COMPARA */}
+      {compareOpen && compareTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/40" onClick={closeCompare} />
+
+          <div className="relative w-full max-w-xl rounded-2xl bg-white shadow-lg border p-5">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-lg font-semibold">Compara inventario</div>
+                <div className="text-sm text-gray-600 mt-1">
+                  {compareTarget.inventory_date} — {compareTarget.pv_code} — {compareTarget.category_name}
+                  {compareTarget.subcategory_name ? ` — ${compareTarget.subcategory_name}` : ""}
+                </div>
+              </div>
+
+              <button className="rounded-xl border px-3 py-2 hover:bg-gray-50" onClick={closeCompare}>
+                Chiudi
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              <div>
+                <label className="block text-sm font-medium mb-2">File gestionale (.xlsx)</label>
+                <input
+                  type="file"
+                  accept=".xlsx"
+                  onChange={(e) => setCompareFile(e.target.files?.[0] || null)}
+                />
+                {compareFile && (
+                  <p className="text-xs text-gray-600 mt-2">
+                    Selezionato: <b>{compareFile.name}</b>
+                  </p>
+                )}
+              </div>
+
+              {compareError && <p className="text-sm text-red-600">{compareError}</p>}
+              {compareMsg && <p className="text-sm text-green-700">{compareMsg}</p>}
+
+              <div className="flex items-center justify-between gap-3">
+                <button
+                  className="rounded-xl bg-slate-900 text-white px-4 py-2 hover:bg-slate-800 disabled:opacity-60"
+                  disabled={!compareFile || compareLoading}
+                  onClick={startCompare}
+                >
+                  {compareLoading ? "Comparo..." : "Avvia comparazione"}
+                </button>
+
+                {compareDownloadUrl && (
+                  <button
+                    className="rounded-xl border px-4 py-2 hover:bg-gray-50"
+                    onClick={() => (window.location.href = compareDownloadUrl)}
+                  >
+                    Scarica risultato
+                  </button>
+                )}
+              </div>
+
+              <p className="text-xs text-gray-500">
+                Nota: domani implementiamo l’endpoint <b>/api/inventories/compare</b> in base al formato del file gestionale.
+              </p>
+            </div>
           </div>
         </div>
       )}
     </div>
   );
 }
+
+
+
 

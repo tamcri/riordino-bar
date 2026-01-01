@@ -16,7 +16,7 @@ function normalizeRole(role: unknown): AppRole | null {
 function roleHome(role: AppRole): string {
   if (role === "admin") return "/admin";
   if (role === "amministrativo") return "/user"; // riordino
-  return "/pv"; // punto vendita (inventario) - lo faremo dopo
+  return "/pv/inventario"; // ✅ PV va diretto all’inventario
 }
 
 export async function POST(req: Request) {
@@ -67,4 +67,6 @@ export async function POST(req: Request) {
 
   return res;
 }
+
+
 

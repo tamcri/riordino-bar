@@ -10,6 +10,49 @@ function isUuid(v: string | null) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v.trim());
 }
 
+const USER_TABLE_CANDIDATES = ["app_user", "app_users", "utenti", "users"];
+
+async function lookupPvIdFromUserTables(username: string): Promise<string | null> {
+  for (const table of USER_TABLE_CANDIDATES) {
+    const { data, error } = await supabaseAdmin
+      .from(table)
+      .select("pv_id")
+      .eq("username", username)
+      .maybeSingle();
+
+    if (error) continue;
+    const pv_id = (data as any)?.pv_id ?? null;
+    if (pv_id && isUuid(pv_id)) return pv_id;
+    return null;
+  }
+  return null;
+}
+
+async function lookupPvIdFromUsernameCode(username: string): Promise<string | null> {
+  const code = (username || "").trim().split(/\s+/)[0]?.toUpperCase();
+  if (!code || code.length > 5) return null;
+
+  const { data, error } = await supabaseAdmin
+    .from("pvs")
+    .select("id")
+    .eq("is_active", true)
+    .eq("code", code)
+    .maybeSingle();
+
+  if (error) return null;
+  return data?.id ?? null;
+}
+
+async function requirePvIdForPuntoVendita(username: string): Promise<string> {
+  const pvFromUsers = await lookupPvIdFromUserTables(username);
+  if (pvFromUsers) return pvFromUsers;
+
+  const pvFromCode = await lookupPvIdFromUsernameCode(username);
+  if (pvFromCode) return pvFromCode;
+
+  throw new Error("Utente punto vendita senza PV assegnato (pv_id mancante).");
+}
+
 type InventoryRow = {
   pv_id: string;
   category_id: string;
@@ -22,23 +65,25 @@ type InventoryRow = {
 
 export async function GET(req: Request) {
   const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
-  if (!session || !["admin", "amministrativo"].includes(session.role)) {
+
+  // ✅ ora permettiamo anche punto_vendita
+  if (!session || !["admin", "amministrativo", "punto_vendita"].includes(session.role)) {
     return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
   }
 
   const url = new URL(req.url);
-  const category_id = (url.searchParams.get("category_id") || "").trim(); // ✅ opzionale
-  const pv_id = (url.searchParams.get("pv_id") || "").trim();
+  const category_id = (url.searchParams.get("category_id") || "").trim(); // opzionale
+  const pv_id_qs = (url.searchParams.get("pv_id") || "").trim(); // opzionale (IGNORATO per PV)
   const subcategory_id = (url.searchParams.get("subcategory_id") || "").trim();
   const from = (url.searchParams.get("from") || "").trim(); // opzionale
   const to = (url.searchParams.get("to") || "").trim(); // opzionale
   const limitRows = Math.min(Number(url.searchParams.get("limit") || 8000), 20000);
 
-  // ✅ validazioni (category_id ora opzionale)
+  // ✅ validazioni
   if (category_id && !isUuid(category_id)) {
     return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
   }
-  if (pv_id && !isUuid(pv_id)) {
+  if (pv_id_qs && !isUuid(pv_id_qs)) {
     return NextResponse.json({ ok: false, error: "pv_id non valido" }, { status: 400 });
   }
   if (subcategory_id && !isUuid(subcategory_id)) {
@@ -47,10 +92,17 @@ export async function GET(req: Request) {
 
   // ✅ subcategory ha senso solo se c’è category
   if (subcategory_id && !category_id) {
-    return NextResponse.json(
-      { ok: false, error: "subcategory_id richiede anche category_id" },
-      { status: 400 }
-    );
+    return NextResponse.json({ ok: false, error: "subcategory_id richiede anche category_id" }, { status: 400 });
+  }
+
+  // ✅ enforcement PV: se punto_vendita, forzo pv_id dall’utente loggato
+  let effectivePvId = pv_id_qs;
+  if (session.role === "punto_vendita") {
+    try {
+      effectivePvId = await requirePvIdForPuntoVendita(session.username);
+    } catch (e: any) {
+      return NextResponse.json({ ok: false, error: e?.message || "Non autorizzato" }, { status: 401 });
+    }
   }
 
   let q = supabaseAdmin
@@ -58,9 +110,9 @@ export async function GET(req: Request) {
     .select("pv_id, category_id, subcategory_id, inventory_date, qty, created_by_username, created_at")
     .limit(limitRows);
 
-  // ✅ filtri opzionali
+  // filtri opzionali
   if (category_id) q = q.eq("category_id", category_id);
-  if (pv_id) q = q.eq("pv_id", pv_id);
+  if (effectivePvId) q = q.eq("pv_id", effectivePvId);
   if (subcategory_id) q = q.eq("subcategory_id", subcategory_id);
 
   // filtri data opzionali (YYYY-MM-DD)
@@ -122,7 +174,6 @@ export async function GET(req: Request) {
 
   const list = Array.from(groups.values());
 
-  // se niente risultati, rispondi subito (evita .in([]))
   if (list.length === 0) {
     return NextResponse.json({ ok: true, rows: [] });
   }
@@ -133,9 +184,15 @@ export async function GET(req: Request) {
   const subIds = Array.from(new Set(list.map((x) => x.subcategory_id).filter(Boolean))) as string[];
 
   const [pvsRes, catsRes, subsRes] = await Promise.all([
-    pvIds.length ? supabaseAdmin.from("pvs").select("id, code, name").in("id", pvIds) : Promise.resolve({ data: [], error: null }),
-    catIds.length ? supabaseAdmin.from("categories").select("id, name").in("id", catIds) : Promise.resolve({ data: [], error: null }),
-    subIds.length ? supabaseAdmin.from("subcategories").select("id, name, category_id").in("id", subIds) : Promise.resolve({ data: [], error: null }),
+    pvIds.length
+      ? supabaseAdmin.from("pvs").select("id, code, name").in("id", pvIds)
+      : Promise.resolve({ data: [], error: null } as any),
+    catIds.length
+      ? supabaseAdmin.from("categories").select("id, name").in("id", catIds)
+      : Promise.resolve({ data: [], error: null } as any),
+    subIds.length
+      ? supabaseAdmin.from("subcategories").select("id, name, category_id").in("id", subIds)
+      : Promise.resolve({ data: [], error: null } as any),
   ]);
 
   if (pvsRes.error) return NextResponse.json({ ok: false, error: pvsRes.error.message }, { status: 500 });
@@ -169,7 +226,7 @@ export async function GET(req: Request) {
     category_id: g.category_id,
     category_name: catMap.get(g.category_id)?.name ?? "",
     subcategory_id: g.subcategory_id,
-    subcategory_name: g.subcategory_id ? (subMap.get(g.subcategory_id)?.name ?? "") : "",
+    subcategory_name: g.subcategory_id ? subMap.get(g.subcategory_id)?.name ?? "" : "",
     inventory_date: g.inventory_date,
     created_by_username: g.created_by_username,
     created_at: g.created_at,
@@ -179,5 +236,6 @@ export async function GET(req: Request) {
 
   return NextResponse.json({ ok: true, rows: out });
 }
+
 
 

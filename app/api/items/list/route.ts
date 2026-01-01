@@ -7,19 +7,21 @@ export const runtime = "nodejs";
 
 function isUuid(v: string | null) {
   if (!v) return false;
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v.trim());
 }
 
 export async function GET(req: Request) {
   const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
-  if (!session || !["admin", "amministrativo"].includes(session.role)) {
+
+  // ✅ lettura consentita anche a punto_vendita (serve per Inventario PV)
+  if (!session || !["admin", "amministrativo", "punto_vendita"].includes(session.role)) {
     return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
   }
 
   const url = new URL(req.url);
 
   // ✅ nuovo schema
-  const category_id = url.searchParams.get("category_id");       // uuid
+  const category_id = url.searchParams.get("category_id"); // uuid
   const subcategory_id = url.searchParams.get("subcategory_id"); // uuid
 
   // ✅ vecchio schema (retro-compat)
@@ -76,4 +78,5 @@ export async function GET(req: Request) {
 
   return NextResponse.json({ ok: true, rows: data || [] });
 }
+
 

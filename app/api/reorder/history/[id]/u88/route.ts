@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import path from "path";
 import fs from "fs/promises";
+import os from "os";
 import ExcelJS from "exceljs";
 
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
@@ -11,7 +12,6 @@ import { fillU88Pdf, type U88Item } from "@/lib/pdf/fillU88";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
-
 export const runtime = "nodejs";
 
 /* -------------------- auth -------------------- */
@@ -125,29 +125,18 @@ function findColumn(
   return found;
 }
 
-/**
- * Converte qualunque cosa (Blob/ArrayBuffer/Uint8Array/Buffer) in Buffer.
- * Questo è IL punto che su Vercel ti salva la vita.
- */
 async function toNodeBuffer(data: any): Promise<Buffer> {
   if (!data) throw new Error("Storage download: file vuoto/undefined");
 
-  // Buffer già pronto
   if (typeof Buffer !== "undefined" && Buffer.isBuffer(data)) return data;
-
-  // Uint8Array
   if (data instanceof Uint8Array) return Buffer.from(data);
-
-  // ArrayBuffer
   if (data instanceof ArrayBuffer) return Buffer.from(new Uint8Array(data));
 
-  // Blob (Supabase su Vercel spesso torna Blob)
   if (typeof data.arrayBuffer === "function") {
     const ab = await data.arrayBuffer();
     return Buffer.from(new Uint8Array(ab));
   }
 
-  // Response-like con body stream (fallback raro)
   if (data.body && typeof data.body.getReader === "function") {
     const reader = data.body.getReader();
     const chunks: Uint8Array[] = [];
@@ -168,13 +157,11 @@ function assertXlsx(buf: Buffer) {
     throw new Error(`File scaricato NON è ZIP/XLSX (manca PK). Inizio: ${JSON.stringify(head)}`);
   }
 
-  // Heuristica: molti XLSX contengono stringhe note vicine all'inizio (non garantito, ma utile)
   const slice = buf.slice(0, Math.min(buf.length, 200000)).toString("latin1");
   if (!slice.includes("[Content_Types].xml") && !slice.includes("xl/workbook.xml")) {
     throw new Error("File è ZIP ma NON sembra un XLSX valido (mancano marker [Content_Types].xml / xl/workbook.xml)");
   }
 }
-
 
 /* -------------------- handler -------------------- */
 
@@ -214,37 +201,49 @@ export async function GET(_req: Request, ctx: { params: { id: string } }) {
   let xlsxBuf: Buffer;
   try {
     xlsxBuf = await toNodeBuffer(fileBlob);
-    console.log("[U88] xlsx size:", xlsxBuf.length);
-    console.log("[U88] xlsx sig:", xlsxBuf.slice(0, 2).toString("utf8"));
     assertXlsx(xlsxBuf);
   } catch (e: any) {
     console.error("[U88] bytes error:", e);
     return NextResponse.json(
-      { ok: false, error: e?.message || "Errore lettura bytes Excel (Vercel)" },
+      { ok: false, error: e?.message || "Errore lettura bytes Excel" },
       { status: 500 }
     );
   }
 
-  // 3) leggo excel (fallback robusto su Vercel: scrivo in /tmp e leggo da file)
-const wb = new ExcelJS.Workbook();
+  // 3) leggo excel (versione “anti-bug ExcelJS”)
+  const wb = new ExcelJS.Workbook();
+  try {
+    // ✅ ArrayBuffer “pulito” (slice ESATTO): evita bug di byteOffset/view
+    const ab = xlsxBuf.buffer.slice(
+      xlsxBuf.byteOffset,
+      xlsxBuf.byteOffset + xlsxBuf.byteLength
+    );
 
-const tmpPath = path.join("/tmp", `reorder_${reorderId}.xlsx`);
-
-try {
-  await fs.writeFile(tmpPath, xlsxBuf);
-  await wb.xlsx.readFile(tmpPath);
-} catch (e: any) {
-  console.error("[U88] ExcelJS readFile error:", e);
-  console.error("[U88] first 200 bytes as text:", xlsxBuf.slice(0, 200).toString("utf8"));
-  return NextResponse.json(
-    { ok: false, error: "ExcelJS non riesce a leggere l'XLSX (readFile) su Vercel (vedi log)" },
-    { status: 500 }
-  );
-} finally {
-  // cleanup best-effort
-  try { await fs.unlink(tmpPath); } catch {}
-}
-
+    try {
+      await wb.xlsx.load(ab as any);
+    } catch (e1) {
+      // ✅ stesso contenuto ma come Uint8Array “pulita”
+      try {
+        const bytes = new Uint8Array(ab);
+        await wb.xlsx.load(bytes as any);
+      } catch (e2) {
+        // ✅ fallback definitivo: tmp + readFile
+        const tmpPath = path.join(os.tmpdir(), `reorder_${reorderId}_${Date.now()}.xlsx`);
+        await fs.writeFile(tmpPath, xlsxBuf);
+        try {
+          await wb.xlsx.readFile(tmpPath);
+        } finally {
+          try { await fs.unlink(tmpPath); } catch {}
+        }
+      }
+    }
+  } catch (e: any) {
+    console.error("[U88] ExcelJS read failed:", e);
+    return NextResponse.json(
+      { ok: false, error: e?.message || "ExcelJS non riesce a leggere l'XLSX" },
+      { status: 500 }
+    );
+  }
 
   const ws = wb.worksheets[0];
   if (!ws) {
@@ -322,6 +321,8 @@ try {
     },
   });
 }
+
+
 
 
 

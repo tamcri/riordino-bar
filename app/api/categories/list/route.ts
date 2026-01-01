@@ -1,16 +1,15 @@
 import { NextResponse } from "next/server";
-import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-export async function GET(req: Request) {
-  const cookie = req.headers.get("cookie") || "";
-  const sessionCookie = cookie
-    .split("; ")
-    .find((c) => c.startsWith(COOKIE_NAME + "="))
-    ?.split("=")[1];
+export const runtime = "nodejs";
 
-  const session = parseSessionValue(sessionCookie);
-  if (!session || session.role !== "admin") {
+export async function GET() {
+  const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
+
+  // ✅ categorie leggibili da utenti autenticati (anche punto_vendita)
+  if (!session || !["admin", "amministrativo", "punto_vendita"].includes(session.role)) {
     return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
   }
 
@@ -20,5 +19,9 @@ export async function GET(req: Request) {
     .order("name", { ascending: true });
 
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+
   return NextResponse.json({ ok: true, rows: data ?? [] });
 }
+
+
+

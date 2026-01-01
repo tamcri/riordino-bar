@@ -34,9 +34,16 @@ export default function LoginPage() {
         return;
       }
 
-      // ✅ redirect deciso dal backend in base al ruolo:
-      // admin -> /admin, amministrativo -> /user, punto_vendita -> /pv
-      const to = json.redirectTo || (json.role === "admin" ? "/admin" : "/user");
+      // ✅ Redirect pulito e definitivo:
+      // - punto_vendita -> /pv/inventario (non /pv)
+      // - admin -> /admin
+      // - amministrativo -> /user
+      let to = "/user";
+
+      if (json.role === "punto_vendita") to = "/pv/inventario";
+      else if (json.role === "admin") to = "/admin";
+      else to = "/user";
+
       router.replace(to);
     } catch (err: any) {
       setMsg(err?.message || "Errore login");
@@ -81,4 +88,5 @@ export default function LoginPage() {
     </main>
   );
 }
+
 

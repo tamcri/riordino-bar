@@ -5,7 +5,8 @@ import InventoryHistoryClient from "./InventoryHistoryClient";
 export default function Page() {
   const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
 
-  if (!session || !["admin", "amministrativo"].includes(session.role)) {
+  // ✅ ora anche punto_vendita può entrare
+  if (!session || !["admin", "amministrativo", "punto_vendita"].includes(session.role)) {
     return (
       <main className="min-h-screen bg-gray-100">
         <div className="mx-auto max-w-6xl px-6 py-10">
@@ -23,9 +24,13 @@ export default function Page() {
       <div className="mx-auto max-w-6xl px-6 py-6 space-y-6">
         <div>
           <h1 className="text-2xl font-semibold">Storico Inventari</h1>
-          <p className="text-gray-600 mt-1">
-            Filtra per Punto Vendita (opzionale) e Categoria. Se PV è vuoto, vedi tutti i PV per quella categoria.
-          </p>
+          {session.role === "punto_vendita" ? (
+            <p className="text-gray-600 mt-1">Qui vedi lo storico inventari del tuo Punto Vendita.</p>
+          ) : (
+            <p className="text-gray-600 mt-1">
+              Filtra per Punto Vendita (opzionale) e Categoria. Se PV è vuoto, vedi tutti i PV per quella categoria.
+            </p>
+          )}
         </div>
 
         <InventoryHistoryClient />
@@ -33,3 +38,8 @@ export default function Page() {
     </main>
   );
 }
+
+
+
+
+
