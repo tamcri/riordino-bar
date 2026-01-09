@@ -11,11 +11,7 @@ type Row = {
   pv_id: string | null;
   type: "TAB" | "GV";
 
-  // ✅ weeks già c’è
   weeks: number;
-
-  // ✅ NEW: se hai aggiunto days in tabella, lo mostriamo.
-  // Se non esiste ancora a DB/endpoint, non rompe nulla.
   days?: number | null;
 
   tot_rows: number | null;
@@ -31,18 +27,38 @@ function fmtDate(iso: string) {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString("it-IT");
 }
 
+function normPvLabel(s: string) {
+  return (s || "")
+    .toUpperCase()
+    .trim()
+    .replace(/[-–—]/g, " ") // trattini diversi -> spazio
+    .replace(/[^\w\s]/g, " ") // via punteggiatura
+    .replace(/\s+/g, " "); // spazi multipli -> singolo
+}
+
+const PV_PAT_ALLOWED_NORM = new Set(
+  [
+    "A3 FLACCA",
+    "C3 VELLETRI",
+    "C7 ROVERETO",
+    "C8 RIMINI",
+    "C9 PERUGIA",
+    "D1 VIAREGGIO",
+    "D2 LATINA",
+  ].map(normPvLabel)
+);
+
 export default function HistoryClient() {
   const [typeFilter, setTypeFilter] = useState<"ALL" | "TAB" | "GV">("ALL");
-  const [pvId, setPvId] = useState<string>(""); // "" = tutti
-  const [from, setFrom] = useState<string>(""); // YYYY-MM-DD
-  const [to, setTo] = useState<string>(""); // YYYY-MM-DD
+  const [pvId, setPvId] = useState<string>("");
+  const [from, setFrom] = useState<string>("");
+  const [to, setTo] = useState<string>("");
 
   const [pvs, setPvs] = useState<PV[]>([]);
   const [loading, setLoading] = useState(false);
   const [rows, setRows] = useState<Row[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  // carica PV una volta
   useEffect(() => {
     (async () => {
       try {
@@ -83,7 +99,6 @@ export default function HistoryClient() {
     }
   }
 
-  // auto-load quando cambiano filtri
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -190,14 +205,9 @@ export default function HistoryClient() {
               <th className="text-left p-3">Data</th>
               <th className="text-left p-3">PV</th>
               <th className="text-left p-3">Tipo</th>
-
-              {/* ✅ al posto di “Settimane” mostriamo Periodo */}
               <th className="text-left p-3">Periodo</th>
-
               <th className="text-left p-3">Utente</th>
               <th className="text-left p-3">Righe</th>
-
-              {/* ✅ azioni */}
               <th className="text-left p-3">Azioni</th>
             </tr>
           </thead>
@@ -223,20 +233,20 @@ export default function HistoryClient() {
               const isTAB = r.type === "TAB";
               const id = encodeURIComponent(r.id);
 
+              const pvNorm = normPvLabel(String(r.pv_label || ""));
+              const canPAT = isTAB && PV_PAT_ALLOWED_NORM.has(pvNorm);
+
               return (
                 <tr key={r.id} className="border-t">
                   <td className="p-3">{fmtDate(r.created_at)}</td>
                   <td className="p-3">{r.pv_label || "-"}</td>
                   <td className="p-3 font-medium">{r.type}</td>
-
                   <td className="p-3">{periodoLabel(r)}</td>
-
                   <td className="p-3">{r.created_by_username || "-"}</td>
                   <td className="p-3">{r.tot_rows ?? "-"}</td>
 
                   <td className="p-3">
                     <div className="flex flex-wrap gap-2">
-                      {/* Excel */}
                       <a
                         className="inline-flex items-center rounded-xl bg-orange-500 text-white px-3 py-2 hover:bg-orange-600"
                         href={`/api/reorder/history/${id}/excel`}
@@ -244,7 +254,6 @@ export default function HistoryClient() {
                         Excel
                       </a>
 
-                      {/* ✅ U88 solo TAB */}
                       <a
                         className={`inline-flex items-center rounded-xl px-3 py-2 ${
                           isTAB
@@ -256,28 +265,48 @@ export default function HistoryClient() {
                       >
                         U88
                       </a>
-                       {/* Order Tab (Excel compilato) - solo TAB */}
-<a
-  className={`inline-flex items-center rounded-xl px-3 py-2 ${
-    isTAB
-      ? "bg-emerald-600 text-white hover:bg-emerald-700"
-      : "bg-gray-200 text-gray-500 pointer-events-none"
-  }`}
-  href={isTAB ? `/api/reorder/history/${id}/order-tab` : undefined}
-  title={isTAB ? "Scarica Order Tab compilato" : "Order Tab disponibile solo per TAB"}
->
-  Log
-</a>
- {/* Log */}
-<a
-  className="inline-flex items-center rounded-xl bg-slate-700 text-white px-3 py-2 hover:bg-slate-800"
-  href={`/api/reorder/history/${id}/log`}
->
-  Json
-</a>
 
+                      {/* ✅ PAT: MOSTRATO SOLO quando ammesso */}
+                      {canPAT && (
+                        <a
+                          className="inline-flex items-center rounded-xl px-3 py-2 bg-violet-600 text-white hover:bg-violet-700"
+                          href={`/api/reorder/history/${id}/pat`}
+                          title="Scarica PAT"
+                        >
+                          PAT
+                        </a>
+                      )}
 
+                      <a
+                        className={`inline-flex items-center rounded-xl px-3 py-2 ${
+                          isTAB
+                            ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                            : "bg-gray-200 text-gray-500 pointer-events-none"
+                        }`}
+                        href={isTAB ? `/api/reorder/history/${id}/order-tab` : undefined}
+                        title={isTAB ? "Scarica Order Tab compilato" : "Order Tab disponibile solo per TAB"}
+                      >
+                        Log
+                      </a>
 
+                      <a
+                        className={`inline-flex items-center rounded-xl px-3 py-2 ${
+                          isTAB
+                            ? "bg-emerald-700 text-white hover:bg-emerald-800"
+                            : "bg-gray-200 text-gray-500 pointer-events-none"
+                        }`}
+                        href={isTAB ? `/api/reorder/history/${id}/log-car` : undefined}
+                        title={isTAB ? "Scarica LOG CAR" : "LOG CAR disponibile solo per TAB"}
+                      >
+                        LOG CAR
+                      </a>
+
+                      <a
+                        className="inline-flex items-center rounded-xl bg-slate-700 text-white px-3 py-2 hover:bg-slate-800"
+                        href={`/api/reorder/history/${id}/log`}
+                      >
+                        Json
+                      </a>
                     </div>
                   </td>
                 </tr>
@@ -289,5 +318,8 @@ export default function HistoryClient() {
     </div>
   );
 }
+
+
+
 
 

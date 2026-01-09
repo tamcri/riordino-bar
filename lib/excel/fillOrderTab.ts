@@ -3,7 +3,15 @@ import ExcelJS from "exceljs";
 
 export type OrderTabRow = {
   codArticolo: string; // es: "T12345"
-  qtaKg: number;       // es: 0.2
+  qtaKg: number; // es: 0.2
+};
+
+export type PatRow = {
+  codArticolo: string;
+  descrizione: string;
+  qtaKg: number; // "Qtà in peso (kg)"
+  qtaDaOrdinare: number; // "Qtà da ordinare"
+  valoreDaOrdinare: number; // "Valore da ordinare"
 };
 
 function normalize(text: string) {
@@ -75,11 +83,45 @@ function findHeaderRow(ws: ExcelJS.Worksheet): number {
   return -1;
 }
 
+function findHeaderRowForPAT(ws: ExcelJS.Worksheet): number {
+  const maxRows = Math.min(30, ws.rowCount || 30);
+  const maxCols = Math.min(80, ws.columnCount || 80);
+
+  for (let r = 1; r <= maxRows; r++) {
+    const row = ws.getRow(r);
+    let hitCod = false;
+    let hitDescr = false;
+    let hitPeso = false;
+    let hitQtaOrd = false;
+    let hitValOrd = false;
+
+    for (let c = 1; c <= maxCols; c++) {
+      const txt = normalize(cellToString(row.getCell(c)));
+      if (!txt) continue;
+
+      if (txt.includes("cod") && txt.includes("art")) hitCod = true;
+      if (txt.includes("descr")) hitDescr = true;
+
+      if (txt.includes("qta in peso") && (txt.includes("kg") || txt.includes("(kg)"))) hitPeso = true;
+      if (txt.includes("qtà in peso") && (txt.includes("kg") || txt.includes("(kg)"))) hitPeso = true;
+      if (txt.includes("peso") && (txt.includes("kg") || txt.includes("(kg)"))) hitPeso = true;
+
+      if (txt.includes("qta da ordinare") || txt.includes("qtà da ordinare")) hitQtaOrd = true;
+      if (txt.includes("valore da ordinare")) hitValOrd = true;
+    }
+
+    if (hitCod && hitDescr && hitPeso && hitQtaOrd && hitValOrd) return r;
+  }
+
+  // fallback: riusa la logica base se il file non contiene tutte le intestazioni “perfette”
+  return findHeaderRow(ws);
+}
+
 function findColIndexByIncludes(headers: string[], includes: string[]): number {
-  const normHeaders = headers.map(h => normalize(h));
+  const normHeaders = headers.map((h) => normalize(h));
   for (const inc of includes) {
     const needle = normalize(inc);
-    const idx = normHeaders.findIndex(h => h.includes(needle));
+    const idx = normHeaders.findIndex((h) => h.includes(needle));
     if (idx !== -1) return idx;
   }
   return -1;
@@ -98,13 +140,12 @@ function extractAAMS(codArticolo: string): string {
  * - codArticolo (colonna "Cod. Articolo")
  * - qtaKg (colonna "Qtà in peso (kg)")
  */
-export async function extractRowsFromCleanReorderXlsx(cleanBytes: ArrayBuffer | Uint8Array): Promise<OrderTabRow[]> {
+export async function extractRowsFromCleanReorderXlsx(
+  cleanBytes: ArrayBuffer | Uint8Array
+): Promise<OrderTabRow[]> {
   const wb = new ExcelJS.Workbook();
 
-  const input =
-    cleanBytes instanceof ArrayBuffer
-      ? cleanBytes
-      : Buffer.from(cleanBytes as Uint8Array);
+  const input = cleanBytes instanceof ArrayBuffer ? cleanBytes : Buffer.from(cleanBytes as Uint8Array);
 
   await wb.xlsx.load(input as any);
 
@@ -141,11 +182,81 @@ export async function extractRowsFromCleanReorderXlsx(cleanBytes: ArrayBuffer | 
     const codArticolo = cellToString(row.getCell(cCod));
     const qtaKg = cellToNumber(row.getCell(cPeso).value);
 
-    // stop quando finisce davvero la tabella
     if (!codArticolo && qtaKg === 0) continue;
     if (!codArticolo) continue;
 
     out.push({ codArticolo, qtaKg });
+  }
+
+  return out;
+}
+
+/**
+ * ✅ Estrae le righe necessarie al PAT:
+ * - Cod. Articolo
+ * - Descrizione
+ * - Qtà in peso (kg)
+ * - Qtà da ordinare
+ * - Valore da ordinare
+ */
+export async function extractRowsForPatFromCleanReorderXlsx(
+  cleanBytes: ArrayBuffer | Uint8Array
+): Promise<PatRow[]> {
+  const wb = new ExcelJS.Workbook();
+
+  const input = cleanBytes instanceof ArrayBuffer ? cleanBytes : Buffer.from(cleanBytes as Uint8Array);
+
+  await wb.xlsx.load(input as any);
+
+  const ws = wb.worksheets[0];
+  if (!ws) throw new Error("Excel pulito senza worksheet.");
+
+  const headerRowNumber = findHeaderRowForPAT(ws);
+  if (headerRowNumber === -1) {
+    throw new Error(
+      "Non trovo le intestazioni nel file pulito per PAT (Cod. Articolo / Descrizione / Qtà in peso (kg) / Qtà da ordinare / Valore da ordinare)."
+    );
+  }
+
+  const headerRow = ws.getRow(headerRowNumber);
+  const headers: string[] = [];
+  headerRow.eachCell((cell, colNumber) => {
+    headers[colNumber - 1] = cellToString(cell);
+  });
+
+  const idxCod = findColIndexByIncludes(headers, ["cod. articolo", "cod articolo", "codice articolo"]);
+  const idxDescr = findColIndexByIncludes(headers, ["descrizione", "desc"]);
+  const idxPeso = findColIndexByIncludes(headers, ["qtà in peso", "qta in peso", "peso (kg)", "peso kg"]);
+  const idxQtaOrd = findColIndexByIncludes(headers, ["qtà da ordinare", "qta da ordinare"]);
+  const idxValOrd = findColIndexByIncludes(headers, ["valore da ordinare"]);
+
+  if (idxCod === -1) throw new Error("Nel file pulito non trovo la colonna 'Cod. Articolo'.");
+  if (idxDescr === -1) throw new Error("Nel file pulito non trovo la colonna 'Descrizione'.");
+  if (idxPeso === -1) throw new Error("Nel file pulito non trovo la colonna 'Qtà in peso (kg)'.");
+  if (idxQtaOrd === -1) throw new Error("Nel file pulito non trovo la colonna 'Qtà da ordinare'.");
+  if (idxValOrd === -1) throw new Error("Nel file pulito non trovo la colonna 'Valore da ordinare'.");
+
+  const cCod = idxCod + 1;
+  const cDescr = idxDescr + 1;
+  const cPeso = idxPeso + 1;
+  const cQtaOrd = idxQtaOrd + 1;
+  const cValOrd = idxValOrd + 1;
+
+  const out: PatRow[] = [];
+
+  for (let r = headerRowNumber + 1; r <= ws.rowCount; r++) {
+    const row = ws.getRow(r);
+
+    const codArticolo = cellToString(row.getCell(cCod));
+    const descrizione = cellToString(row.getCell(cDescr));
+    const qtaKg = cellToNumber(row.getCell(cPeso).value);
+    const qtaDaOrdinare = cellToNumber(row.getCell(cQtaOrd).value);
+    const valoreDaOrdinare = cellToNumber(row.getCell(cValOrd).value);
+
+    // stop soft: se non c'è codice, ignoro
+    if (!codArticolo) continue;
+
+    out.push({ codArticolo, descrizione, qtaKg, qtaDaOrdinare, valoreDaOrdinare });
   }
 
   return out;
@@ -161,8 +272,8 @@ export async function fillOrderTabXlsx(
     templateBytes instanceof ArrayBuffer
       ? templateBytes
       : Buffer.isBuffer(templateBytes as any)
-        ? (templateBytes as any)
-        : Buffer.from(templateBytes as Uint8Array);
+      ? (templateBytes as any)
+      : Buffer.from(templateBytes as Uint8Array);
 
   await wb.xlsx.load(input as any);
 
@@ -182,9 +293,7 @@ export async function fillOrderTabXlsx(
   const colQTA = headerToCol.get("QUANTITA");
 
   if (!colAAMS || !colQTA) {
-    throw new Error(
-      `Header non trovati nel template. Trovati: ${Array.from(headerToCol.keys()).join(", ")}`
-    );
+    throw new Error(`Header non trovati nel template. Trovati: ${Array.from(headerToCol.keys()).join(", ")}`);
   }
 
   // Scrivo dalla riga 2 in poi
@@ -202,6 +311,7 @@ export async function fillOrderTabXlsx(
   const out = await wb.xlsx.writeBuffer();
   return new Uint8Array(out as ArrayBuffer);
 }
+
 
 
 
