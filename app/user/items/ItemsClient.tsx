@@ -12,7 +12,26 @@ type Item = {
   is_active: boolean;
   category_id: string | null;
   subcategory_id: string | null;
+  peso_kg?: number | null; // ✅ NEW (opzionale: se l’API lo manda, lo mostriamo)
 };
+
+function isTabacchiCategory(cat: Category | null | undefined) {
+  if (!cat) return false;
+  const slug = String(cat.slug || "").toLowerCase().trim();
+  const name = String(cat.name || "").toLowerCase().trim();
+  // preferisci slug, fallback su name
+  return slug === "tabacchi" || name.includes("tabacc");
+}
+
+function formatPesoKg(v: any) {
+  if (v == null || v === "") return "—";
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return "—";
+  // mostro fino a 3 decimali senza fare il fenomeno
+  const s = n.toFixed(n < 0.1 ? 3 : n < 1 ? 2 : 1);
+  // elimina zeri finali inutili
+  return s.replace(/\.?0+$/, "");
+}
 
 export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   // filtri
@@ -38,6 +57,9 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   const [newCatName, setNewCatName] = useState("");
   const [newSubName, setNewSubName] = useState("");
   const [newSubCatId, setNewSubCatId] = useState("");
+
+  const selectedCategory = useMemo(() => categories.find((c) => c.id === categoryId) || null, [categories, categoryId]);
+  const showPeso = useMemo(() => isTabacchiCategory(selectedCategory), [selectedCategory]);
 
   const qs = useMemo(() => {
     const p = new URLSearchParams();
@@ -234,18 +256,12 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
               value={newCatName}
               onChange={(e) => setNewCatName(e.target.value)}
             />
-            <button className="rounded-xl bg-slate-900 text-white px-4 py-2">
-              Crea
-            </button>
+            <button className="rounded-xl bg-slate-900 text-white px-4 py-2">Crea</button>
           </form>
 
           <form onSubmit={createSubcategory} className="space-y-2">
             <div className="font-semibold">Crea Sottocategoria</div>
-            <select
-              className="w-full rounded-xl border p-3 bg-white"
-              value={newSubCatId}
-              onChange={(e) => setNewSubCatId(e.target.value)}
-            >
+            <select className="w-full rounded-xl border p-3 bg-white" value={newSubCatId} onChange={(e) => setNewSubCatId(e.target.value)}>
               <option value="">— Seleziona categoria padre —</option>
               {categories.map((c) => (
                 <option key={c.id} value={c.id}>
@@ -259,9 +275,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
               value={newSubName}
               onChange={(e) => setNewSubName(e.target.value)}
             />
-            <button className="rounded-xl bg-slate-900 text-white px-4 py-2">
-              Crea
-            </button>
+            <button className="rounded-xl bg-slate-900 text-white px-4 py-2">Crea</button>
           </form>
         </div>
       )}
@@ -270,11 +284,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
       <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-5 gap-3">
         <div className="md:col-span-2">
           <label className="block text-sm font-medium mb-2">Categoria</label>
-          <select
-            className="w-full rounded-xl border p-3 bg-white"
-            value={categoryId}
-            onChange={(e) => setCategoryId(e.target.value)}
-          >
+          <select className="w-full rounded-xl border p-3 bg-white" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
             <option value="">— Seleziona —</option>
             {categories.map((c) => (
               <option key={c.id} value={c.id}>
@@ -322,9 +332,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
           <div className="flex items-center justify-between">
             <div>
               <div className="font-semibold">Import articoli (Excel)</div>
-              <div className="text-sm text-gray-600">
-                Seleziona categoria/sottocategoria e importa. (Excel: Codice/Descrizione)
-              </div>
+              <div className="text-sm text-gray-600">Seleziona categoria/sottocategoria e importa. (Excel: Codice/Descrizione)</div>
             </div>
             <button className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60" disabled={!file || importing}>
               {importing ? "Importo..." : "Importa"}
@@ -350,6 +358,10 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
             <tr>
               <th className="text-left p-3">Codice</th>
               <th className="text-left p-3">Descrizione</th>
+
+              {/* ✅ SOLO TABACCHI */}
+              {showPeso && <th className="text-right p-3 w-32">Peso (kg)</th>}
+
               <th className="text-left p-3">Attivo</th>
               <th className="text-left p-3"></th>
             </tr>
@@ -357,13 +369,17 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
           <tbody>
             {loading && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={4}>Caricamento...</td>
+                <td className="p-3 text-gray-500" colSpan={showPeso ? 5 : 4}>
+                  Caricamento...
+                </td>
               </tr>
             )}
 
             {!loading && rows.length === 0 && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={4}>Nessun articolo trovato.</td>
+                <td className="p-3 text-gray-500" colSpan={showPeso ? 5 : 4}>
+                  Nessun articolo trovato.
+                </td>
               </tr>
             )}
 
@@ -371,6 +387,10 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
               <tr key={r.id} className="border-t">
                 <td className="p-3 font-medium">{r.code}</td>
                 <td className="p-3">{r.description}</td>
+
+                {/* ✅ SOLO TABACCHI */}
+                {showPeso && <td className="p-3 text-right font-medium">{formatPesoKg(r.peso_kg)}</td>}
+
                 <td className="p-3">{r.is_active ? "SI" : "NO"}</td>
                 <td className="p-3">
                   {isAdmin ? (
@@ -394,4 +414,5 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     </div>
   );
 }
+
 

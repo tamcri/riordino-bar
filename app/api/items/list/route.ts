@@ -42,10 +42,10 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: "Categoria non valida" }, { status: 400 });
   }
 
-  // Base select: includo sia campi nuovi che vecchi così la UI può evolvere senza cambiare subito qui.
+  // ✅ Base select: includo anche peso_kg
   let query = supabaseAdmin
     .from("items")
-    .select("id, category, category_id, subcategory_id, code, description, is_active, created_at, updated_at")
+    .select("id, category, category_id, subcategory_id, code, description, peso_kg, is_active, created_at, updated_at")
     .order("code", { ascending: true })
     .limit(limit);
 
@@ -78,5 +78,6 @@ export async function GET(req: Request) {
 
   return NextResponse.json({ ok: true, rows: data || [] });
 }
+
 
 

@@ -1,8 +1,9 @@
+// app/api/reorder/start/route.ts
 import { NextResponse } from "next/server";
 import crypto from "crypto";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
-import { processReorderExcel } from "@/lib/excel/reorder";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { parseReorderExcel, buildReorderXlsx, PreviewRow } from "@/lib/excel/reorder";
 
 export const runtime = "nodejs";
 
@@ -16,7 +17,6 @@ function sanitizeWeeks(v: unknown): number {
 }
 
 function sanitizeDays(v: unknown): number | null {
-  // days è opzionale
   if (v == null || v === "") return null;
   const n = Number(v);
   if (!Number.isFinite(n)) return null;
@@ -32,6 +32,90 @@ function getCookieValue(cookieHeader: string, name: string): string | null {
     if (p.startsWith(name + "=")) return p.substring(name.length + 1);
   }
   return null;
+}
+
+function normCode(v: any): string {
+  return String(v ?? "").trim();
+}
+
+async function findTabacchiCategoryId(): Promise<string | null> {
+  // Provo prima con slug "tabacchi"
+  {
+    const { data, error } = await supabaseAdmin
+      .from("categories")
+      .select("id, slug, name")
+      .ilike("slug", "tabacchi")
+      .maybeSingle();
+
+    if (!error && data?.id) return String(data.id);
+  }
+
+  // Fallback: name "Tabacchi" (case insensitive)
+  {
+    const { data, error } = await supabaseAdmin
+      .from("categories")
+      .select("id, slug, name")
+      .ilike("name", "tabacchi")
+      .maybeSingle();
+
+    if (!error && data?.id) return String(data.id);
+  }
+
+  return null;
+}
+
+async function loadPesoKgByCodes(codes: string[]): Promise<Map<string, number>> {
+  const m = new Map<string, number>();
+  const uniq = Array.from(new Set(codes.map((c) => normCode(c)).filter(Boolean)));
+  if (uniq.length === 0) return m;
+
+  const chunkSize = 500;
+
+  // 1) NEW SCHEMA: category_id della categoria "Tabacchi"
+  const tabacchiCategoryId = await findTabacchiCategoryId();
+  if (tabacchiCategoryId) {
+    for (let i = 0; i < uniq.length; i += chunkSize) {
+      const chunk = uniq.slice(i, i + chunkSize);
+
+      const { data, error } = await supabaseAdmin
+        .from("items")
+        .select("code, peso_kg")
+        .eq("category_id", tabacchiCategoryId)
+        .in("code", chunk);
+
+      if (error) throw error;
+
+      (data || []).forEach((r: any) => {
+        const code = normCode(r.code);
+        const pk = Number(r.peso_kg);
+        if (code && Number.isFinite(pk) && pk > 0) m.set(code, pk);
+      });
+    }
+
+    // Se ho trovato almeno qualcosa, ok: non serve legacy
+    if (m.size > 0) return m;
+  }
+
+  // 2) LEGACY: category="TAB"
+  for (let i = 0; i < uniq.length; i += chunkSize) {
+    const chunk = uniq.slice(i, i + chunkSize);
+
+    const { data, error } = await supabaseAdmin
+      .from("items")
+      .select("code, peso_kg")
+      .eq("category", "TAB")
+      .in("code", chunk);
+
+    if (error) throw error;
+
+    (data || []).forEach((r: any) => {
+      const code = normCode(r.code);
+      const pk = Number(r.peso_kg);
+      if (code && Number.isFinite(pk) && pk > 0) m.set(code, pk);
+    });
+  }
+
+  return m;
 }
 
 export async function POST(req: Request) {
@@ -70,15 +154,32 @@ export async function POST(req: Request) {
 
     const pvLabel = `${pv.code} - ${pv.name}`;
 
-    // ✅ periodo: weeks sempre valido, days opzionale (priorità al motore)
     const weeks = sanitizeWeeks(formData.get("weeks"));
     const days = sanitizeDays(formData.get("days"));
 
     const input = await file.arrayBuffer();
 
-    // ✅ motore: usa days se presente, altrimenti weeks
-    const { xlsx, rows } = await processReorderExcel(input, weeks, days);
+    // 1) parse gestionale
+    const parsed = await parseReorderExcel(input, weeks, days);
 
+    // 2) peso da anagrafica Tabacchi (new schema) con fallback legacy TAB
+    const codes = parsed.rows.map((r) => normCode(r.codArticolo));
+    const pesoMap = await loadPesoKgByCodes(codes);
+
+    // fallback vecchia logica SOLO se manca peso anagrafico
+    const fallbackPesoUnitKg = 0.02;
+
+    const enrichedRows: PreviewRow[] = parsed.rows.map((r) => {
+      const code = normCode(r.codArticolo);
+      const unitPeso = pesoMap.get(code) ?? fallbackPesoUnitKg;
+      const pesoKg = Number(((r.qtaOrdine || 0) * unitPeso).toFixed(1));
+      return { ...r, pesoKg };
+    });
+
+    // 3) costruisci Excel finale (pulito)
+    const xlsx = await buildReorderXlsx(pvLabel, enrichedRows);
+
+    // 4) upload + storico
     const reorderId = crypto.randomUUID();
     const now = new Date();
     const year = now.getFullYear();
@@ -86,19 +187,16 @@ export async function POST(req: Request) {
 
     const exportPath = `TAB/${pv.code}/${year}/${month}/${reorderId}.xlsx`;
 
-    const { error: uploadErr } = await supabaseAdmin.storage
-      .from("reorders")
-      .upload(exportPath, xlsx, {
-        contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        upsert: false,
-      });
+    const { error: uploadErr } = await supabaseAdmin.storage.from("reorders").upload(exportPath, xlsx, {
+      contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      upsert: false,
+    });
 
     if (uploadErr) {
       console.error("[TAB start] upload error:", uploadErr);
       return NextResponse.json({ ok: false, error: "Errore upload Excel" }, { status: 500 });
     }
 
-    // ✅ NB: questo insert fallisce se in DB non hai la colonna days
     const { error: insertErr } = await supabaseAdmin.from("reorders").insert({
       id: reorderId,
       created_by_username: session.username,
@@ -107,9 +205,9 @@ export async function POST(req: Request) {
       pv_label: pvLabel,
       type: "TAB",
       weeks,
-      days, // days può essere null
+      days,
       export_path: exportPath,
-      tot_rows: rows.length,
+      tot_rows: enrichedRows.length,
     });
 
     if (insertErr) {
@@ -120,8 +218,8 @@ export async function POST(req: Request) {
     return NextResponse.json({
       ok: true,
       reorderId,
-      preview: rows.slice(0, 20),
-      totalRows: rows.length,
+      preview: enrichedRows.slice(0, 20),
+      totalRows: enrichedRows.length,
       weeks,
       days,
       downloadUrl: `/api/reorder/history/${reorderId}/excel`,
@@ -131,6 +229,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: err?.message || "Errore interno" }, { status: 500 });
   }
 }
+
+
+
+
 
 
 

@@ -1,9 +1,9 @@
+// app/api/items/import/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import ExcelJS from "exceljs";
-import { processReorderExcel } from "@/lib/excel/reorder";
 
 export const runtime = "nodejs";
 
@@ -16,7 +16,37 @@ function normDesc(v: any): string {
 
 function isUuid(v: string | null) {
   if (!v) return false;
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v.trim());
+}
+
+type ExtractedRow = { code: string; description: string; peso_kg: number | null };
+
+/**
+ * PESO: tu mi hai confermato che nel tuo file è in KG.
+ * Mantengo comunque parsing robusto:
+ * - 0,02 / 0.02 / "0,02 kg" ecc.
+ * - se proprio qualcuno mette "20 g" lo converte (ma non è richiesto)
+ */
+function parsePesoKg(cellText: string, headerHint: string | null): number | null {
+  const t0 = String(cellText ?? "").trim();
+  if (!t0) return null;
+
+  const cleaned = t0.replace(/\s+/g, " ").replace(",", ".").toLowerCase();
+  const m = cleaned.match(/-?\d+(\.\d+)?/);
+  if (!m) return null;
+
+  const n = Number(m[0]);
+  if (!Number.isFinite(n) || n <= 0) return null;
+
+  const h = (headerHint || "").toLowerCase();
+
+  // Se per caso header/cella parlano di grammi, converto
+  if (h.includes("gram") || h.includes(" gr") || h === "g" || cleaned.includes("gram") || cleaned.includes(" gr") || cleaned.endsWith("g")) {
+    return n / 1000;
+  }
+
+  // Default: KG (come da tuo file)
+  return n;
 }
 
 // ====== LEGACY (TAB/GV) ======
@@ -103,94 +133,120 @@ export async function POST(req: Request) {
 
     const input = await file.arrayBuffer();
 
-    // 1) Excel generico (header-based robusto)
-    let extracted: { code: string; description: string }[] = [];
+    // ✅ Excel header-based robusto + Peso
+    const extracted: ExtractedRow[] = [];
 
-    try {
-      const wb = new ExcelJS.Workbook();
-      await wb.xlsx.load(input);
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(input);
 
-      const ws = wb.worksheets[0];
-      if (ws) {
-        const cellText = (row: ExcelJS.Row, col: number) =>
-          String(((row.getCell(col) as any)?.text ?? row.getCell(col).value ?? "")).trim().toLowerCase();
+    const ws = wb.worksheets[0];
+    if (!ws) {
+      return NextResponse.json({ ok: false, error: "Foglio Excel non trovato" }, { status: 400 });
+    }
 
-        let headerRow = -1;
-        let codeCol = -1;
-        let descCol = -1;
+    const cellTextLower = (row: ExcelJS.Row, col: number) => {
+      const cell = row.getCell(col);
+      const t = String((cell as any)?.text ?? cell.value ?? "").trim().toLowerCase();
+      return t;
+    };
 
-        for (let r = 1; r <= Math.min(ws.rowCount, 60); r++) {
-          const row = ws.getRow(r);
-          for (let c = 1; c <= Math.min(ws.columnCount || 30, 30); c++) {
-            const t = cellText(row, c);
-            if (codeCol === -1 && ["codice", "cod", "codice articolo", "cod. articolo", "code", "articolo"].some(k => t.includes(k))) {
-              codeCol = c;
-            }
-            if (descCol === -1 && ["descrizione", "descr", "description"].some(k => t.includes(k))) {
-              descCol = c;
-            }
-          }
+    let headerRow = -1;
+    let codeCol = -1;
+    let descCol = -1;
+    let pesoCol = -1;
+    let pesoHeaderHint: string | null = null;
 
-          if (codeCol !== -1 && descCol !== -1 && codeCol !== descCol) {
-            headerRow = r;
-            break;
-          } else {
-            codeCol = -1;
-            descCol = -1;
-          }
+    // trova intestazioni nelle prime 60 righe
+    for (let r = 1; r <= Math.min(ws.rowCount || 1, 60); r++) {
+      const row = ws.getRow(r);
+
+      let tmpCode = -1;
+      let tmpDesc = -1;
+      let tmpPeso = -1;
+      let tmpPesoHint: string | null = null;
+
+      for (let c = 1; c <= Math.min(ws.columnCount || 30, 40); c++) {
+        const t = cellTextLower(row, c);
+        if (!t) continue;
+
+        if (
+          tmpCode === -1 &&
+          ["codice", "cod", "codice articolo", "cod. articolo", "code", "articolo", "cod_articolo"].some((k) => t.includes(k))
+        ) {
+          tmpCode = c;
         }
 
-        if (headerRow !== -1) {
-          for (let rr = headerRow + 1; rr <= ws.rowCount; rr++) {
-            const row2 = ws.getRow(rr);
+        if (tmpDesc === -1 && ["descrizione", "descr", "description", "articolo descrizione"].some((k) => t.includes(k))) {
+          tmpDesc = c;
+        }
 
-            const code = normCode((row2.getCell(codeCol) as any)?.text ?? row2.getCell(codeCol).value);
-            const desc = normDesc((row2.getCell(descCol) as any)?.text ?? row2.getCell(descCol).value);
-
-            if (!code && !desc) continue;
-
-            const low = `${code} ${desc}`.toLowerCase();
-            if (low.includes("pagina") && low.includes("di")) continue;
-
-            if (code) extracted.push({ code, description: desc || code });
-          }
+        if (tmpPeso === -1 && ["peso", "peso articolo", "peso (kg)", "peso kg", "peso_kg", "kg", "grammi", "gr", "g"].some((k) => t.includes(k))) {
+          tmpPeso = c;
+          tmpPesoHint = t;
         }
       }
-    } catch {
-      // fallback sotto
+
+      if (tmpCode !== -1 && tmpDesc !== -1 && tmpCode !== tmpDesc) {
+        headerRow = r;
+        codeCol = tmpCode;
+        descCol = tmpDesc;
+        pesoCol = tmpPeso; // opzionale
+        pesoHeaderHint = tmpPesoHint;
+        break;
+      }
     }
 
-    // 2) fallback TAB gestionale (solo legacy TAB)
-    const legacyCategory = legacyCategoryRaw as "TAB" | "GV";
-    if (!useNew && extracted.length === 0 && legacyCategory === "TAB") {
-      const { rows } = await processReorderExcel(input);
-      extracted = rows
-        .map((r: any) => ({
-          code: normCode(r.codArticolo),
-          description: normDesc(r.descrizione),
-        }))
-        .filter((x) => x.code);
-    }
-
-    if (extracted.length === 0) {
+    if (headerRow === -1) {
       return NextResponse.json(
         {
           ok: false,
           error:
-            "Non sono riuscito a trovare colonne Codice/Descrizione. Usa un Excel con intestazioni (Codice Articolo, Descrizione).",
+            "Non sono riuscito a trovare le colonne Codice/Descrizione. Usa un Excel con intestazioni tipo 'Codice Articolo' e 'Descrizione' (e opzionale 'Peso').",
         },
         { status: 400 }
       );
     }
 
-    // dedup
-    const map = new Map<string, { code: string; description: string }>();
+    for (let rr = headerRow + 1; rr <= (ws.rowCount || headerRow); rr++) {
+      const row = ws.getRow(rr);
+
+      const codeCell = row.getCell(codeCol);
+      const descCell = row.getCell(descCol);
+
+      const code = normCode((codeCell as any)?.text ?? codeCell.value);
+      const desc = normDesc((descCell as any)?.text ?? descCell.value);
+
+      if (!code && !desc) continue;
+
+      const low = `${code} ${desc}`.toLowerCase();
+      if (low.includes("pagina") && low.includes("di")) continue;
+
+      let peso_kg: number | null = null;
+      if (pesoCol !== -1) {
+        const pCell = row.getCell(pesoCol);
+        const pText = String((pCell as any)?.text ?? pCell.value ?? "").trim();
+        peso_kg = parsePesoKg(pText, pesoHeaderHint);
+      }
+
+      if (code) extracted.push({ code, description: desc || code, peso_kg });
+    }
+
+    if (extracted.length === 0) {
+      return NextResponse.json({ ok: false, error: "Nessuna riga valida trovata (dopo intestazioni)." }, { status: 400 });
+    }
+
+    // dedup by code (ultima vince)
+    const map = new Map<string, ExtractedRow>();
     for (const r of extracted) {
       const code = normCode(r.code);
-      const description = normDesc(r.description) || code;
       if (!code) continue;
-      map.set(code, { code, description });
+      map.set(code, {
+        code,
+        description: normDesc(r.description) || code,
+        peso_kg: typeof r.peso_kg === "number" && Number.isFinite(r.peso_kg) ? r.peso_kg : null,
+      });
     }
+
     const rows = Array.from(map.values());
     const codes = rows.map((r) => r.code);
 
@@ -203,33 +259,30 @@ export async function POST(req: Request) {
         subcategory_id: subcategory_id || null,
         code: r.code,
         description: r.description,
+        peso_kg: r.peso_kg, // ✅ NEW
         is_active: true,
         updated_at: now,
       }));
 
-      const { error: upErr } = await supabaseAdmin
-        .from("items")
-        .upsert(payload, { onConflict: "category_id,code" });
+      const { error: upErr } = await supabaseAdmin.from("items").upsert(payload, { onConflict: "category_id,code" });
 
       if (upErr) {
         console.error("[items/import][new] upsert error:", upErr);
         return NextResponse.json({ ok: false, error: upErr.message || "Errore import" }, { status: 500 });
       }
 
-      // conteggi: li stimiamo leggendo gli esistenti prima (veloce e chiaro)
-      // se vuoi, li rendiamo precisi con una query aggiuntiva; qui restiamo semplici.
       return NextResponse.json({
         ok: true,
         mode: "new",
         category_id,
         subcategory_id: subcategory_id || null,
         total: rows.length,
-        inserted: null,
-        updated: null,
       });
     }
 
-    // ===== LEGACY MODE: invariato =====
+    // ===== LEGACY MODE: upsert su (category, code) =====
+    const legacyCategory = legacyCategoryRaw as "TAB" | "GV";
+
     let existingSet: Set<string>;
     try {
       existingSet = await getExistingCodesLegacy(legacyCategory, codes);
@@ -245,13 +298,12 @@ export async function POST(req: Request) {
       category: legacyCategory,
       code: r.code,
       description: r.description,
+      peso_kg: r.peso_kg, // ✅ NEW
       is_active: true,
       updated_at: now,
     }));
 
-    const { error: upErr } = await supabaseAdmin
-      .from("items")
-      .upsert(payload, { onConflict: "category,code" });
+    const { error: upErr } = await supabaseAdmin.from("items").upsert(payload, { onConflict: "category,code" });
 
     if (upErr) {
       console.error("[items/import][legacy] upsert error:", upErr);
@@ -268,11 +320,13 @@ export async function POST(req: Request) {
     });
   } catch (e: any) {
     console.error("[items/import] FATAL:", e);
-    return NextResponse.json(
-      { ok: false, error: e?.message || String(e) || "Errore interno" },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: e?.message || String(e) || "Errore interno" }, { status: 500 });
   }
 }
+
+
+
+
+
 
 
