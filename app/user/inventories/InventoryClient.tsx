@@ -7,6 +7,14 @@ type Category = { id: string; name: string; slug?: string; is_active?: boolean }
 type Subcategory = { id: string; category_id: string; name: string; slug?: string; is_active?: boolean };
 type Item = { id: string; code: string; description: string; is_active: boolean };
 
+type InventoryRow = {
+  id: string;
+  item_id: string;
+  code: string;
+  description: string;
+  qty: number;
+};
+
 function todayISO() {
   const d = new Date();
   const yyyy = d.getFullYear();
@@ -34,8 +42,21 @@ export default function InventoryClient() {
   // qty per item_id
   const [qtyMap, setQtyMap] = useState<Record<string, string>>({});
 
+  // ✅ filtro ricerca (client-side)
+  const [search, setSearch] = useState("");
+
   const canLoad = useMemo(() => !!pvId && !!categoryId && !!inventoryDate, [pvId, categoryId, inventoryDate]);
   const canSave = useMemo(() => !!pvId && !!categoryId && items.length > 0, [pvId, categoryId, items.length]);
+
+  const filteredItems = useMemo(() => {
+    const t = search.trim().toLowerCase();
+    if (!t) return items;
+    return items.filter((it) => {
+      const code = String(it.code || "").toLowerCase();
+      const desc = String(it.description || "").toLowerCase();
+      return code.includes(t) || desc.includes(t);
+    });
+  }, [items, search]);
 
   async function loadPvs() {
     const res = await fetch("/api/pvs/list", { cache: "no-store" });
@@ -67,6 +88,7 @@ export default function InventoryClient() {
   async function loadItems(nextCategoryId: string, nextSubcategoryId: string) {
     setItems([]);
     setQtyMap({});
+    setSearch(""); // ✅ reset ricerca quando cambio dataset
 
     if (!nextCategoryId) return;
 
@@ -87,6 +109,7 @@ export default function InventoryClient() {
     setQtyMap(m);
   }
 
+  // ✅ PREFILL corretto: usa /api/inventories/rows (NON /list)
   async function loadExistingInventory(nextPvId: string, nextCategoryId: string, nextSubcategoryId: string, nextDate: string) {
     if (!nextPvId || !nextCategoryId || !nextDate) return;
 
@@ -96,21 +119,25 @@ export default function InventoryClient() {
     params.set("inventory_date", nextDate);
     if (nextSubcategoryId) params.set("subcategory_id", nextSubcategoryId);
 
-    const res = await fetch(`/api/inventories/list?${params.toString()}`, { cache: "no-store" });
+    const res = await fetch(`/api/inventories/rows?${params.toString()}`, { cache: "no-store" });
     const json = await res.json().catch(() => null);
-    if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore caricamento inventario");
+    if (!res.ok || !json?.ok) {
+      // se non esiste inventario, non è un errore: restano vuoti
+      return;
+    }
 
-    // costruisci map item_id -> qty
-    const byItem: Record<string, string> = {};
-    (json.rows || []).forEach((r: any) => {
-      if (r?.item_id) byItem[String(r.item_id)] = String(r.qty ?? 0);
+    const map = new Map<string, number>();
+    (json.rows || []).forEach((r: InventoryRow) => {
+      if (r?.item_id) map.set(String(r.item_id), Number(r.qty ?? 0));
     });
 
-    // applica ai campi già presenti
     setQtyMap((prev) => {
       const next = { ...prev };
-      Object.keys(next).forEach((itemId) => {
-        if (byItem[itemId] !== undefined) next[itemId] = byItem[itemId] === "0" ? "" : byItem[itemId];
+      items.forEach((it) => {
+        if (map.has(it.id)) {
+          const v = String(map.get(it.id) ?? 0);
+          next[it.id] = v === "0" ? "" : v;
+        }
       });
       return next;
     });
@@ -285,6 +312,20 @@ export default function InventoryClient() {
         </button>
       </div>
 
+      {/* ✅ ricerca */}
+      <div className="rounded-2xl border bg-white p-4">
+        <label className="block text-sm font-medium mb-2">Cerca</label>
+        <input
+          className="w-full rounded-xl border p-3"
+          placeholder="Cerca per codice o descrizione..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+        <div className="mt-2 text-sm text-gray-600">
+          Visualizzati: <b>{filteredItems.length}</b> / {items.length}
+        </div>
+      </div>
+
       {msg && <p className="text-sm text-green-700">{msg}</p>}
       {error && <p className="text-sm text-red-600">{error}</p>}
 
@@ -307,7 +348,7 @@ export default function InventoryClient() {
               </tr>
             )}
 
-            {!loading && items.length === 0 && (
+            {!loading && filteredItems.length === 0 && (
               <tr className="border-t">
                 <td className="p-3 text-gray-500" colSpan={3}>
                   Nessun articolo.
@@ -315,7 +356,7 @@ export default function InventoryClient() {
               </tr>
             )}
 
-            {items.map((it) => (
+            {filteredItems.map((it) => (
               <tr key={it.id} className="border-t">
                 <td className="p-3 font-medium">{it.code}</td>
                 <td className="p-3">{it.description}</td>
@@ -336,3 +377,4 @@ export default function InventoryClient() {
     </div>
   );
 }
+

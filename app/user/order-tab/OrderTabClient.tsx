@@ -7,8 +7,13 @@ type PreviewRow = {
   descrizione: string;
   qtaVenduta: number;
   giacenza: number;
-  qtaOrdine: number;
-  valoreDaOrdinare?: number; // ✅ NEW (opzionale per compatibilità)
+
+  // ✅ NEW
+  qtaTeorica?: number; // “proposta” (prima dell’arrotondamento)
+  confDa?: number; // confezione (default 10 se non presente)
+
+  qtaOrdine: number; // già arrotondata
+  valoreDaOrdinare?: number;
   pesoKg: number;
 };
 
@@ -39,8 +44,7 @@ export default function OrderTabClient() {
   // ✅ settimane (fallback)
   const [weeks, setWeeks] = useState<number>(4);
 
-  // ✅ NEW: giorni (prioritario se valorizzato)
-  // stringa per gestire bene input vuoto / parziale
+  // ✅ giorni (prioritario se valorizzato)
   const [days, setDays] = useState<string>("");
 
   const daysInt = useMemo(() => {
@@ -175,11 +179,7 @@ export default function OrderTabClient() {
 
           <div>
             <label className="block text-sm font-medium mb-2">File Excel (.xlsx)</label>
-            <input
-              type="file"
-              accept=".xlsx"
-              onChange={(e) => setFile(e.target.files?.[0] || null)}
-            />
+            <input type="file" accept=".xlsx" onChange={(e) => setFile(e.target.files?.[0] || null)} />
             {file && (
               <p className="text-sm text-gray-600 mt-2">
                 Selezionato: <b>{file.name}</b>
@@ -197,11 +197,7 @@ export default function OrderTabClient() {
                 value={weeks}
                 onChange={(e) => setWeeks(Number(e.target.value))}
                 disabled={usingDays}
-                title={
-                  usingDays
-                    ? "Stai usando i Giorni: svuota Giorni per riabilitare le Settimane"
-                    : undefined
-                }
+                title={usingDays ? "Stai usando i Giorni: svuota Giorni per riabilitare le Settimane" : undefined}
               >
                 <option value={1}>1 Settimana</option>
                 <option value={2}>2 Settimane</option>
@@ -223,14 +219,11 @@ export default function OrderTabClient() {
                 value={days}
                 onChange={(e) => {
                   const v = e.target.value;
-                  // accetta vuoto o cifre
                   if (v === "" || /^\d+$/.test(v)) setDays(v);
                 }}
               />
               <div className="flex items-center justify-between">
-                <p className="text-xs text-gray-500">
-                  Consigliato per periodi tipo “2 settimane e mezzo”, festivi, ecc.
-                </p>
+                <p className="text-xs text-gray-500">Consigliato per periodi tipo “2 settimane e mezzo”, festivi, ecc.</p>
                 {days.trim() !== "" && (
                   <button
                     type="button"
@@ -241,9 +234,7 @@ export default function OrderTabClient() {
                   </button>
                 )}
               </div>
-              {days.trim() !== "" && daysInt == null && (
-                <p className="text-xs text-red-600">Inserisci un numero valido (1..21).</p>
-              )}
+              {days.trim() !== "" && daysInt == null && <p className="text-xs text-red-600">Inserisci un numero valido (1..21).</p>}
               {daysInt != null && (
                 <p className="text-xs text-green-700">
                   Periodo giorni attivo: <b>{daysInt}</b>
@@ -276,6 +267,9 @@ export default function OrderTabClient() {
                   Periodo usato: <b>{periodLabel}</b>
                 </p>
               )}
+              <p className="text-xs text-gray-500">
+                <b>Qtà teorica</b> = quantità “proposta” prima dell’arrotondamento. <b>Qtà da ordinare</b> = arrotondata per <b>Conf. da</b>.
+              </p>
             </div>
 
             <button onClick={downloadExcel} className="rounded-xl bg-slate-900 text-white px-4 py-2">
@@ -291,6 +285,11 @@ export default function OrderTabClient() {
                   <th className="text-left p-3">Descrizione</th>
                   <th className="text-left p-3">Qtà Venduta</th>
                   <th className="text-left p-3">Giacenza</th>
+
+                  {/* ✅ NEW */}
+                  <th className="text-left p-3">Qtà teorica</th>
+                  <th className="text-left p-3">Conf. da</th>
+
                   <th className="text-left p-3">Qtà da ordinare</th>
                   <th className="text-left p-3">Valore da ordinare</th>
                   <th className="text-left p-3">Qtà in peso (kg)</th>
@@ -303,6 +302,11 @@ export default function OrderTabClient() {
                     <td className="p-3">{r.descrizione}</td>
                     <td className="p-3">{r.qtaVenduta}</td>
                     <td className="p-3">{r.giacenza}</td>
+
+                    {/* ✅ NEW */}
+                    <td className="p-3 font-medium">{Number(r.qtaTeorica ?? 0)}</td>
+                    <td className="p-3 font-medium">{Number(r.confDa ?? 10)}</td>
+
                     <td className="p-3 font-medium">{r.qtaOrdine}</td>
                     <td className="p-3 font-medium">{eur(r.valoreDaOrdinare)}</td>
                     <td className="p-3">{Number(r.pesoKg || 0).toFixed(1)}</td>
@@ -311,7 +315,7 @@ export default function OrderTabClient() {
 
                 {preview.length === 0 && (
                   <tr className="border-t">
-                    <td className="p-3 text-gray-500" colSpan={7}>
+                    <td className="p-3 text-gray-500" colSpan={9}>
                       Nessuna riga da mostrare
                     </td>
                   </tr>
@@ -324,3 +328,4 @@ export default function OrderTabClient() {
     </div>
   );
 }
+

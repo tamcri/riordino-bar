@@ -10,15 +10,16 @@ function isUuid(v: string | null) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v.trim());
 }
 
+function isIsoDate(v: string | null) {
+  if (!v) return false;
+  return /^\d{4}-\d{2}-\d{2}$/.test(v.trim());
+}
+
 const USER_TABLE_CANDIDATES = ["app_user", "app_users", "utenti", "users"];
 
 async function lookupPvIdFromUserTables(username: string): Promise<string | null> {
   for (const table of USER_TABLE_CANDIDATES) {
-    const { data, error } = await supabaseAdmin
-      .from(table)
-      .select("pv_id")
-      .eq("username", username)
-      .maybeSingle();
+    const { data, error } = await supabaseAdmin.from(table).select("pv_id").eq("username", username).maybeSingle();
 
     if (error) continue;
     const pv_id = (data as any)?.pv_id ?? null;
@@ -32,12 +33,7 @@ async function lookupPvIdFromUsernameCode(username: string): Promise<string | nu
   const code = (username || "").trim().split(/\s+/)[0]?.toUpperCase();
   if (!code || code.length > 5) return null;
 
-  const { data, error } = await supabaseAdmin
-    .from("pvs")
-    .select("id")
-    .eq("is_active", true)
-    .eq("code", code)
-    .maybeSingle();
+  const { data, error } = await supabaseAdmin.from("pvs").select("id").eq("is_active", true).eq("code", code).maybeSingle();
 
   if (error) return null;
   return data?.id ?? null;
@@ -72,11 +68,15 @@ export async function GET(req: Request) {
   }
 
   const url = new URL(req.url);
+
   const category_id = (url.searchParams.get("category_id") || "").trim(); // opzionale
   const pv_id_qs = (url.searchParams.get("pv_id") || "").trim(); // opzionale (IGNORATO per PV)
   const subcategory_id = (url.searchParams.get("subcategory_id") || "").trim();
-  const from = (url.searchParams.get("from") || "").trim(); // opzionale
-  const to = (url.searchParams.get("to") || "").trim(); // opzionale
+
+  // ✅ supporto nuovi parametri (UI nuova) + legacy (from/to)
+  const dateFrom = (url.searchParams.get("date_from") || url.searchParams.get("from") || "").trim(); // YYYY-MM-DD
+  const dateTo = (url.searchParams.get("date_to") || url.searchParams.get("to") || "").trim(); // YYYY-MM-DD
+
   const limitRows = Math.min(Number(url.searchParams.get("limit") || 8000), 20000);
 
   // ✅ validazioni
@@ -93,6 +93,17 @@ export async function GET(req: Request) {
   // ✅ subcategory ha senso solo se c’è category
   if (subcategory_id && !category_id) {
     return NextResponse.json({ ok: false, error: "subcategory_id richiede anche category_id" }, { status: 400 });
+  }
+
+  // ✅ validazione date (se passate)
+  if (dateFrom && !isIsoDate(dateFrom)) {
+    return NextResponse.json({ ok: false, error: "date_from/from non valido (usa YYYY-MM-DD)" }, { status: 400 });
+  }
+  if (dateTo && !isIsoDate(dateTo)) {
+    return NextResponse.json({ ok: false, error: "date_to/to non valido (usa YYYY-MM-DD)" }, { status: 400 });
+  }
+  if (dateFrom && dateTo && dateFrom > dateTo) {
+    return NextResponse.json({ ok: false, error: "Intervallo date non valido: 'Dal' è dopo 'Al'." }, { status: 400 });
   }
 
   // ✅ enforcement PV: se punto_vendita, forzo pv_id dall’utente loggato
@@ -115,9 +126,9 @@ export async function GET(req: Request) {
   if (effectivePvId) q = q.eq("pv_id", effectivePvId);
   if (subcategory_id) q = q.eq("subcategory_id", subcategory_id);
 
-  // filtri data opzionali (YYYY-MM-DD)
-  if (from) q = q.gte("inventory_date", from);
-  if (to) q = q.lte("inventory_date", to);
+  // ✅ filtri data opzionali (YYYY-MM-DD)
+  if (dateFrom) q = q.gte("inventory_date", dateFrom);
+  if (dateTo) q = q.lte("inventory_date", dateTo);
 
   const { data, error } = await q;
 
@@ -184,15 +195,9 @@ export async function GET(req: Request) {
   const subIds = Array.from(new Set(list.map((x) => x.subcategory_id).filter(Boolean))) as string[];
 
   const [pvsRes, catsRes, subsRes] = await Promise.all([
-    pvIds.length
-      ? supabaseAdmin.from("pvs").select("id, code, name").in("id", pvIds)
-      : Promise.resolve({ data: [], error: null } as any),
-    catIds.length
-      ? supabaseAdmin.from("categories").select("id, name").in("id", catIds)
-      : Promise.resolve({ data: [], error: null } as any),
-    subIds.length
-      ? supabaseAdmin.from("subcategories").select("id, name, category_id").in("id", subIds)
-      : Promise.resolve({ data: [], error: null } as any),
+    pvIds.length ? supabaseAdmin.from("pvs").select("id, code, name").in("id", pvIds) : Promise.resolve({ data: [], error: null } as any),
+    catIds.length ? supabaseAdmin.from("categories").select("id, name").in("id", catIds) : Promise.resolve({ data: [], error: null } as any),
+    subIds.length ? supabaseAdmin.from("subcategories").select("id, name, category_id").in("id", subIds) : Promise.resolve({ data: [], error: null } as any),
   ]);
 
   if (pvsRes.error) return NextResponse.json({ ok: false, error: pvsRes.error.message }, { status: 500 });
@@ -236,6 +241,7 @@ export async function GET(req: Request) {
 
   return NextResponse.json({ ok: true, rows: out });
 }
+
 
 
 

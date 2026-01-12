@@ -27,6 +27,14 @@ function onlyDigits(v: string) {
   return v.replace(/[^\d]/g, "");
 }
 
+// ISO -> IT (YYYY-MM-DD => DD-MM-YYYY)
+function formatDateIT(iso: string) {
+  const s = (iso || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const [y, m, d] = s.split("-");
+  return `${d}-${m}-${y}`;
+}
+
 export default function InventoryPvClient() {
   const [pvId, setPvId] = useState<string>("");
 
@@ -36,19 +44,30 @@ export default function InventoryPvClient() {
 
   const [categoryId, setCategoryId] = useState("");
   const [subcategoryId, setSubcategoryId] = useState("");
-  const [inventoryDate, setInventoryDate] = useState(todayISO());
+  const [inventoryDate, setInventoryDate] = useState(todayISO()); // ISO per input date
 
   const [qtyMap, setQtyMap] = useState<Record<string, string>>({});
+
+  // ✅ filtro ricerca (client-side)
+  const [search, setSearch] = useState("");
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const canSave = useMemo(
-    () => !!pvId && !!categoryId && items.length > 0,
-    [pvId, categoryId, items.length]
-  );
+  const canSave = useMemo(() => !!pvId && !!categoryId && items.length > 0, [pvId, categoryId, items.length]);
+
+  const filteredItems = useMemo(() => {
+    const t = search.trim().toLowerCase();
+    if (!t) return items;
+
+    return items.filter((it) => {
+      const code = String(it.code || "").toLowerCase();
+      const desc = String(it.description || "").toLowerCase();
+      return code.includes(t) || desc.includes(t);
+    });
+  }, [items, search]);
 
   /* =========================
      AUTH / PV
@@ -82,10 +101,7 @@ export default function InventoryPvClient() {
 
     if (!catId) return;
 
-    const res = await fetch(
-      `/api/subcategories/list?category_id=${catId}`,
-      { cache: "no-store" }
-    );
+    const res = await fetch(`/api/subcategories/list?category_id=${catId}`, { cache: "no-store" });
     const json = await res.json();
     if (!json.ok) throw new Error(json.error || "Errore sottocategorie");
 
@@ -95,6 +111,7 @@ export default function InventoryPvClient() {
   async function loadItems(catId: string, subId: string) {
     setItems([]);
     setQtyMap({}); // 🔥 reset TOTALE
+    setSearch(""); // ✅ reset ricerca quando ricarico dataset
 
     if (!catId) return;
 
@@ -125,7 +142,7 @@ export default function InventoryPvClient() {
 
     const params = new URLSearchParams();
     params.set("category_id", categoryId);
-    params.set("inventory_date", inventoryDate);
+    params.set("inventory_date", inventoryDate); // ISO
     if (subcategoryId) params.set("subcategory_id", subcategoryId);
 
     const res = await fetch(`/api/inventories/rows?${params}`, {
@@ -232,7 +249,7 @@ export default function InventoryPvClient() {
           pv_id: pvId,
           category_id: categoryId,
           subcategory_id: subcategoryId || null,
-          inventory_date: inventoryDate,
+          inventory_date: inventoryDate, // ISO
           rows,
         }),
       });
@@ -258,11 +275,7 @@ export default function InventoryPvClient() {
       <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-3 gap-3">
         <div>
           <label className="block text-sm font-medium mb-2">Categoria</label>
-          <select
-            className="w-full rounded-xl border p-3 bg-white"
-            value={categoryId}
-            onChange={(e) => setCategoryId(e.target.value)}
-          >
+          <select className="w-full rounded-xl border p-3 bg-white" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
             {categories.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.name}
@@ -296,6 +309,9 @@ export default function InventoryPvClient() {
             value={inventoryDate}
             onChange={(e) => setInventoryDate(e.target.value)}
           />
+          <div className="text-xs text-gray-500 mt-1">
+            Formato mostrato: <b>{formatDateIT(inventoryDate)}</b>
+          </div>
         </div>
       </div>
 
@@ -304,13 +320,23 @@ export default function InventoryPvClient() {
           Articoli caricati: <b>{items.length}</b>
         </div>
 
-        <button
-          className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60"
-          disabled={!canSave || saving}
-          onClick={save}
-        >
+        <button className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60" disabled={!canSave || saving} onClick={save}>
           {saving ? "Salvo..." : "Salva giacenze"}
         </button>
+      </div>
+
+      {/* ✅ ricerca (client-side) */}
+      <div className="rounded-2xl border bg-white p-4">
+        <label className="block text-sm font-medium mb-2">Cerca</label>
+        <input
+          className="w-full rounded-xl border p-3"
+          placeholder="Cerca per codice o descrizione..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+        <div className="mt-2 text-sm text-gray-600">
+          Visualizzati: <b>{filteredItems.length}</b> / {items.length}
+        </div>
       </div>
 
       {msg && <p className="text-green-700 text-sm">{msg}</p>}
@@ -326,7 +352,7 @@ export default function InventoryPvClient() {
             </tr>
           </thead>
           <tbody>
-            {items.map((it) => (
+            {filteredItems.map((it) => (
               <tr key={it.id} className="border-t">
                 <td className="p-3 font-medium">{it.code}</td>
                 <td className="p-3">{it.description}</td>
@@ -346,7 +372,7 @@ export default function InventoryPvClient() {
                 </td>
               </tr>
             ))}
-            {items.length === 0 && (
+            {filteredItems.length === 0 && (
               <tr>
                 <td colSpan={3} className="p-3 text-gray-500">
                   Nessun articolo
@@ -359,6 +385,8 @@ export default function InventoryPvClient() {
     </div>
   );
 }
+
+
 
 
 

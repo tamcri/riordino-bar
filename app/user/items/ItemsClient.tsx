@@ -12,14 +12,15 @@ type Item = {
   is_active: boolean;
   category_id: string | null;
   subcategory_id: string | null;
-  peso_kg?: number | null; // ✅ NEW (opzionale: se l’API lo manda, lo mostriamo)
+  peso_kg?: number | null; // ✅
+  conf_da?: number | null; // ✅ NEW
+  prezzo_vendita_eur?: number | null; // ✅
 };
 
 function isTabacchiCategory(cat: Category | null | undefined) {
   if (!cat) return false;
   const slug = String(cat.slug || "").toLowerCase().trim();
   const name = String(cat.name || "").toLowerCase().trim();
-  // preferisci slug, fallback su name
   return slug === "tabacchi" || name.includes("tabacc");
 }
 
@@ -27,16 +28,28 @@ function formatPesoKg(v: any) {
   if (v == null || v === "") return "—";
   const n = Number(v);
   if (!Number.isFinite(n) || n <= 0) return "—";
-  // mostro fino a 3 decimali senza fare il fenomeno
   const s = n.toFixed(n < 0.1 ? 3 : n < 1 ? 2 : 1);
-  // elimina zeri finali inutili
   return s.replace(/\.?0+$/, "");
+}
+
+function formatEuro(v: any) {
+  if (v == null || v === "") return "—";
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0) return "—";
+  return `€ ${n.toFixed(2)}`;
+}
+
+function formatConfDa(v: any) {
+  if (v == null || v === "") return "—";
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return "—";
+  return String(Math.trunc(n));
 }
 
 export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   // filtri
-  const [categoryId, setCategoryId] = useState<string>(""); // obbligatoria lato UX (ma DB per ora nullable)
-  const [subcategoryId, setSubcategoryId] = useState<string>(""); // opzionale
+  const [categoryId, setCategoryId] = useState<string>("");
+  const [subcategoryId, setSubcategoryId] = useState<string>("");
   const [active, setActive] = useState<"1" | "0" | "all">("1");
   const [q, setQ] = useState("");
 
@@ -59,7 +72,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   const [newSubCatId, setNewSubCatId] = useState("");
 
   const selectedCategory = useMemo(() => categories.find((c) => c.id === categoryId) || null, [categories, categoryId]);
-  const showPeso = useMemo(() => isTabacchiCategory(selectedCategory), [selectedCategory]);
+  const showTabacchiCols = useMemo(() => isTabacchiCategory(selectedCategory), [selectedCategory]);
 
   const qs = useMemo(() => {
     const p = new URLSearchParams();
@@ -75,7 +88,6 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     const json = await res.json().catch(() => null);
     if (res.ok && json?.ok && Array.isArray(json?.rows)) {
       setCategories(json.rows);
-      // se non selezionata, metto la prima attiva
       if (!categoryId) {
         const first = json.rows.find((c: Category) => c.is_active) || json.rows[0];
         if (first?.id) setCategoryId(first.id);
@@ -116,7 +128,6 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
 
   useEffect(() => {
     loadSubcategories(categoryId);
-    // reset subcategory quando cambia categoria
     setSubcategoryId("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [categoryId]);
@@ -250,12 +261,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
         <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
           <form onSubmit={createCategory} className="space-y-2">
             <div className="font-semibold">Crea Categoria</div>
-            <input
-              className="w-full rounded-xl border p-3"
-              placeholder="Es. Food"
-              value={newCatName}
-              onChange={(e) => setNewCatName(e.target.value)}
-            />
+            <input className="w-full rounded-xl border p-3" placeholder="Es. Food" value={newCatName} onChange={(e) => setNewCatName(e.target.value)} />
             <button className="rounded-xl bg-slate-900 text-white px-4 py-2">Crea</button>
           </form>
 
@@ -269,12 +275,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
                 </option>
               ))}
             </select>
-            <input
-              className="w-full rounded-xl border p-3"
-              placeholder="Es. Cornetti"
-              value={newSubName}
-              onChange={(e) => setNewSubName(e.target.value)}
-            />
+            <input className="w-full rounded-xl border p-3" placeholder="Es. Cornetti" value={newSubName} onChange={(e) => setNewSubName(e.target.value)} />
             <button className="rounded-xl bg-slate-900 text-white px-4 py-2">Crea</button>
           </form>
         </div>
@@ -296,12 +297,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
 
         <div className="md:col-span-2">
           <label className="block text-sm font-medium mb-2">Sottocategoria</label>
-          <select
-            className="w-full rounded-xl border p-3 bg-white"
-            value={subcategoryId}
-            onChange={(e) => setSubcategoryId(e.target.value)}
-            disabled={!categoryId}
-          >
+          <select className="w-full rounded-xl border p-3 bg-white" value={subcategoryId} onChange={(e) => setSubcategoryId(e.target.value)} disabled={!categoryId}>
             <option value="">— Nessuna —</option>
             {subcategories.map((s) => (
               <option key={s.id} value={s.id}>
@@ -360,7 +356,9 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
               <th className="text-left p-3">Descrizione</th>
 
               {/* ✅ SOLO TABACCHI */}
-              {showPeso && <th className="text-right p-3 w-32">Peso (kg)</th>}
+              {showTabacchiCols && <th className="text-right p-3 w-32">Peso (kg)</th>}
+              {showTabacchiCols && <th className="text-right p-3 w-28">Conf. da</th>}
+              {showTabacchiCols && <th className="text-right p-3 w-40">Prezzo di Vendita</th>}
 
               <th className="text-left p-3">Attivo</th>
               <th className="text-left p-3"></th>
@@ -369,7 +367,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
           <tbody>
             {loading && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={showPeso ? 5 : 4}>
+                <td className="p-3 text-gray-500" colSpan={showTabacchiCols ? 7 : 4}>
                   Caricamento...
                 </td>
               </tr>
@@ -377,7 +375,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
 
             {!loading && rows.length === 0 && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={showPeso ? 5 : 4}>
+                <td className="p-3 text-gray-500" colSpan={showTabacchiCols ? 7 : 4}>
                   Nessun articolo trovato.
                 </td>
               </tr>
@@ -389,7 +387,9 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
                 <td className="p-3">{r.description}</td>
 
                 {/* ✅ SOLO TABACCHI */}
-                {showPeso && <td className="p-3 text-right font-medium">{formatPesoKg(r.peso_kg)}</td>}
+                {showTabacchiCols && <td className="p-3 text-right font-medium">{formatPesoKg(r.peso_kg)}</td>}
+                {showTabacchiCols && <td className="p-3 text-right font-medium">{formatConfDa(r.conf_da)}</td>}
+                {showTabacchiCols && <td className="p-3 text-right font-medium">{formatEuro(r.prezzo_vendita_eur)}</td>}
 
                 <td className="p-3">{r.is_active ? "SI" : "NO"}</td>
                 <td className="p-3">
@@ -414,5 +414,8 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     </div>
   );
 }
+
+
+
 
 

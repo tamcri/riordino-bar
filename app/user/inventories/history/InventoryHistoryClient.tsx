@@ -15,7 +15,7 @@ type InventoryGroup = {
   category_name: string;
   subcategory_id: string | null;
   subcategory_name: string;
-  inventory_date: string;
+  inventory_date: string; // YYYY-MM-DD
   created_by_username: string | null;
   created_at: string | null;
   lines_count: number;
@@ -45,6 +45,19 @@ type MeState = {
   isPv: boolean;
 };
 
+// ISO -> IT (YYYY-MM-DD => DD-MM-YYYY)
+function formatDateIT(iso: string) {
+  const s = (iso || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const [y, m, d] = s.split("-");
+  return `${d}-${m}-${y}`;
+}
+
+function todayISO() {
+  const d = new Date();
+  return d.toISOString().slice(0, 10);
+}
+
 export default function InventoryHistoryClient() {
   const [me, setMe] = useState<MeState>({
     role: null,
@@ -57,22 +70,28 @@ export default function InventoryHistoryClient() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [subcategories, setSubcategories] = useState<Subcategory[]>([]);
 
-  // filtri
-  const [pvId, setPvId] = useState<string>(""); // "" = tutti (solo admin/amministrativo)
+  // filtri admin/ammin
+  const [pvId, setPvId] = useState<string>(""); // "" = tutti
   const [categoryId, setCategoryId] = useState<string>(""); // "" = tutte
-  const [subcategoryId, setSubcategoryId] = useState<string>(""); // "" = tutte/nessuna
+  const [subcategoryId, setSubcategoryId] = useState<string>(""); // "" = tutte
+
+  // ✅ date range (per tutti) con calendario
+  const [dateFromISO, setDateFromISO] = useState<string>("");
+  const [dateToISO, setDateToISO] = useState<string>("");
+
+  // ricerca dettaglio
+  const [searchDetail, setSearchDetail] = useState("");
 
   const [rows, setRows] = useState<InventoryGroup[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // dettaglio selezionato
   const [selected, setSelected] = useState<InventoryGroup | null>(null);
   const [detail, setDetail] = useState<InventoryLine[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
 
-  // modal compare
+  // compare (solo admin/ammin)
   const [compareOpen, setCompareOpen] = useState(false);
   const [compareTarget, setCompareTarget] = useState<InventoryGroup | null>(null);
   const [compareFile, setCompareFile] = useState<File | null>(null);
@@ -82,13 +101,21 @@ export default function InventoryHistoryClient() {
   const [compareDownloadUrl, setCompareDownloadUrl] = useState<string | null>(null);
 
   const canUseSubcategories = useMemo(() => !!categoryId, [categoryId]);
-
   const canCompare = me.role === "admin" || me.role === "amministrativo";
+
+  const filteredDetail = useMemo(() => {
+    const t = searchDetail.trim().toLowerCase();
+    if (!t) return detail;
+    return detail.filter((x) => {
+      const code = String(x.code || "").toLowerCase();
+      const desc = String(x.description || "").toLowerCase();
+      return code.includes(t) || desc.includes(t);
+    });
+  }, [detail, searchDetail]);
 
   async function fetchMe(): Promise<MeState> {
     const res = await fetch("/api/me", { cache: "no-store" });
     const json: MeResponse = await res.json().catch(() => ({ ok: false, error: "Errore parsing" }));
-
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore autenticazione");
 
     const role = (json.role || "").toString() as MeState["role"];
@@ -97,12 +124,7 @@ export default function InventoryHistoryClient() {
     const isPv = role === "punto_vendita";
     if (isPv && !pv_id) throw new Error("Utente punto vendita senza PV assegnato (pv_id mancante).");
 
-    return {
-      role: role ?? null,
-      username: json.username ?? null,
-      pv_id,
-      isPv,
-    };
+    return { role: role ?? null, username: json.username ?? null, pv_id, isPv };
   }
 
   async function loadPvs() {
@@ -124,9 +146,7 @@ export default function InventoryHistoryClient() {
     setSubcategoryId("");
     if (!catId) return;
 
-    const res = await fetch(`/api/subcategories/list?category_id=${encodeURIComponent(catId)}`, {
-      cache: "no-store",
-    });
+    const res = await fetch(`/api/subcategories/list?category_id=${encodeURIComponent(catId)}`, { cache: "no-store" });
     const json = await res.json().catch(() => null);
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore caricamento sottocategorie");
     setSubcategories(json.rows || []);
@@ -139,22 +159,26 @@ export default function InventoryHistoryClient() {
     setSelected(null);
     setDetail([]);
     setDetailError(null);
+    setSearchDetail("");
 
     try {
       const params = new URLSearchParams();
 
-      if (categoryId) params.set("category_id", categoryId);
+      // ✅ date range -> API usa "from" e "to"
+      if (dateFromISO) params.set("from", dateFromISO);
+      if (dateToISO) params.set("to", dateToISO);
+      if (dateFromISO && dateToISO && dateFromISO > dateToISO) throw new Error("Intervallo date non valido: 'Dal' è dopo 'Al'.");
 
-      // PV:
-      // - PV mode: pv_id forzato
-      // - admin/amministrativo: pv_id opzionale
       if (effectiveMe.isPv) {
-        if (effectiveMe.pv_id) params.set("pv_id", effectiveMe.pv_id);
+        // ✅ PV: SOLO date + categoria (niente PV select)
+        if (categoryId) params.set("category_id", categoryId);
+        // (sottocategoria non richiesta qui, quindi la teniamo fuori)
       } else {
+        // ✅ admin/ammin: date + PV + categoria + sottocategoria
         if (pvId) params.set("pv_id", pvId);
+        if (categoryId) params.set("category_id", categoryId);
+        if (categoryId && subcategoryId) params.set("subcategory_id", subcategoryId);
       }
-
-      if (categoryId && subcategoryId) params.set("subcategory_id", subcategoryId);
 
       const qs = params.toString();
       const res = await fetch(`/api/inventories/list${qs ? `?${qs}` : ""}`, { cache: "no-store" });
@@ -174,12 +198,10 @@ export default function InventoryHistoryClient() {
     setDetail([]);
     setDetailError(null);
     setDetailLoading(true);
+    setSearchDetail("");
 
     try {
-      // extra sicurezza
-      if (effectiveMe.isPv && effectiveMe.pv_id && g.pv_id !== effectiveMe.pv_id) {
-        throw new Error("Non autorizzato.");
-      }
+      if (effectiveMe.isPv && effectiveMe.pv_id && g.pv_id !== effectiveMe.pv_id) throw new Error("Non autorizzato.");
 
       const params = new URLSearchParams();
       params.set("pv_id", g.pv_id);
@@ -231,12 +253,8 @@ export default function InventoryHistoryClient() {
     setCompareDownloadUrl(null);
 
     try {
-      // Placeholder: domani lo implementiamo davvero
-      // L’idea: carichi il file gestionale, e il server confronta vs inventario PV già salvato in DB.
       const fd = new FormData();
       fd.append("file", compareFile);
-
-      // chiavi inventario da confrontare
       fd.append("pv_id", compareTarget.pv_id);
       fd.append("category_id", compareTarget.category_id);
       fd.append("inventory_date", compareTarget.inventory_date);
@@ -245,19 +263,12 @@ export default function InventoryHistoryClient() {
       const res = await fetch("/api/inventories/compare", { method: "POST", body: fd });
       const text = await res.text();
       let json: any = null;
-
       try {
         json = text ? JSON.parse(text) : null;
-      } catch {
-        // non json
-      }
+      } catch {}
 
-      if (!res.ok || !json?.ok) {
-        const msg = json?.error || `Comparazione non disponibile (endpoint /api/inventories/compare).`;
-        throw new Error(msg);
-      }
+      if (!res.ok || !json?.ok) throw new Error(json?.error || `Comparazione non disponibile (endpoint /api/inventories/compare).`);
 
-      // ci aspettiamo: { ok:true, downloadUrl:"/api/.../excel" }
       setCompareMsg("Comparazione completata.");
       setCompareDownloadUrl(json.downloadUrl || null);
     } catch (e: any) {
@@ -277,16 +288,15 @@ export default function InventoryHistoryClient() {
         const meState = await fetchMe();
         setMe(meState);
 
-        // se PV, filtro PV “implicito”: teniamo pvId come stringa (solo per UI, ma non mostriamo select)
-        if (meState.isPv && meState.pv_id) setPvId(meState.pv_id);
+        setDateToISO(todayISO());
 
+        // ✅ categorie servono sia a PV (per filtro categoria) sia ad admin/ammin
         await loadCategories();
 
         if (!meState.isPv) {
           await loadPvs();
         }
 
-        // prima lista
         await loadList(meState);
       } catch (e: any) {
         setError(e?.message || "Errore");
@@ -297,12 +307,12 @@ export default function InventoryHistoryClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // quando cambia categoria -> ricarica sottocategorie
+  // sottocategorie solo per admin/ammin
   useEffect(() => {
     (async () => {
       try {
         if (!me.role) return;
-        setError(null);
+        if (me.isPv) return;
         await loadSubcategories(categoryId);
       } catch (e: any) {
         setError(e?.message || "Errore");
@@ -311,7 +321,6 @@ export default function InventoryHistoryClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [categoryId, me.role]);
 
-  // trigger lista quando cambiano filtri (usa me in state, niente fetchMe ripetuto)
   useEffect(() => {
     (async () => {
       try {
@@ -322,21 +331,48 @@ export default function InventoryHistoryClient() {
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pvId, categoryId, subcategoryId, me.role]);
+  }, [pvId, categoryId, subcategoryId, dateFromISO, dateToISO, me.role]);
 
   return (
     <div className="space-y-4">
-      {/* filtri */}
-      <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-3 gap-3">
-        {/* PV filter: SOLO admin/amministrativo */}
-        {!me.isPv ? (
+      {/* Date (per tutti) */}
+      <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div>
+          <label className="block text-sm font-medium mb-2">Dal</label>
+          <input type="date" className="w-full rounded-xl border p-3 bg-white" value={dateFromISO} onChange={(e) => setDateFromISO(e.target.value)} />
+          <div className="text-xs text-gray-500 mt-1">Formato mostrato: {dateFromISO ? formatDateIT(dateFromISO) : "—"}</div>
+        </div>
+        <div>
+          <label className="block text-sm font-medium mb-2">Al</label>
+          <input type="date" className="w-full rounded-xl border p-3 bg-white" value={dateToISO} onChange={(e) => setDateToISO(e.target.value)} />
+          <div className="text-xs text-gray-500 mt-1">Formato mostrato: {dateToISO ? formatDateIT(dateToISO) : "—"}</div>
+        </div>
+      </div>
+
+      {/* PV: aggiungo Categoria (solo categoria) */}
+      {me.isPv && (
+        <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-1 gap-3">
+          <div>
+            <label className="block text-sm font-medium mb-2">Categoria</label>
+            <select className="w-full rounded-xl border p-3 bg-white" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
+              <option value="">— Tutte le categorie —</option>
+              {categories.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-gray-500 mt-1">Nel Punto Vendita, nello storico filtriamo per data e (opzionale) categoria.</p>
+          </div>
+        </div>
+      )}
+
+      {/* Admin/Ammin: filtri completi */}
+      {!me.isPv && (
+        <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-3 gap-3">
           <div>
             <label className="block text-sm font-medium mb-2">Punto Vendita (opzionale)</label>
-            <select
-              className="w-full rounded-xl border p-3 bg-white"
-              value={pvId}
-              onChange={(e) => setPvId(e.target.value)}
-            >
+            <select className="w-full rounded-xl border p-3 bg-white" value={pvId} onChange={(e) => setPvId(e.target.value)}>
               <option value="">— Tutti i PV —</option>
               {pvs.map((pv) => (
                 <option key={pv.id} value={pv.id}>
@@ -345,49 +381,37 @@ export default function InventoryHistoryClient() {
               ))}
             </select>
           </div>
-        ) : (
+
           <div>
-            <label className="block text-sm font-medium mb-2">Punto Vendita</label>
-            <div className="w-full rounded-xl border p-3 bg-gray-50 text-gray-700">
-              Il tuo Punto Vendita (filtro automatico)
-            </div>
-            <p className="text-xs text-gray-500 mt-1">Non puoi cambiare PV.</p>
+            <label className="block text-sm font-medium mb-2">Categoria</label>
+            <select className="w-full rounded-xl border p-3 bg-white" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
+              <option value="">— Tutte le categorie —</option>
+              {categories.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
           </div>
-        )}
 
-        <div>
-          <label className="block text-sm font-medium mb-2">Categoria</label>
-          <select
-            className="w-full rounded-xl border p-3 bg-white"
-            value={categoryId}
-            onChange={(e) => setCategoryId(e.target.value)}
-          >
-            <option value="">— Tutte le categorie —</option>
-            {categories.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
+          <div>
+            <label className="block text-sm font-medium mb-2">Sottocategoria (opzionale)</label>
+            <select
+              className="w-full rounded-xl border p-3 bg-white"
+              value={subcategoryId}
+              onChange={(e) => setSubcategoryId(e.target.value)}
+              disabled={!canUseSubcategories || subcategories.length === 0}
+            >
+              <option value="">— Tutte —</option>
+              {subcategories.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
-
-        <div>
-          <label className="block text-sm font-medium mb-2">Sottocategoria (opzionale)</label>
-          <select
-            className="w-full rounded-xl border p-3 bg-white"
-            value={subcategoryId}
-            onChange={(e) => setSubcategoryId(e.target.value)}
-            disabled={!canUseSubcategories || subcategories.length === 0}
-          >
-            <option value="">— Tutte —</option>
-            {subcategories.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
+      )}
 
       {error && <p className="text-sm text-red-600">{error}</p>}
 
@@ -429,7 +453,7 @@ export default function InventoryHistoryClient() {
               const isSel = selected?.key === r.key;
               return (
                 <tr key={r.key} className={`border-t ${isSel ? "bg-yellow-50" : ""}`}>
-                  <td className="p-3 font-medium">{r.inventory_date}</td>
+                  <td className="p-3 font-medium">{formatDateIT(r.inventory_date)}</td>
                   <td className="p-3">
                     <div className="font-medium">{r.pv_code || r.pv_id}</div>
                     <div className="text-xs text-gray-500">{r.pv_name}</div>
@@ -441,12 +465,7 @@ export default function InventoryHistoryClient() {
                   <td className="p-3">{r.created_by_username ?? "—"}</td>
 
                   <td className="p-3">
-                    <button
-                      className="rounded-xl border px-3 py-2 hover:bg-gray-50"
-                      onClick={async () => {
-                        await loadDetail(r, me);
-                      }}
-                    >
+                    <button className="rounded-xl border px-3 py-2 hover:bg-gray-50" onClick={async () => await loadDetail(r, me)}>
                       Dettaglio
                     </button>
                   </td>
@@ -476,7 +495,7 @@ export default function InventoryHistoryClient() {
           <div className="flex items-start justify-between gap-3">
             <div>
               <div className="font-semibold">
-                Dettaglio inventario — {selected.inventory_date} — {selected.pv_code} — {selected.category_name}
+                Dettaglio inventario — {formatDateIT(selected.inventory_date)} — {selected.pv_code} — {selected.category_name}
               </div>
               <div className="text-sm text-gray-600">
                 Righe: <b>{selected.lines_count}</b> — Pezzi: <b>{selected.qty_sum}</b>
@@ -495,6 +514,19 @@ export default function InventoryHistoryClient() {
             </button>
           </div>
 
+          <div className="rounded-xl border bg-white p-3">
+            <label className="block text-sm font-medium mb-2">Cerca nel dettaglio</label>
+            <input
+              className="w-full rounded-xl border p-3"
+              placeholder="Cerca per codice o descrizione..."
+              value={searchDetail}
+              onChange={(e) => setSearchDetail(e.target.value)}
+            />
+            <div className="mt-2 text-sm text-gray-600">
+              Visualizzati: <b>{filteredDetail.length}</b> / {detail.length}
+            </div>
+          </div>
+
           {detailLoading && <div className="text-sm text-gray-500">Carico righe...</div>}
           {detailError && <div className="text-sm text-red-600">{detailError}</div>}
 
@@ -509,14 +541,14 @@ export default function InventoryHistoryClient() {
                   </tr>
                 </thead>
                 <tbody>
-                  {detail.map((x) => (
+                  {filteredDetail.map((x) => (
                     <tr key={x.id} className="border-t">
                       <td className="p-3 font-medium">{x.code}</td>
                       <td className="p-3">{x.description}</td>
                       <td className="p-3 text-right font-semibold">{x.qty}</td>
                     </tr>
                   ))}
-                  {detail.length === 0 && (
+                  {filteredDetail.length === 0 && (
                     <tr className="border-t">
                       <td className="p-3 text-gray-500" colSpan={3}>
                         Nessuna riga trovata.
@@ -540,7 +572,7 @@ export default function InventoryHistoryClient() {
               <div>
                 <div className="text-lg font-semibold">Compara inventario</div>
                 <div className="text-sm text-gray-600 mt-1">
-                  {compareTarget.inventory_date} — {compareTarget.pv_code} — {compareTarget.category_name}
+                  {formatDateIT(compareTarget.inventory_date)} — {compareTarget.pv_code} — {compareTarget.category_name}
                   {compareTarget.subcategory_name ? ` — ${compareTarget.subcategory_name}` : ""}
                 </div>
               </div>
@@ -553,11 +585,7 @@ export default function InventoryHistoryClient() {
             <div className="mt-4 space-y-3">
               <div>
                 <label className="block text-sm font-medium mb-2">File gestionale (.xlsx)</label>
-                <input
-                  type="file"
-                  accept=".xlsx"
-                  onChange={(e) => setCompareFile(e.target.files?.[0] || null)}
-                />
+                <input type="file" accept=".xlsx" onChange={(e) => setCompareFile(e.target.files?.[0] || null)} />
                 {compareFile && (
                   <p className="text-xs text-gray-600 mt-2">
                     Selezionato: <b>{compareFile.name}</b>
@@ -578,17 +606,14 @@ export default function InventoryHistoryClient() {
                 </button>
 
                 {compareDownloadUrl && (
-                  <button
-                    className="rounded-xl border px-4 py-2 hover:bg-gray-50"
-                    onClick={() => (window.location.href = compareDownloadUrl)}
-                  >
+                  <button className="rounded-xl border px-4 py-2 hover:bg-gray-50" onClick={() => (window.location.href = compareDownloadUrl)}>
                     Scarica risultato
                   </button>
                 )}
               </div>
 
               <p className="text-xs text-gray-500">
-                Nota: domani implementiamo l’endpoint <b>/api/inventories/compare</b> in base al formato del file gestionale.
+                Nota: endpoint <b>/api/inventories/compare</b> ancora da implementare.
               </p>
             </div>
           </div>
@@ -597,6 +622,11 @@ export default function InventoryHistoryClient() {
     </div>
   );
 }
+
+
+
+
+
 
 
 

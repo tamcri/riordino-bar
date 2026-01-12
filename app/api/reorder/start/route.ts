@@ -38,6 +38,18 @@ function normCode(v: any): string {
   return String(v ?? "").trim();
 }
 
+function n0(v: any): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function round2(n: number) {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+function round1(n: number) {
+  return Math.round((n + Number.EPSILON) * 10) / 10;
+}
+
 async function findTabacchiCategoryId(): Promise<string | null> {
   // Provo prima con slug "tabacchi"
   {
@@ -64,36 +76,49 @@ async function findTabacchiCategoryId(): Promise<string | null> {
   return null;
 }
 
-async function loadPesoKgByCodes(codes: string[]): Promise<Map<string, number>> {
-  const m = new Map<string, number>();
+async function loadItemMetaByCodes(
+  codes: string[]
+): Promise<{ pesoMap: Map<string, number>; confMap: Map<string, number> }> {
+  const pesoMap = new Map<string, number>();
+  const confMap = new Map<string, number>();
+
   const uniq = Array.from(new Set(codes.map((c) => normCode(c)).filter(Boolean)));
-  if (uniq.length === 0) return m;
+  if (uniq.length === 0) return { pesoMap, confMap };
 
   const chunkSize = 500;
 
-  // 1) NEW SCHEMA: category_id della categoria "Tabacchi"
   const tabacchiCategoryId = await findTabacchiCategoryId();
+
+  // helper: applica righe a mappe
+  const apply = (rows: any[]) => {
+    (rows || []).forEach((r: any) => {
+      const code = normCode(r.code);
+
+      const pk = Number(r.peso_kg);
+      if (code && Number.isFinite(pk) && pk > 0) pesoMap.set(code, pk);
+
+      const cd = Number(r.conf_da);
+      if (code && Number.isFinite(cd) && cd > 0) confMap.set(code, Math.trunc(cd));
+    });
+  };
+
+  // 1) NEW schema (category_id Tabacchi)
   if (tabacchiCategoryId) {
     for (let i = 0; i < uniq.length; i += chunkSize) {
       const chunk = uniq.slice(i, i + chunkSize);
 
       const { data, error } = await supabaseAdmin
         .from("items")
-        .select("code, peso_kg")
+        .select("code, peso_kg, conf_da")
         .eq("category_id", tabacchiCategoryId)
         .in("code", chunk);
 
       if (error) throw error;
-
-      (data || []).forEach((r: any) => {
-        const code = normCode(r.code);
-        const pk = Number(r.peso_kg);
-        if (code && Number.isFinite(pk) && pk > 0) m.set(code, pk);
-      });
+      apply(data || []);
     }
 
-    // Se ho trovato almeno qualcosa, ok: non serve legacy
-    if (m.size > 0) return m;
+    // se ho trovato qualcosa qui, ok (ma comunque posso aver trovato solo conf_da o solo peso)
+    if (pesoMap.size > 0 || confMap.size > 0) return { pesoMap, confMap };
   }
 
   // 2) LEGACY: category="TAB"
@@ -102,21 +127,25 @@ async function loadPesoKgByCodes(codes: string[]): Promise<Map<string, number>> 
 
     const { data, error } = await supabaseAdmin
       .from("items")
-      .select("code, peso_kg")
+      .select("code, peso_kg, conf_da")
       .eq("category", "TAB")
       .in("code", chunk);
 
     if (error) throw error;
-
-    (data || []).forEach((r: any) => {
-      const code = normCode(r.code);
-      const pk = Number(r.peso_kg);
-      if (code && Number.isFinite(pk) && pk > 0) m.set(code, pk);
-    });
+    apply(data || []);
   }
 
-  return m;
+  return { pesoMap, confMap };
 }
+
+type TotByItem = {
+  codArticolo: string;
+  descrizione?: string;
+  conf_da?: number | null;
+  qtaOrdine: number;
+  pesoKg: number;
+  valoreDaOrdinare: number;
+};
 
 export async function POST(req: Request) {
   try {
@@ -135,13 +164,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "File mancante" }, { status: 400 });
     }
 
-    // ✅ pvId obbligatorio
     const pvId = String(formData.get("pvId") ?? "").trim();
     if (!pvId) {
       return NextResponse.json({ ok: false, error: "Punto vendita mancante" }, { status: 400 });
     }
 
-    // ✅ Validazione PV
     const { data: pv, error: pvErr } = await supabaseAdmin
       .from("pvs")
       .select("id, code, name")
@@ -162,24 +189,85 @@ export async function POST(req: Request) {
     // 1) parse gestionale
     const parsed = await parseReorderExcel(input, weeks, days);
 
-    // 2) peso da anagrafica Tabacchi (new schema) con fallback legacy TAB
-    const codes = parsed.rows.map((r) => normCode(r.codArticolo));
-    const pesoMap = await loadPesoKgByCodes(codes);
+    // 2) meta da anagrafica (peso + conf_da)
+    const codes = parsed.rows.map((r) => normCode((r as any).codArticolo));
+    const { pesoMap, confMap } = await loadItemMetaByCodes(codes);
 
-    // fallback vecchia logica SOLO se manca peso anagrafico
     const fallbackPesoUnitKg = 0.02;
 
+    // 3) arricchisci righe (peso + conf_da)
     const enrichedRows: PreviewRow[] = parsed.rows.map((r) => {
-      const code = normCode(r.codArticolo);
-      const unitPeso = pesoMap.get(code) ?? fallbackPesoUnitKg;
-      const pesoKg = Number(((r.qtaOrdine || 0) * unitPeso).toFixed(1));
-      return { ...r, pesoKg };
+      const code = normCode((r as any).codArticolo);
+
+      const qtaDaOrdinareRaw = Number((r as any).qtaOrdine);
+      const qtaDaOrdinare = Number.isFinite(qtaDaOrdinareRaw) ? qtaDaOrdinareRaw : 0;
+
+      const pesoAnagrafica = pesoMap.get(code);
+      const pesoUnitKg =
+        typeof pesoAnagrafica === "number" && Number.isFinite(pesoAnagrafica) && pesoAnagrafica > 0
+          ? pesoAnagrafica
+          : fallbackPesoUnitKg;
+
+      const pesoKg = round1(qtaDaOrdinare * pesoUnitKg);
+
+      const conf_da_raw = confMap.get(code);
+      const conf_da =
+        typeof conf_da_raw === "number" && Number.isFinite(conf_da_raw) && conf_da_raw > 0
+          ? Math.trunc(conf_da_raw)
+          : null;
+
+      return { ...r, conf_da, pesoKg };
     });
 
-    // 3) costruisci Excel finale (pulito)
-    const xlsx = await buildReorderXlsx(pvLabel, enrichedRows);
+    // ✅ TOTALI COMPLETI (ordine intero)
+    const tot_rows = enrichedRows.length;
 
-    // 4) upload + storico
+    const tot_order_qty = Math.trunc(enrichedRows.reduce((acc, r: any) => acc + n0(r?.qtaOrdine), 0));
+    const tot_weight_kg = round1(enrichedRows.reduce((acc, r: any) => acc + n0(r?.pesoKg), 0));
+    const tot_value_eur = round2(enrichedRows.reduce((acc, r: any) => acc + n0(r?.valoreDaOrdinare), 0));
+
+    // ✅ TOTALI PER ARTICOLO (ordine intero)
+    const byItem = new Map<string, TotByItem>();
+
+    for (const rr of enrichedRows as any[]) {
+      const cod = normCode(rr?.codArticolo);
+      if (!cod) continue;
+
+      const prev = byItem.get(cod);
+      const next: TotByItem = prev || {
+        codArticolo: cod,
+        descrizione: String(rr?.descrizione ?? ""),
+        conf_da: rr?.conf_da ?? null,
+        qtaOrdine: 0,
+        pesoKg: 0,
+        valoreDaOrdinare: 0,
+      };
+
+      next.qtaOrdine += Math.trunc(n0(rr?.qtaOrdine));
+      next.pesoKg = round1(n0(next.pesoKg) + n0(rr?.pesoKg));
+      next.valoreDaOrdinare = round2(n0(next.valoreDaOrdinare) + n0(rr?.valoreDaOrdinare));
+
+      // se conf_da prima era null e ora c'è, la tengo
+      if ((next.conf_da == null || next.conf_da === 0) && rr?.conf_da) next.conf_da = rr.conf_da;
+
+      byItem.set(cod, next);
+    }
+
+    // ordinamento: per valore desc (ma NON è la “top 20” — qui è la tabella completa)
+    const totals_by_item = Array.from(byItem.values()).sort(
+      (a, b) => n0(b.valoreDaOrdinare) - n0(a.valoreDaOrdinare)
+    );
+    const totals_by_item_count = totals_by_item.length;
+
+    // ✅ PREVIEW salvata (prime 200 righe)
+    const PREVIEW_MAX = 200;
+    const preview = enrichedRows.slice(0, PREVIEW_MAX);
+    const preview_count = preview.length;
+
+    // 4) Excel finale (ordine completo)
+    const xlsx = await buildReorderXlsx(pvLabel, enrichedRows as any);
+
+    // 5) upload + storico
     const reorderId = crypto.randomUUID();
     const now = new Date();
     const year = now.getFullYear();
@@ -207,7 +295,20 @@ export async function POST(req: Request) {
       weeks,
       days,
       export_path: exportPath,
-      tot_rows: enrichedRows.length,
+
+      // ✅ totali veri
+      tot_rows,
+      tot_order_qty,
+      tot_weight_kg,
+      tot_value_eur,
+
+      // ✅ preview salvata
+      preview,
+      preview_count,
+
+      // ✅ totali per articolo (completi)
+      totals_by_item,
+      totals_by_item_count,
     });
 
     if (insertErr) {
@@ -218,8 +319,8 @@ export async function POST(req: Request) {
     return NextResponse.json({
       ok: true,
       reorderId,
-      preview: enrichedRows.slice(0, 20),
-      totalRows: enrichedRows.length,
+      preview: preview.slice(0, 20),
+      totalRows: tot_rows,
       weeks,
       days,
       downloadUrl: `/api/reorder/history/${reorderId}/excel`,
@@ -229,6 +330,15 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: err?.message || "Errore interno" }, { status: 500 });
   }
 }
+
+
+
+
+
+
+
+
+
 
 
 

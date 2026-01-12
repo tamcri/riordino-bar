@@ -98,8 +98,18 @@ export type PreviewRow = {
   qtaVenduta: number;
   valoreVenduto: number;
   giacenza: number;
+
+  // ✅ NEW: quantità prima dell’arrotondamento (quella “proposta”)
+  qtaTeorica: number;
+
+  // ✅ NEW: confezione (default 10, poi l’API la sovrascrive da anagrafica)
+  confDa: number;
+
+  // arrotondata (l’API può ricalcolarla con confDa reale)
   qtaOrdine: number;
+
   valoreDaOrdinare: number;
+
   pesoKg: number; // viene valorizzato dall’API (o fallback)
 };
 
@@ -109,7 +119,7 @@ export async function buildReorderXlsx(pvLabel: string, rows: PreviewRow[]): Pro
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet("RIORDINO TAB");
 
-  ws.mergeCells("A1:G1");
+  ws.mergeCells("A1:I1");
   ws.getCell("A1").value = pvLabel;
   ws.getCell("A1").font = { bold: true, size: 14 };
   ws.getCell("A1").alignment = { vertical: "middle", horizontal: "left" };
@@ -121,6 +131,8 @@ export async function buildReorderXlsx(pvLabel: string, rows: PreviewRow[]): Pro
     "Descrizione",
     "Qtà Venduta",
     "Giacenza",
+    "Qtà teorica",
+    "Conf. da",
     "Qtà da ordinare",
     "Valore da ordinare",
     "Qtà in peso (kg)",
@@ -133,14 +145,17 @@ export async function buildReorderXlsx(pvLabel: string, rows: PreviewRow[]): Pro
   ws.getColumn(2).width = 52;
   ws.getColumn(3).width = 14;
   ws.getColumn(4).width = 12;
-  ws.getColumn(5).width = 16;
-  ws.getColumn(6).width = 18;
-  ws.getColumn(7).width = 12;
+  ws.getColumn(5).width = 12;
+  ws.getColumn(6).width = 10;
+  ws.getColumn(7).width = 16;
+  ws.getColumn(8).width = 18;
+  ws.getColumn(9).width = 12;
 
   let r = headerRow + 1;
 
   let totVend = 0;
   let totGiac = 0;
+  let totTeo = 0;
   let totOrd = 0;
   let totValOrd = 0;
   let totPeso = 0;
@@ -153,6 +168,8 @@ export async function buildReorderXlsx(pvLabel: string, rows: PreviewRow[]): Pro
       row.descrizione,
       row.qtaVenduta,
       row.giacenza,
+      row.qtaTeorica,
+      row.confDa,
       row.qtaOrdine,
       row.valoreDaOrdinare,
       row.pesoKg,
@@ -161,11 +178,14 @@ export async function buildReorderXlsx(pvLabel: string, rows: PreviewRow[]): Pro
     ws.getCell(r, 3).numFmt = "0";
     ws.getCell(r, 4).numFmt = "0";
     ws.getCell(r, 5).numFmt = "0";
-    ws.getCell(r, 6).numFmt = "€ #,##0.00";
-    ws.getCell(r, 7).numFmt = "0.0";
+    ws.getCell(r, 6).numFmt = "0";
+    ws.getCell(r, 7).numFmt = "0";
+    ws.getCell(r, 8).numFmt = "€ #,##0.00";
+    ws.getCell(r, 9).numFmt = "0.0";
 
     totVend += Number(row.qtaVenduta || 0);
     totGiac += Number(row.giacenza || 0);
+    totTeo += Number(row.qtaTeorica || 0);
     totOrd += Number(row.qtaOrdine || 0);
     totValOrd += Number(row.valoreDaOrdinare || 0);
     totPeso += Number(row.pesoKg || 0);
@@ -179,19 +199,21 @@ export async function buildReorderXlsx(pvLabel: string, rows: PreviewRow[]): Pro
 
   ws.getCell(totalRow, 3).value = totVend;
   ws.getCell(totalRow, 4).value = totGiac;
-  ws.getCell(totalRow, 5).value = totOrd;
-  ws.getCell(totalRow, 6).value = round2(totValOrd);
-  ws.getCell(totalRow, 7).value = round1(totPeso);
+  ws.getCell(totalRow, 5).value = totTeo;
+  ws.getCell(totalRow, 7).value = totOrd;
+  ws.getCell(totalRow, 8).value = round2(totValOrd);
+  ws.getCell(totalRow, 9).value = round1(totPeso);
 
   ws.getCell(totalRow, 3).numFmt = "0";
   ws.getCell(totalRow, 4).numFmt = "0";
   ws.getCell(totalRow, 5).numFmt = "0";
-  ws.getCell(totalRow, 6).numFmt = "€ #,##0.00";
-  ws.getCell(totalRow, 7).numFmt = "0.0";
+  ws.getCell(totalRow, 7).numFmt = "0";
+  ws.getCell(totalRow, 8).numFmt = "€ #,##0.00";
+  ws.getCell(totalRow, 9).numFmt = "0.0";
 
   const last = totalRow;
   for (let rr = headerRow; rr <= last; rr++) {
-    for (let cc = 1; cc <= 7; cc++) {
+    for (let cc = 1; cc <= 9; cc++) {
       ws.getCell(rr, cc).border = {
         top: { style: "thin" },
         left: { style: "thin" },
@@ -299,8 +321,13 @@ export async function parseReorderExcel(
     if (!codArticolo && qtaVenduta === 0 && giacenza === 0) return;
 
     const fabbisogno = qtaVenduta * wEq;
-    const mancante = Math.max(0, Math.ceil(fabbisogno - giacenza));
-    const qtaOrdine = Math.ceil(mancante / 10) * 10;
+
+    // ✅ “teorica” = mancante prima dei pack (arrotondo all'intero superiore)
+    const qtaTeorica = Math.max(0, Math.ceil(fabbisogno - giacenza));
+
+    // legacy: default 10. (Poi l’API ricalcola con conf_da reale)
+    const confDa = 10;
+    const qtaOrdine = qtaTeorica > 0 ? Math.ceil(qtaTeorica / confDa) * confDa : 0;
 
     const unitValue = qtaVenduta > 0 ? valoreVenduto / qtaVenduta : 0;
     const valoreDaOrdinare = qtaOrdine > 0 && unitValue > 0 ? round2(unitValue * qtaOrdine) : 0;
@@ -311,6 +338,8 @@ export async function parseReorderExcel(
       qtaVenduta,
       valoreVenduto,
       giacenza,
+      qtaTeorica,
+      confDa,
       qtaOrdine,
       valoreDaOrdinare,
       pesoKg: 0, // verrà valorizzato dall’API
@@ -323,8 +352,8 @@ export async function parseReorderExcel(
 /**
  * Wrapper legacy: mantiene la firma che usavi prima in start/route.ts
  * - qui NON interroghiamo Supabase
- * - quindi usiamo un fallback peso standard: 0.02 kg per pezzo
- * - l’API può sempre sovrascrivere pesoKg con quello da anagrafica (items.peso_kg)
+ * - quindi usiamo confDa=10 e peso standard 0.02 kg per pezzo
+ * - l’API può sempre sovrascrivere confDa/qtaOrdine/pesoKg con quelli da anagrafica
  */
 export async function processReorderExcel(
   input: ArrayBuffer,
@@ -333,7 +362,6 @@ export async function processReorderExcel(
 ): Promise<{ xlsx: Buffer; rows: PreviewRow[] }> {
   const { pvLabel, rows } = await parseReorderExcel(input, weeks, days);
 
-  // fallback standard (200g -> 0.02 kg)
   for (const r of rows) {
     if (r.qtaOrdine > 0) r.pesoKg = round1(r.qtaOrdine * 0.02);
     else r.pesoKg = 0;
@@ -342,6 +370,8 @@ export async function processReorderExcel(
   const xlsx = await buildReorderXlsx(pvLabel, rows);
   return { xlsx, rows };
 }
+
+
 
 
 

@@ -1,3 +1,4 @@
+// app/api/items/list/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
@@ -31,7 +32,7 @@ export async function GET(req: Request) {
   const active = (url.searchParams.get("active") || "1").toLowerCase(); // 1 | 0 | all
   const limit = Math.min(Number(url.searchParams.get("limit") || 200), 500);
 
-  // validazioni leggere (non voglio 500 inutili)
+  // validazioni leggere
   if (category_id && !isUuid(category_id)) {
     return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
   }
@@ -42,10 +43,12 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: "Categoria non valida" }, { status: 400 });
   }
 
-  // ✅ Base select: includo anche peso_kg
+  // ✅ Base select: includo anche peso_kg + conf_da + prezzo_vendita_eur
   let query = supabaseAdmin
     .from("items")
-    .select("id, category, category_id, subcategory_id, code, description, peso_kg, is_active, created_at, updated_at")
+    .select(
+      "id, category, category_id, subcategory_id, code, description, peso_kg, conf_da, prezzo_vendita_eur, is_active, created_at, updated_at"
+    )
     .order("code", { ascending: true })
     .limit(limit);
 
@@ -58,8 +61,7 @@ export async function GET(req: Request) {
     query = query.eq("category_id", category_id);
     if (subcategory_id) query = query.eq("subcategory_id", subcategory_id);
   } else {
-    // ✅ fallback vecchio schema: se non arriva category_id, uso category TAB/GV
-    // default storico: TAB se non passato nulla
+    // ✅ fallback vecchio schema
     const cat = legacyCategory || "TAB";
     query = query.eq("category", cat);
   }
@@ -78,6 +80,8 @@ export async function GET(req: Request) {
 
   return NextResponse.json({ ok: true, rows: data || [] });
 }
+
+
 
 
 

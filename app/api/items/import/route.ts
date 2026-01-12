@@ -19,7 +19,13 @@ function isUuid(v: string | null) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v.trim());
 }
 
-type ExtractedRow = { code: string; description: string; peso_kg: number | null };
+type ExtractedRow = {
+  code: string;
+  description: string;
+  peso_kg: number | null;
+  prezzo_vendita_eur: number | null;
+  conf_da: number | null; // ✅ NEW
+};
 
 /**
  * PESO: tu mi hai confermato che nel tuo file è in KG.
@@ -49,6 +55,52 @@ function parsePesoKg(cellText: string, headerHint: string | null): number | null
   return n;
 }
 
+/**
+ * Prezzo vendita in EUR:
+ * - "12,34" / "12.34" / "€ 12,34" / "12,34 €" ecc.
+ * - ritorna null se vuoto o non numerico
+ * - accetta anche 0 (se proprio serve)
+ */
+function parsePrezzoEur(cellText: string): number | null {
+  const t0 = String(cellText ?? "").trim();
+  if (!t0) return null;
+
+  const cleaned = t0
+    .replace(/\s+/g, " ")
+    .replace("€", "")
+    .replace(/\u20AC/g, "")
+    .trim()
+    .replace(",", ".");
+
+  const m = cleaned.match(/-?\d+(\.\d+)?/);
+  if (!m) return null;
+
+  const n = Number(m[0]);
+  if (!Number.isFinite(n) || n < 0) return null;
+
+  return n;
+}
+
+/**
+ * Conf. da:
+ * - accetta numeri tipo "10", "20", "conf 20", "20 pz" ecc.
+ * - ritorna null se vuoto / non valido
+ * - accetta solo >= 2
+ */
+function parseConfDa(cellText: string): number | null {
+  const t0 = String(cellText ?? "").trim();
+  if (!t0) return null;
+
+  const cleaned = t0.replace(",", ".").toLowerCase();
+  const m = cleaned.match(/\d+/);
+  if (!m) return null;
+
+  const n = Math.trunc(Number(m[0]));
+  if (!Number.isFinite(n) || n < 2) return null;
+
+  return n;
+}
+
 // ====== LEGACY (TAB/GV) ======
 async function getExistingCodesLegacy(category: "TAB" | "GV", codes: string[]) {
   const existing = new Set<string>();
@@ -56,11 +108,7 @@ async function getExistingCodesLegacy(category: "TAB" | "GV", codes: string[]) {
 
   for (let i = 0; i < codes.length; i += chunkSize) {
     const chunk = codes.slice(i, i + chunkSize);
-    const { data, error } = await supabaseAdmin
-      .from("items")
-      .select("code")
-      .eq("category", category)
-      .in("code", chunk);
+    const { data, error } = await supabaseAdmin.from("items").select("code").eq("category", category).in("code", chunk);
 
     if (error) throw error;
     (data || []).forEach((r: any) => existing.add(r.code));
@@ -103,37 +151,24 @@ export async function POST(req: Request) {
       }
 
       // category_id deve esistere
-      const { data: catRow, error: catErr } = await supabaseAdmin
-        .from("categories")
-        .select("id")
-        .eq("id", category_id as string)
-        .maybeSingle();
-
+      const { data: catRow, error: catErr } = await supabaseAdmin.from("categories").select("id").eq("id", category_id as string).maybeSingle();
       if (catErr) return NextResponse.json({ ok: false, error: catErr.message }, { status: 500 });
       if (!catRow) return NextResponse.json({ ok: false, error: "Categoria non trovata" }, { status: 400 });
 
       // subcategory deve appartenere alla category
       if (subcategory_id) {
-        const { data: subRow, error: subErr } = await supabaseAdmin
-          .from("subcategories")
-          .select("id, category_id")
-          .eq("id", subcategory_id)
-          .maybeSingle();
-
+        const { data: subRow, error: subErr } = await supabaseAdmin.from("subcategories").select("id, category_id").eq("id", subcategory_id).maybeSingle();
         if (subErr) return NextResponse.json({ ok: false, error: subErr.message }, { status: 500 });
         if (!subRow) return NextResponse.json({ ok: false, error: "Sottocategoria non trovata" }, { status: 400 });
         if (subRow.category_id !== category_id) {
-          return NextResponse.json(
-            { ok: false, error: "La sottocategoria non appartiene alla categoria selezionata" },
-            { status: 400 }
-          );
+          return NextResponse.json({ ok: false, error: "La sottocategoria non appartiene alla categoria selezionata" }, { status: 400 });
         }
       }
     }
 
     const input = await file.arrayBuffer();
 
-    // ✅ Excel header-based robusto + Peso
+    // ✅ Excel header-based robusto + Peso + Prezzo Vendita + Conf. da
     const extracted: ExtractedRow[] = [];
 
     const wb = new ExcelJS.Workbook();
@@ -154,6 +189,9 @@ export async function POST(req: Request) {
     let codeCol = -1;
     let descCol = -1;
     let pesoCol = -1;
+    let prezzoVenditaCol = -1;
+    let confDaCol = -1;
+
     let pesoHeaderHint: string | null = null;
 
     // trova intestazioni nelle prime 60 righe
@@ -163,6 +201,9 @@ export async function POST(req: Request) {
       let tmpCode = -1;
       let tmpDesc = -1;
       let tmpPeso = -1;
+      let tmpPrezzoVendita = -1;
+      let tmpConfDa = -1;
+
       let tmpPesoHint: string | null = null;
 
       for (let c = 1; c <= Math.min(ws.columnCount || 30, 40); c++) {
@@ -180,9 +221,41 @@ export async function POST(req: Request) {
           tmpDesc = c;
         }
 
-        if (tmpPeso === -1 && ["peso", "peso articolo", "peso (kg)", "peso kg", "peso_kg", "kg", "grammi", "gr", "g"].some((k) => t.includes(k))) {
+        if (
+          tmpPeso === -1 &&
+          ["peso", "peso articolo", "peso (kg)", "peso kg", "peso_kg", "kg", "grammi", "gr", "g"].some((k) => t.includes(k))
+        ) {
           tmpPeso = c;
           tmpPesoHint = t;
+        }
+
+        // Prezzo di vendita: includo "prezzo" / "vendita" ma escludo colonne costo/acquisto/carico
+        if (tmpPrezzoVendita === -1) {
+          const hasPrezzo = t.includes("prezzo");
+          const hasVendita = t.includes("vendita");
+          const isCosto = t.includes("costo") || t.includes("acquisto") || t.includes("carico");
+          const looksLikeVendita =
+            ["prezzo di vendita", "prezzo vendita", "prezzo vend", "vendita", "prezzo"].some((k) => t.includes(k)) && !isCosto;
+
+          if ((hasPrezzo || hasVendita) && looksLikeVendita) {
+            tmpPrezzoVendita = c;
+          }
+        }
+
+        // ✅ Conf. da (confezione)
+        if (tmpConfDa === -1) {
+          const hasConf = t.includes("conf");
+          const hasConfez = t.includes("confez");
+          const hasDa = /\bda\b/.test(t);
+          const hasPz = t.includes("pz") || t.includes("pezzi") || t.includes("pezzo");
+
+          // esempi: "Conf. da", "Conf da", "Confezione", "Confez.", "Conf (pz)"
+          if (hasConf || hasConfez) {
+            // preferisco colonne tipo "conf da" o "confezione"
+            if (hasDa || hasPz || t.includes("confezione") || t.includes("confez")) {
+              tmpConfDa = c;
+            }
+          }
         }
       }
 
@@ -191,6 +264,8 @@ export async function POST(req: Request) {
         codeCol = tmpCode;
         descCol = tmpDesc;
         pesoCol = tmpPeso; // opzionale
+        prezzoVenditaCol = tmpPrezzoVendita; // opzionale
+        confDaCol = tmpConfDa; // opzionale
         pesoHeaderHint = tmpPesoHint;
         break;
       }
@@ -201,7 +276,7 @@ export async function POST(req: Request) {
         {
           ok: false,
           error:
-            "Non sono riuscito a trovare le colonne Codice/Descrizione. Usa un Excel con intestazioni tipo 'Codice Articolo' e 'Descrizione' (e opzionale 'Peso').",
+            "Non sono riuscito a trovare le colonne Codice/Descrizione. Usa un Excel con intestazioni tipo 'Codice Articolo' e 'Descrizione' (e opzionali 'Peso', 'Prezzo di Vendita', 'Conf. da').",
         },
         { status: 400 }
       );
@@ -228,7 +303,29 @@ export async function POST(req: Request) {
         peso_kg = parsePesoKg(pText, pesoHeaderHint);
       }
 
-      if (code) extracted.push({ code, description: desc || code, peso_kg });
+      let prezzo_vendita_eur: number | null = null;
+      if (prezzoVenditaCol !== -1) {
+        const prCell = row.getCell(prezzoVenditaCol);
+        const prText = String((prCell as any)?.text ?? prCell.value ?? "").trim();
+        prezzo_vendita_eur = parsePrezzoEur(prText);
+      }
+
+      let conf_da: number | null = null;
+      if (confDaCol !== -1) {
+        const cCell = row.getCell(confDaCol);
+        const cText = String((cCell as any)?.text ?? cCell.value ?? "").trim();
+        conf_da = parseConfDa(cText);
+      }
+
+      if (code) {
+        extracted.push({
+          code,
+          description: desc || code,
+          peso_kg,
+          prezzo_vendita_eur,
+          conf_da,
+        });
+      }
     }
 
     if (extracted.length === 0) {
@@ -240,10 +337,17 @@ export async function POST(req: Request) {
     for (const r of extracted) {
       const code = normCode(r.code);
       if (!code) continue;
+
+      const pesoNorm = typeof r.peso_kg === "number" && Number.isFinite(r.peso_kg) ? r.peso_kg : null;
+      const prezzoNorm = typeof r.prezzo_vendita_eur === "number" && Number.isFinite(r.prezzo_vendita_eur) ? r.prezzo_vendita_eur : null;
+      const confNorm = typeof r.conf_da === "number" && Number.isFinite(r.conf_da) && r.conf_da >= 2 ? Math.trunc(r.conf_da) : null;
+
       map.set(code, {
         code,
         description: normDesc(r.description) || code,
-        peso_kg: typeof r.peso_kg === "number" && Number.isFinite(r.peso_kg) ? r.peso_kg : null,
+        peso_kg: pesoNorm,
+        prezzo_vendita_eur: prezzoNorm,
+        conf_da: confNorm,
       });
     }
 
@@ -259,7 +363,9 @@ export async function POST(req: Request) {
         subcategory_id: subcategory_id || null,
         code: r.code,
         description: r.description,
-        peso_kg: r.peso_kg, // ✅ NEW
+        peso_kg: r.peso_kg,
+        prezzo_vendita_eur: r.prezzo_vendita_eur,
+        conf_da: r.conf_da, // ✅ NEW
         is_active: true,
         updated_at: now,
       }));
@@ -298,7 +404,9 @@ export async function POST(req: Request) {
       category: legacyCategory,
       code: r.code,
       description: r.description,
-      peso_kg: r.peso_kg, // ✅ NEW
+      peso_kg: r.peso_kg,
+      prezzo_vendita_eur: r.prezzo_vendita_eur,
+      conf_da: r.conf_da, // ✅ NEW
       is_active: true,
       updated_at: now,
     }));
@@ -323,6 +431,9 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: e?.message || String(e) || "Errore interno" }, { status: 500 });
   }
 }
+
+
+
 
 
 
