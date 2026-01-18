@@ -15,7 +15,11 @@ type Body = {
   category_id?: string;
   subcategory_id?: string | null;
   inventory_date?: string; // YYYY-MM-DD
+  operatore?: string; // ✅ NEW
   rows?: Row[];
+
+  // ✅ NEW: per evitare sovrascrittura accidentale
+  force_overwrite?: boolean;
 };
 
 function isUuid(v: string | null | undefined) {
@@ -33,18 +37,12 @@ const USER_TABLE_CANDIDATES = ["app_user", "app_users", "utenti", "users"];
 
 async function lookupPvIdFromUserTables(username: string): Promise<string | null> {
   for (const table of USER_TABLE_CANDIDATES) {
-    const { data, error } = await supabaseAdmin
-      .from(table)
-      .select("pv_id")
-      .eq("username", username)
-      .maybeSingle();
-
+    const { data, error } = await supabaseAdmin.from(table).select("pv_id").eq("username", username).maybeSingle();
     if (error) continue;
 
     const pv_id = (data as any)?.pv_id ?? null;
     if (pv_id && isUuid(pv_id)) return pv_id;
 
-    // tabella trovata ma pv_id vuoto
     return null;
   }
   return null;
@@ -54,13 +52,7 @@ async function lookupPvIdFromUsernameCode(username: string): Promise<string | nu
   const code = (username || "").trim().split(/\s+/)[0]?.toUpperCase();
   if (!code || code.length > 5) return null;
 
-  const { data, error } = await supabaseAdmin
-    .from("pvs")
-    .select("id")
-    .eq("is_active", true)
-    .eq("code", code)
-    .maybeSingle();
-
+  const { data, error } = await supabaseAdmin.from("pvs").select("id").eq("is_active", true).eq("code", code).maybeSingle();
   if (error) return null;
   return data?.id ?? null;
 }
@@ -78,7 +70,6 @@ async function requirePvIdForPuntoVendita(username: string): Promise<string> {
 export async function POST(req: Request) {
   const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
 
-  // ✅ ora anche amministrativo può salvare (come da regole)
   if (!session || !["admin", "amministrativo", "punto_vendita"].includes(session.role)) {
     return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
   }
@@ -89,8 +80,13 @@ export async function POST(req: Request) {
   const category_id = body.category_id?.trim();
   const subcategory_id = (body.subcategory_id ?? null)?.toString().trim() || null;
   const inventory_date = (body.inventory_date || "").trim();
+  const force_overwrite = !!body.force_overwrite;
 
-  // ✅ category obbligatoria
+  // ✅ operatore obbligatorio
+  const operatore = (body.operatore || "").trim();
+  if (!operatore) return NextResponse.json({ ok: false, error: "Operatore mancante" }, { status: 400 });
+  if (operatore.length > 80) return NextResponse.json({ ok: false, error: "Operatore troppo lungo (max 80)" }, { status: 400 });
+
   if (!isUuid(category_id)) {
     return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
   }
@@ -102,18 +98,16 @@ export async function POST(req: Request) {
   if (rows.length === 0) {
     return NextResponse.json({ ok: false, error: "Nessuna riga da salvare" }, { status: 400 });
   }
-
-  // Limite difensivo
   if (rows.length > 3000) {
     return NextResponse.json({ ok: false, error: "Troppe righe in un colpo (max 3000)" }, { status: 400 });
   }
 
-  // Inventory date: se non arriva o è invalida, usa default DB
   const dateOrNull = inventory_date && /^\d{4}-\d{2}-\d{2}$/.test(inventory_date) ? inventory_date : null;
+  if (!dateOrNull) {
+    return NextResponse.json({ ok: false, error: "inventory_date non valida (YYYY-MM-DD)" }, { status: 400 });
+  }
 
-  // ✅ pv_id effettivo:
-  // - admin/amministrativo: da body (obbligatorio)
-  // - punto_vendita: IGNORA body.pv_id e prende dal profilo utente
+  // ✅ pv_id effettivo
   let pv_id: string | null = (body.pv_id || "").trim() || null;
 
   if (session.role === "punto_vendita") {
@@ -123,7 +117,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: e?.message || "Non autorizzato" }, { status: 401 });
     }
   } else {
-    // admin/amministrativo: pv_id obbligatorio e valido
     if (!isUuid(pv_id)) {
       return NextResponse.json({ ok: false, error: "pv_id non valido" }, { status: 400 });
     }
@@ -133,7 +126,57 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "pv_id mancante" }, { status: 400 });
   }
 
-  // Payload: upsert su (pv_id, item_id, inventory_date)
+  // ✅ BLOCCO anti-sovrascrittura: se esiste già un inventario per quella chiave e non forzi, stop.
+  let existsQ = supabaseAdmin
+    .from("inventories_headers")
+    .select("id")
+    .eq("pv_id", pv_id)
+    .eq("category_id", category_id)
+    .eq("inventory_date", dateOrNull);
+
+  if (subcategory_id) existsQ = existsQ.eq("subcategory_id", subcategory_id);
+  else existsQ = existsQ.is("subcategory_id", null);
+
+  const { data: existing, error: existsErr } = await existsQ.limit(1);
+
+  if (existsErr) {
+    return NextResponse.json({ ok: false, error: existsErr.message }, { status: 500 });
+  }
+
+  const alreadyExists = Array.isArray(existing) && existing.length > 0;
+
+  if (alreadyExists && !force_overwrite) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "Esiste già un inventario per questa combinazione (PV/Categoria/Sottocategoria/Data). Se vuoi sovrascriverlo, riprova confermando.",
+        code: "INVENTORY_ALREADY_EXISTS",
+      },
+      { status: 409 }
+    );
+  }
+
+  // ✅ 1) upsert TESTATA inventario
+  const headerPayload = {
+    pv_id,
+    category_id,
+    subcategory_id,
+    inventory_date: dateOrNull,
+    operatore,
+    created_by_username: session.username,
+    updated_at: new Date().toISOString(),
+  };
+
+  const { error: headerErr } = await supabaseAdmin
+    .from("inventories_headers")
+    .upsert(headerPayload as any, { onConflict: "pv_id,category_id,subcategory_id,inventory_date" });
+
+  if (headerErr) {
+    console.error("[inventories/save] header error:", headerErr);
+    return NextResponse.json({ ok: false, error: headerErr.message }, { status: 500 });
+  }
+
+  // ✅ 2) upsert RIGHE inventario
   const payload = rows
     .filter((r) => isUuid(r.item_id))
     .map((r) => ({
@@ -142,7 +185,7 @@ export async function POST(req: Request) {
       subcategory_id,
       item_id: r.item_id,
       qty: clampInt(r.qty),
-      inventory_date: dateOrNull ?? undefined,
+      inventory_date: dateOrNull,
       created_by_username: session.username,
     }));
 
@@ -150,12 +193,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "Nessuna riga valida" }, { status: 400 });
   }
 
-  const { error } = await supabaseAdmin
-    .from("inventories")
-    .upsert(payload as any, { onConflict: "pv_id,item_id,inventory_date" });
+  const { error } = await supabaseAdmin.from("inventories").upsert(payload as any, { onConflict: "pv_id,item_id,inventory_date" });
 
   if (error) {
-    console.error("[inventories/save] error:", error);
+    console.error("[inventories/save] rows error:", error);
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
 
@@ -163,8 +204,14 @@ export async function POST(req: Request) {
     ok: true,
     saved: payload.length,
     pv_id,
-    // se PV, chiarisco che pv_id è stato forzato lato server
+    operatore,
     enforced_pv: session.role === "punto_vendita",
+    overwritten: alreadyExists && force_overwrite,
   });
 }
+
+
+
+
+
 

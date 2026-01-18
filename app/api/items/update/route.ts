@@ -15,12 +15,30 @@ export async function PATCH(req: Request) {
   const id = String(body?.id ?? "").trim();
   const description = body?.description;
   const is_active = body?.is_active;
+  const peso_kg = body?.peso_kg;
+  const prezzo_vendita_eur = body?.prezzo_vendita_eur;
 
   if (!id) return NextResponse.json({ ok: false, error: "ID mancante" }, { status: 400 });
+
+  function toNullableNumber(v: any): number | null | undefined {
+    // undefined => non aggiornare la colonna
+    if (v === undefined) return undefined;
+    // null / "" => setta NULL in DB
+    if (v === null || v === "") return null;
+    const n = typeof v === "number" ? v : Number(String(v).replace(",", "."));
+    if (!Number.isFinite(n)) return null;
+    return n;
+  }
 
   const patch: any = { updated_at: new Date().toISOString() };
   if (typeof description === "string") patch.description = description.trim();
   if (typeof is_active === "boolean") patch.is_active = is_active;
+
+  const nextPeso = toNullableNumber(peso_kg);
+  if (nextPeso !== undefined) patch.peso_kg = nextPeso;
+
+  const nextPrezzo = toNullableNumber(prezzo_vendita_eur);
+  if (nextPrezzo !== undefined) patch.prezzo_vendita_eur = nextPrezzo;
 
   const { error } = await supabaseAdmin.from("items").update(patch).eq("id", id);
   if (error) {
@@ -30,3 +48,5 @@ export async function PATCH(req: Request) {
 
   return NextResponse.json({ ok: true });
 }
+
+

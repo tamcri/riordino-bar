@@ -48,6 +48,9 @@ export default function InventoryPvClient() {
 
   const [qtyMap, setQtyMap] = useState<Record<string, string>>({});
 
+  // ✅ NEW: operatore
+  const [operatore, setOperatore] = useState("");
+
   // ✅ filtro ricerca (client-side)
   const [search, setSearch] = useState("");
 
@@ -56,7 +59,8 @@ export default function InventoryPvClient() {
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const canSave = useMemo(() => !!pvId && !!categoryId && items.length > 0, [pvId, categoryId, items.length]);
+  // ✅ operatore obbligatorio
+  const canSave = useMemo(() => !!pvId && !!categoryId && items.length > 0 && !!operatore.trim(), [pvId, categoryId, items.length, operatore]);
 
   const filteredItems = useMemo(() => {
     const t = search.trim().toLowerCase();
@@ -119,9 +123,7 @@ export default function InventoryPvClient() {
     params.set("category_id", catId);
     if (subId) params.set("subcategory_id", subId);
 
-    const res = await fetch(`/api/items/list?${params}`, {
-      cache: "no-store",
-    });
+    const res = await fetch(`/api/items/list?${params}`, { cache: "no-store" });
     const json = await res.json();
     if (!json.ok) throw new Error(json.error || "Errore articoli");
 
@@ -145,9 +147,7 @@ export default function InventoryPvClient() {
     params.set("inventory_date", inventoryDate); // ISO
     if (subcategoryId) params.set("subcategory_id", subcategoryId);
 
-    const res = await fetch(`/api/inventories/rows?${params}`, {
-      cache: "no-store",
-    });
+    const res = await fetch(`/api/inventories/rows?${params}`, { cache: "no-store" });
     const json = await res.json();
     if (!json.ok) return; // se non c’è inventario → rimane vuoto
 
@@ -160,7 +160,8 @@ export default function InventoryPvClient() {
       const next = { ...prev };
       items.forEach((it) => {
         if (map.has(it.id)) {
-          next[it.id] = String(map.get(it.id));
+          const v = String(map.get(it.id) ?? 0);
+          next[it.id] = v === "0" ? "" : v;
         }
       });
       return next;
@@ -174,6 +175,9 @@ export default function InventoryPvClient() {
     (async () => {
       try {
         setLoading(true);
+        setError(null);
+        setMsg(null);
+
         await loadMe();
         await loadCategories();
       } catch (e: any) {
@@ -211,19 +215,30 @@ export default function InventoryPvClient() {
     })();
   }, [subcategoryId]);
 
+  // ✅ prefill quando cambiano dataset/data/sottocat/PV
   useEffect(() => {
     (async () => {
       try {
+        setMsg(null);
+        setError(null);
         await prefillInventory();
       } catch {}
     })();
-  }, [items.length, inventoryDate]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pvId, categoryId, subcategoryId, items.length, inventoryDate]);
 
   /* =========================
      SAVE
   ========================== */
   async function save() {
-    if (!canSave) return;
+    // doppia guardia: UI + sicurezza
+    if (!pvId || !categoryId || items.length === 0) return;
+
+    if (!operatore.trim()) {
+      setError("Inserisci il Nome Operatore prima di salvare.");
+      setMsg(null);
+      return;
+    }
 
     setSaving(true);
     setMsg(null);
@@ -250,6 +265,7 @@ export default function InventoryPvClient() {
           category_id: categoryId,
           subcategory_id: subcategoryId || null,
           inventory_date: inventoryDate, // ISO
+          operatore: operatore.trim(), // ✅ NEW
           rows,
         }),
       });
@@ -272,6 +288,18 @@ export default function InventoryPvClient() {
 
   return (
     <div className="space-y-4">
+      {/* ✅ operatore (obbligatorio) */}
+      <div className="rounded-2xl border bg-white p-4">
+        <label className="block text-sm font-medium mb-2">Nome Operatore</label>
+        <input
+          className="w-full rounded-xl border p-3"
+          placeholder="Es. Mario Rossi"
+          value={operatore}
+          onChange={(e) => setOperatore(e.target.value)}
+        />
+        <p className="text-xs text-gray-500 mt-1">Obbligatorio per salvare.</p>
+      </div>
+
       <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-3 gap-3">
         <div>
           <label className="block text-sm font-medium mb-2">Categoria</label>
@@ -385,6 +413,7 @@ export default function InventoryPvClient() {
     </div>
   );
 }
+
 
 
 

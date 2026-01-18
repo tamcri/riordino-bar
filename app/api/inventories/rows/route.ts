@@ -1,3 +1,4 @@
+// app/api/inventories/rows/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
@@ -10,6 +11,11 @@ function isUuid(v: string | null) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
     v.trim()
   );
+}
+
+function isIsoDate(v: string | null) {
+  if (!v) return false;
+  return /^\d{4}-\d{2}-\d{2}$/.test(v.trim());
 }
 
 const USER_TABLE_CANDIDATES = ["app_user", "app_users", "utenti", "users"];
@@ -75,11 +81,11 @@ export async function GET(req: Request) {
   if (subcategory_id && !isUuid(subcategory_id)) {
     return NextResponse.json({ ok: false, error: "subcategory_id non valido" }, { status: 400 });
   }
-  if (!inventory_date) {
-    return NextResponse.json({ ok: false, error: "inventory_date mancante" }, { status: 400 });
+  if (!isIsoDate(inventory_date)) {
+    return NextResponse.json({ ok: false, error: "inventory_date non valida (YYYY-MM-DD)" }, { status: 400 });
   }
 
-  // ✅ enforcement PV: se punto_vendita, ignoro pv_id in query e uso quello “suo”
+  // PV enforcement
   let effectivePvId = pv_id_qs;
 
   if (session.role === "punto_vendita") {
@@ -92,70 +98,58 @@ export async function GET(req: Request) {
       );
     }
   } else {
-    // admin/amministrativo: pv_id obbligatorio
     if (!isUuid(effectivePvId)) {
       return NextResponse.json({ ok: false, error: "pv_id non valido" }, { status: 400 });
     }
   }
 
-  let q = supabaseAdmin
-    .from("inventories")
-    .select(
-      "id, item_id, qty, pv_id, category_id, subcategory_id, inventory_date, created_by_username, created_at, updated_at"
-    )
-    .eq("pv_id", effectivePvId)
-    .eq("category_id", category_id)
-    .eq("inventory_date", inventory_date);
+  try {
+    let q = supabaseAdmin
+      .from("inventories")
+      .select("id, item_id, qty, created_by_username, items:items(code, description)")
+      .eq("pv_id", effectivePvId)
+      .eq("category_id", category_id)
+      .eq("inventory_date", inventory_date);
 
-  // ✅ IMPORTANTISSIMO:
-  // il PV deve prefillare SOLO il SUO inventario (quello creato dal suo utente),
-  // così non si “porta dietro” i numeri inseriti da admin/amministrativo sullo stesso PV.
-  if (session.role === "punto_vendita") {
-    q = q.eq("created_by_username", session.username);
+    if (session.role === "punto_vendita") {
+      q = q.eq("created_by_username", session.username);
+    }
+
+    if (subcategory_id) q = q.eq("subcategory_id", subcategory_id);
+    else q = q.is("subcategory_id", null);
+
+    const { data, error } = await q;
+
+    if (error) {
+      console.error("[inventories/rows] supabase error:", error);
+      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+    }
+
+    const rows = (data || []) as any[];
+
+    // ✅ SOLO QTY > 0
+    const out = rows
+      .map((r: any) => ({
+        id: r.id,
+        item_id: r.item_id,
+        code: r?.items?.code ?? "",
+        description: r?.items?.description ?? "",
+        qty: Number(r?.qty ?? 0),
+      }))
+      .filter((x) => Number.isFinite(x.qty) && x.qty > 0)
+      .sort((a, b) => (a.code || "").localeCompare(b.code || ""));
+
+    return NextResponse.json({ ok: true, rows: out });
+  } catch (e: any) {
+    console.error("[inventories/rows] UNHANDLED ERROR:", e);
+    return NextResponse.json({ ok: false, error: e?.message || "TypeError: fetch failed" }, { status: 500 });
   }
-
-  // subcategory: se richiesta, filtro; se NON richiesta, voglio quelle con subcategory_id NULL
-  if (subcategory_id) q = q.eq("subcategory_id", subcategory_id);
-  else q = q.is("subcategory_id", null);
-
-  const { data, error } = await q;
-
-  if (error) {
-    console.error("[inventories/rows] error:", error);
-    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
-  }
-
-  const rows = data || [];
-  const itemIds = Array.from(new Set(rows.map((r: any) => r.item_id))).filter(Boolean);
-
-  if (itemIds.length === 0) {
-    return NextResponse.json({ ok: true, rows: [] });
-  }
-
-  const { data: items, error: itemsErr } = await supabaseAdmin
-    .from("items")
-    .select("id, code, description")
-    .in("id", itemIds);
-
-  if (itemsErr) {
-    return NextResponse.json({ ok: false, error: itemsErr.message }, { status: 500 });
-  }
-
-  const itemMap = new Map<string, { code: string; description: string }>();
-  (items || []).forEach((it: any) => itemMap.set(it.id, { code: it.code, description: it.description }));
-
-  const out = rows
-    .map((r: any) => ({
-      id: r.id,
-      item_id: r.item_id,
-      code: itemMap.get(r.item_id)?.code ?? "",
-      description: itemMap.get(r.item_id)?.description ?? "",
-      qty: Number(r.qty ?? 0),
-    }))
-    .sort((a, b) => (a.code || "").localeCompare(b.code || ""));
-
-  return NextResponse.json({ ok: true, rows: out });
 }
+
+
+
+
+
 
 
 

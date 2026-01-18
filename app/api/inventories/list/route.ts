@@ -59,6 +59,14 @@ type InventoryRow = {
   created_at: string | null;
 };
 
+type InventoryHeaderRow = {
+  pv_id: string;
+  category_id: string;
+  subcategory_id: string | null;
+  inventory_date: string; // YYYY-MM-DD
+  operatore: string | null;
+};
+
 export async function GET(req: Request) {
   const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
 
@@ -116,17 +124,16 @@ export async function GET(req: Request) {
     }
   }
 
+  // 1) carico righe inventories (come prima)
   let q = supabaseAdmin
     .from("inventories")
     .select("pv_id, category_id, subcategory_id, inventory_date, qty, created_by_username, created_at")
     .limit(limitRows);
 
-  // filtri opzionali
   if (category_id) q = q.eq("category_id", category_id);
   if (effectivePvId) q = q.eq("pv_id", effectivePvId);
   if (subcategory_id) q = q.eq("subcategory_id", subcategory_id);
 
-  // ✅ filtri data opzionali (YYYY-MM-DD)
   if (dateFrom) q = q.gte("inventory_date", dateFrom);
   if (dateTo) q = q.lte("inventory_date", dateTo);
 
@@ -189,6 +196,39 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: true, rows: [] });
   }
 
+  // 2) carico headers (inventories_headers) per ricavare OPERATORE
+  // filtro coerente con query principale
+  let hq = supabaseAdmin
+    .from("inventories_headers")
+    .select("pv_id, category_id, subcategory_id, inventory_date, operatore");
+
+  if (category_id) hq = hq.eq("category_id", category_id);
+  if (effectivePvId) hq = hq.eq("pv_id", effectivePvId);
+  if (subcategory_id) hq = hq.eq("subcategory_id", subcategory_id);
+  if (dateFrom) hq = hq.gte("inventory_date", dateFrom);
+  if (dateTo) hq = hq.lte("inventory_date", dateTo);
+
+  const { data: headersData, error: headersErr } = await hq;
+
+  if (headersErr) {
+    console.error("[inventories/list] headers error:", headersErr);
+    return NextResponse.json(
+      {
+        ok: false,
+        error: headersErr.message,
+        hint: "Probabile: la tabella 'inventories_headers' non esiste ancora o manca permesso. Creala in Supabase e riprova.",
+      },
+      { status: 500 }
+    );
+  }
+
+  const headers = (headersData || []) as InventoryHeaderRow[];
+  const headerMap = new Map<string, string | null>();
+  for (const h of headers) {
+    const k = `${h.pv_id}|${h.category_id}|${h.subcategory_id ?? ""}|${h.inventory_date}`;
+    headerMap.set(k, (h.operatore ?? "").trim() || null);
+  }
+
   // enrich: PV + Category names
   const pvIds = Array.from(new Set(list.map((x) => x.pv_id)));
   const catIds = Array.from(new Set(list.map((x) => x.category_id)));
@@ -237,10 +277,14 @@ export async function GET(req: Request) {
     created_at: g.created_at,
     lines_count: g.lines_count,
     qty_sum: g.qty_sum,
+
+    // ✅ NEW
+    operatore: headerMap.get(g.key) ?? null,
   }));
 
   return NextResponse.json({ ok: true, rows: out });
 }
+
 
 
 

@@ -23,6 +23,10 @@ function todayISO() {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+function isIsoDate(s: string) {
+  return /^\d{4}-\d{2}-\d{2}$/.test((s || "").trim());
+}
+
 export default function InventoryClient() {
   const [pvs, setPvs] = useState<Pv[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -34,6 +38,9 @@ export default function InventoryClient() {
   const [subcategoryId, setSubcategoryId] = useState<string>(""); // "" = nessuna
   const [inventoryDate, setInventoryDate] = useState(todayISO());
 
+  // ✅ operatore
+  const [operatore, setOperatore] = useState("");
+
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -42,11 +49,14 @@ export default function InventoryClient() {
   // qty per item_id
   const [qtyMap, setQtyMap] = useState<Record<string, string>>({});
 
-  // ✅ filtro ricerca (client-side)
+  // filtro ricerca (client-side)
   const [search, setSearch] = useState("");
 
   const canLoad = useMemo(() => !!pvId && !!categoryId && !!inventoryDate, [pvId, categoryId, inventoryDate]);
-  const canSave = useMemo(() => !!pvId && !!categoryId && items.length > 0, [pvId, categoryId, items.length]);
+  const canSave = useMemo(
+    () => !!operatore.trim() && !!pvId && !!categoryId && items.length > 0,
+    [operatore, pvId, categoryId, items.length]
+  );
 
   const filteredItems = useMemo(() => {
     const t = search.trim().toLowerCase();
@@ -88,13 +98,16 @@ export default function InventoryClient() {
   async function loadItems(nextCategoryId: string, nextSubcategoryId: string) {
     setItems([]);
     setQtyMap({});
-    setSearch(""); // ✅ reset ricerca quando cambio dataset
+    setSearch("");
 
     if (!nextCategoryId) return;
 
     const params = new URLSearchParams();
     params.set("category_id", nextCategoryId);
     if (nextSubcategoryId) params.set("subcategory_id", nextSubcategoryId);
+
+    // ✅ IMPORTANTISSIMO: altrimenti /api/items/list ti tronca a 200 righe
+    params.set("limit", "500");
 
     const res = await fetch(`/api/items/list?${params.toString()}`, { cache: "no-store" });
     const json = await res.json().catch(() => null);
@@ -103,14 +116,19 @@ export default function InventoryClient() {
     const rows: Item[] = json.rows || [];
     setItems(rows);
 
-    // init qty map vuota
     const m: Record<string, string> = {};
     rows.forEach((it) => (m[it.id] = ""));
     setQtyMap(m);
   }
 
-  // ✅ PREFILL corretto: usa /api/inventories/rows (NON /list)
-  async function loadExistingInventory(nextPvId: string, nextCategoryId: string, nextSubcategoryId: string, nextDate: string) {
+  // Prefill inventario esistente
+  async function loadExistingInventory(
+    nextPvId: string,
+    nextCategoryId: string,
+    nextSubcategoryId: string,
+    nextDate: string,
+    currentItems: Item[]
+  ) {
     if (!nextPvId || !nextCategoryId || !nextDate) return;
 
     const params = new URLSearchParams();
@@ -121,10 +139,7 @@ export default function InventoryClient() {
 
     const res = await fetch(`/api/inventories/rows?${params.toString()}`, { cache: "no-store" });
     const json = await res.json().catch(() => null);
-    if (!res.ok || !json?.ok) {
-      // se non esiste inventario, non è un errore: restano vuoti
-      return;
-    }
+    if (!res.ok || !json?.ok) return;
 
     const map = new Map<string, number>();
     (json.rows || []).forEach((r: InventoryRow) => {
@@ -133,7 +148,7 @@ export default function InventoryClient() {
 
     setQtyMap((prev) => {
       const next = { ...prev };
-      items.forEach((it) => {
+      currentItems.forEach((it) => {
         if (map.has(it.id)) {
           const v = String(map.get(it.id) ?? 0);
           next[it.id] = v === "0" ? "" : v;
@@ -157,6 +172,21 @@ export default function InventoryClient() {
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // reset quantità quando cambia contesto (così non restano in memoria)
+  useEffect(() => {
+    setMsg(null);
+    setError(null);
+
+    if (items.length > 0) {
+      setQtyMap((prev) => {
+        const next: Record<string, string> = { ...prev };
+        items.forEach((it) => (next[it.id] = ""));
+        return next;
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pvId, categoryId, subcategoryId, inventoryDate]);
 
   // quando cambia categoria -> carica sottocategorie + items
   useEffect(() => {
@@ -196,7 +226,7 @@ export default function InventoryClient() {
       setMsg(null);
       setError(null);
       try {
-        await loadExistingInventory(pvId, categoryId, subcategoryId || "", inventoryDate);
+        await loadExistingInventory(pvId, categoryId, subcategoryId || "", inventoryDate, items);
       } catch (e: any) {
         setError(e?.message || "Errore");
       }
@@ -209,8 +239,14 @@ export default function InventoryClient() {
     setQtyMap((prev) => ({ ...prev, [itemId]: cleaned }));
   }
 
-  async function save() {
+  async function save(forceOverwrite: boolean = false, overrideDate?: string) {
     if (!canSave) return;
+
+    const dateToUse = (overrideDate ?? inventoryDate).trim();
+    if (!isIsoDate(dateToUse)) {
+      setError("Data inventario non valida (YYYY-MM-DD).");
+      return;
+    }
 
     setSaving(true);
     setMsg(null);
@@ -229,15 +265,45 @@ export default function InventoryClient() {
           pv_id: pvId,
           category_id: categoryId,
           subcategory_id: subcategoryId || null,
-          inventory_date: inventoryDate,
+          inventory_date: dateToUse,
+          operatore: operatore.trim(),
           rows,
+          force_overwrite: forceOverwrite,
         }),
       });
 
       const json = await res.json().catch(() => null);
+
+      if (res.status === 409 || json?.code === "INVENTORY_ALREADY_EXISTS") {
+        const choice = window.prompt(
+          "Esiste già un inventario per PV/Categoria/Sottocategoria/Data.\n\nScrivi:\n1 = Sovrascrivi\n2 = Salva come nuovo (nuova data)\n0 = Annulla",
+          "0"
+        );
+
+        if (choice === "1") {
+          await save(true, dateToUse);
+          return;
+        }
+
+        if (choice === "2") {
+          const suggested = todayISO();
+          const newDate = window.prompt("Inserisci la nuova data inventario (YYYY-MM-DD):", suggested) || "";
+          if (!isIsoDate(newDate.trim())) {
+            setError("Data non valida. Formato richiesto: YYYY-MM-DD");
+            return;
+          }
+          setInventoryDate(newDate.trim());
+          await save(false, newDate.trim());
+          return;
+        }
+
+        setMsg("Salvataggio annullato. Inventario esistente mantenuto.");
+        return;
+      }
+
       if (!res.ok || !json?.ok) throw new Error(json?.error || "Salvataggio fallito");
 
-      setMsg(`Salvataggio OK — righe: ${json.saved}`);
+      setMsg(`Salvataggio OK — righe: ${json.saved}${json.overwritten ? " (sovrascritto)" : ""}`);
     } catch (e: any) {
       setError(e?.message || "Errore salvataggio");
     } finally {
@@ -247,7 +313,6 @@ export default function InventoryClient() {
 
   return (
     <div className="space-y-4">
-      {/* filtri */}
       <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-4 gap-3">
         <div>
           <label className="block text-sm font-medium mb-2">Punto Vendita</label>
@@ -295,7 +360,12 @@ export default function InventoryClient() {
         </div>
       </div>
 
-      {/* azioni */}
+      <div className="rounded-2xl border bg-white p-4">
+        <label className="block text-sm font-medium mb-2">Nome Operatore</label>
+        <input className="w-full rounded-xl border p-3" placeholder="Es. Mario Rossi" value={operatore} onChange={(e) => setOperatore(e.target.value)} />
+        <p className="text-xs text-gray-500 mt-1">Obbligatorio per salvare lo storico e generare l’Excel.</p>
+      </div>
+
       <div className="rounded-2xl border bg-white p-4 flex items-center justify-between gap-3">
         <div className="text-sm text-gray-600">
           {items.length ? (
@@ -307,20 +377,14 @@ export default function InventoryClient() {
           )}
         </div>
 
-        <button className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60" disabled={!canSave || saving} onClick={save}>
+        <button className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60" disabled={!canSave || saving} onClick={() => save(false)}>
           {saving ? "Salvo..." : "Salva giacenze"}
         </button>
       </div>
 
-      {/* ✅ ricerca */}
       <div className="rounded-2xl border bg-white p-4">
         <label className="block text-sm font-medium mb-2">Cerca</label>
-        <input
-          className="w-full rounded-xl border p-3"
-          placeholder="Cerca per codice o descrizione..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
+        <input className="w-full rounded-xl border p-3" placeholder="Cerca per codice o descrizione..." value={search} onChange={(e) => setSearch(e.target.value)} />
         <div className="mt-2 text-sm text-gray-600">
           Visualizzati: <b>{filteredItems.length}</b> / {items.length}
         </div>
@@ -329,7 +393,6 @@ export default function InventoryClient() {
       {msg && <p className="text-sm text-green-700">{msg}</p>}
       {error && <p className="text-sm text-red-600">{error}</p>}
 
-      {/* tabella items + qty */}
       <div className="overflow-auto rounded-2xl border bg-white">
         <table className="w-full text-sm">
           <thead className="bg-gray-50">
@@ -377,4 +440,9 @@ export default function InventoryClient() {
     </div>
   );
 }
+
+
+
+
+
 

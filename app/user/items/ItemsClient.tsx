@@ -58,6 +58,14 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // modal modifica articolo
+  const [editOpen, setEditOpen] = useState(false);
+  const [editItem, setEditItem] = useState<Item | null>(null);
+  const [editDescription, setEditDescription] = useState("");
+  const [editPesoKg, setEditPesoKg] = useState<string>("");
+  const [editPrezzo, setEditPrezzo] = useState<string>("");
+  const [savingEdit, setSavingEdit] = useState(false);
+
   // import
   const [file, setFile] = useState<File | null>(null);
   const [importing, setImporting] = useState(false);
@@ -191,24 +199,70 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     loadItems();
   }
 
-  async function editDescription(item: Item) {
+  function openEditModal(item: Item) {
     if (!isAdmin) return;
+    setMsg(null);
+    setError(null);
+    setEditItem(item);
+    setEditDescription(item.description ?? "");
+    setEditPesoKg(item.peso_kg == null ? "" : String(item.peso_kg));
+    setEditPrezzo(item.prezzo_vendita_eur == null ? "" : String(item.prezzo_vendita_eur));
+    setEditOpen(true);
+  }
 
-    const next = prompt(`Modifica descrizione per ${item.code}`, item.description);
-    if (next === null) return;
+  function closeEditModal() {
+    if (savingEdit) return;
+    setEditOpen(false);
+    setEditItem(null);
+  }
 
-    const res = await fetch("/api/items/update", {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id: item.id, description: next }),
-    });
+  function normalizeNullableNumber(v: string): number | null {
+    const s = String(v ?? "").trim();
+    if (!s) return null;
+    const n = Number(s.replace(",", "."));
+    if (!Number.isFinite(n)) return null;
+    return n;
+  }
 
-    const json = await res.json().catch(() => null);
-    if (!res.ok || !json?.ok) {
-      alert(json?.error || "Errore aggiornamento");
+  async function saveEdit() {
+    if (!isAdmin || !editItem) return;
+
+    const nextDesc = editDescription.trim();
+    if (!nextDesc) {
+      setError("La descrizione non può essere vuota.");
       return;
     }
-    loadItems();
+
+    setSavingEdit(true);
+    setError(null);
+    setMsg(null);
+
+    try {
+      const payload: any = {
+        id: editItem.id,
+        description: nextDesc,
+        peso_kg: editPesoKg.trim() === "" ? null : normalizeNullableNumber(editPesoKg),
+        prezzo_vendita_eur: editPrezzo.trim() === "" ? null : normalizeNullableNumber(editPrezzo),
+      };
+
+      const res = await fetch("/api/items/update", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore aggiornamento");
+
+      setMsg("Articolo aggiornato.");
+      setEditOpen(false);
+      setEditItem(null);
+      await loadItems();
+    } catch (e: any) {
+      setError(e.message || "Errore aggiornamento");
+    } finally {
+      setSavingEdit(false);
+    }
   }
 
   async function createCategory(e: React.FormEvent) {
@@ -256,6 +310,66 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
 
   return (
     <div className="space-y-4">
+      {/* MODAL MODIFICA */}
+      {editOpen && editItem && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onMouseDown={closeEditModal}>
+          <div className="w-full max-w-xl rounded-2xl bg-white p-5 shadow-xl" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-lg font-semibold">Modifica articolo</div>
+                <div className="text-sm text-gray-600">
+                  Codice: <b>{editItem.code}</b>
+                </div>
+              </div>
+              <button className="rounded-xl border px-3 py-2 hover:bg-gray-50" onClick={closeEditModal} disabled={savingEdit}>
+                Chiudi
+              </button>
+            </div>
+
+            <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="md:col-span-3">
+                <label className="block text-sm font-medium mb-2">Descrizione</label>
+                <input className="w-full rounded-xl border p-3" value={editDescription} onChange={(e) => setEditDescription(e.target.value)} />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-2">Peso (kg)</label>
+                <input
+                  className="w-full rounded-xl border p-3"
+                  inputMode="decimal"
+                  placeholder="Es. 0,032"
+                  value={editPesoKg}
+                  onChange={(e) => setEditPesoKg(e.target.value)}
+                />
+                <div className="mt-1 text-xs text-gray-500">Lascia vuoto per NULL.</div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-2">Prezzo di Vendita (€)</label>
+                <input
+                  className="w-full rounded-xl border p-3"
+                  inputMode="decimal"
+                  placeholder="Es. 6,50"
+                  value={editPrezzo}
+                  onChange={(e) => setEditPrezzo(e.target.value)}
+                />
+                <div className="mt-1 text-xs text-gray-500">Lascia vuoto per NULL.</div>
+              </div>
+
+              <div className="flex items-end">
+                <button
+                  className="w-full rounded-xl bg-slate-900 text-white px-4 py-3 disabled:opacity-60"
+                  onClick={saveEdit}
+                  disabled={savingEdit}
+                >
+                  {savingEdit ? "Salvo..." : "Salva"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* admin: crea categoria/sottocategoria */}
       {isAdmin && (
         <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -395,7 +509,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
                 <td className="p-3">
                   {isAdmin ? (
                     <div className="flex gap-2">
-                      <button className="rounded-xl border px-3 py-2 hover:bg-gray-50" onClick={() => editDescription(r)}>
+                      <button className="rounded-xl border px-3 py-2 hover:bg-gray-50" onClick={() => openEditModal(r)}>
                         Modifica
                       </button>
                       <button className="rounded-xl border px-3 py-2 hover:bg-gray-50" onClick={() => toggleActive(r)}>
@@ -414,6 +528,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     </div>
   );
 }
+
 
 
 

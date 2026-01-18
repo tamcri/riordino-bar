@@ -20,6 +20,9 @@ type InventoryGroup = {
   created_at: string | null;
   lines_count: number;
   qty_sum: number;
+
+  // ✅ NEW: arriva da inventories_headers
+  operatore?: string | null;
 };
 
 type InventoryLine = {
@@ -58,6 +61,42 @@ function todayISO() {
   return d.toISOString().slice(0, 10);
 }
 
+/**
+ * Fetch "robusto":
+ * - legge SEMPRE res.text()
+ * - prova a parsare JSON
+ * - se non ok: errore con status + body (snippet)
+ * Questo evita "TypeError: fetch failed" opaco e ti fa vedere il motivo vero.
+ */
+async function fetchJsonSafe<T = any>(
+  url: string,
+  init?: RequestInit
+): Promise<{ ok: boolean; data: T; status: number; rawText: string }> {
+  let res: Response;
+
+  try {
+    res = await fetch(url, { cache: "no-store", ...init });
+  } catch (e: any) {
+    // questo è il vero "fetch failed": DNS/connessione chiusa/crash server
+    console.error("[fetchJsonSafe] NETWORK ERROR", { url, err: e });
+    throw new Error(`Fetch fallita (rete/endpoint): ${url}`);
+  }
+
+  const status = res.status;
+  const rawText = await res.text().catch(() => "");
+
+  let data: any = null;
+  try {
+    data = rawText ? JSON.parse(rawText) : null;
+  } catch {
+    data = null;
+  }
+
+  const ok = res.ok && !!data?.ok;
+
+  return { ok, data, status, rawText };
+}
+
 export default function InventoryHistoryClient() {
   const [me, setMe] = useState<MeState>({
     role: null,
@@ -75,7 +114,7 @@ export default function InventoryHistoryClient() {
   const [categoryId, setCategoryId] = useState<string>(""); // "" = tutte
   const [subcategoryId, setSubcategoryId] = useState<string>(""); // "" = tutte
 
-  // ✅ date range (per tutti) con calendario
+  // date range
   const [dateFromISO, setDateFromISO] = useState<string>("");
   const [dateToISO, setDateToISO] = useState<string>("");
 
@@ -114,31 +153,32 @@ export default function InventoryHistoryClient() {
   }, [detail, searchDetail]);
 
   async function fetchMe(): Promise<MeState> {
-    const res = await fetch("/api/me", { cache: "no-store" });
-    const json: MeResponse = await res.json().catch(() => ({ ok: false, error: "Errore parsing" }));
-    if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore autenticazione");
+    const { ok, data, status, rawText } = await fetchJsonSafe<MeResponse>("/api/me");
 
-    const role = (json.role || "").toString() as MeState["role"];
-    const pv_id = json.pv_id ?? null;
+    if (!ok) {
+      const msg = (data as any)?.error || rawText || `HTTP ${status}`;
+      throw new Error(msg || "Errore autenticazione");
+    }
+
+    const role = ((data.role || "").toString() as MeState["role"]) ?? null;
+    const pv_id = data.pv_id ?? null;
 
     const isPv = role === "punto_vendita";
     if (isPv && !pv_id) throw new Error("Utente punto vendita senza PV assegnato (pv_id mancante).");
 
-    return { role: role ?? null, username: json.username ?? null, pv_id, isPv };
+    return { role, username: data.username ?? null, pv_id, isPv };
   }
 
   async function loadPvs() {
-    const res = await fetch("/api/pvs/list", { cache: "no-store" });
-    const json = await res.json().catch(() => null);
-    if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore caricamento PV");
-    setPvs(json.rows || []);
+    const { ok, data, status, rawText } = await fetchJsonSafe<any>("/api/pvs/list");
+    if (!ok) throw new Error(data?.error || rawText || `Errore caricamento PV (HTTP ${status})`);
+    setPvs(data.rows || []);
   }
 
   async function loadCategories() {
-    const res = await fetch("/api/categories/list", { cache: "no-store" });
-    const json = await res.json().catch(() => null);
-    if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore caricamento categorie");
-    setCategories(json.rows || []);
+    const { ok, data, status, rawText } = await fetchJsonSafe<any>("/api/categories/list");
+    if (!ok) throw new Error(data?.error || rawText || `Errore caricamento categorie (HTTP ${status})`);
+    setCategories(data.rows || []);
   }
 
   async function loadSubcategories(catId: string) {
@@ -146,10 +186,10 @@ export default function InventoryHistoryClient() {
     setSubcategoryId("");
     if (!catId) return;
 
-    const res = await fetch(`/api/subcategories/list?category_id=${encodeURIComponent(catId)}`, { cache: "no-store" });
-    const json = await res.json().catch(() => null);
-    if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore caricamento sottocategorie");
-    setSubcategories(json.rows || []);
+    const url = `/api/subcategories/list?category_id=${encodeURIComponent(catId)}`;
+    const { ok, data, status, rawText } = await fetchJsonSafe<any>(url);
+    if (!ok) throw new Error(data?.error || rawText || `Errore caricamento sottocategorie (HTTP ${status})`);
+    setSubcategories(data.rows || []);
   }
 
   async function loadList(effectiveMe: MeState) {
@@ -164,28 +204,29 @@ export default function InventoryHistoryClient() {
     try {
       const params = new URLSearchParams();
 
-      // ✅ date range -> API usa "from" e "to"
       if (dateFromISO) params.set("from", dateFromISO);
       if (dateToISO) params.set("to", dateToISO);
       if (dateFromISO && dateToISO && dateFromISO > dateToISO) throw new Error("Intervallo date non valido: 'Dal' è dopo 'Al'.");
 
       if (effectiveMe.isPv) {
-        // ✅ PV: SOLO date + categoria (niente PV select)
         if (categoryId) params.set("category_id", categoryId);
-        // (sottocategoria non richiesta qui, quindi la teniamo fuori)
       } else {
-        // ✅ admin/ammin: date + PV + categoria + sottocategoria
         if (pvId) params.set("pv_id", pvId);
         if (categoryId) params.set("category_id", categoryId);
         if (categoryId && subcategoryId) params.set("subcategory_id", subcategoryId);
       }
 
       const qs = params.toString();
-      const res = await fetch(`/api/inventories/list${qs ? `?${qs}` : ""}`, { cache: "no-store" });
-      const json = await res.json().catch(() => null);
-      if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore caricamento inventari");
+      const url = `/api/inventories/list${qs ? `?${qs}` : ""}`;
 
-      setRows(json.rows || []);
+      const { ok, data, status, rawText } = await fetchJsonSafe<any>(url);
+
+      if (!ok) {
+        console.error("[inventories/list] ERROR", { url, status, rawText, data });
+        throw new Error(data?.error || rawText || `Errore caricamento inventari (HTTP ${status})`);
+      }
+
+      setRows(data.rows || []);
     } catch (e: any) {
       setError(e?.message || "Errore");
     } finally {
@@ -209,16 +250,42 @@ export default function InventoryHistoryClient() {
       params.set("inventory_date", g.inventory_date);
       if (g.subcategory_id) params.set("subcategory_id", g.subcategory_id);
 
-      const res = await fetch(`/api/inventories/rows?${params.toString()}`, { cache: "no-store" });
-      const json = await res.json().catch(() => null);
-      if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore caricamento dettaglio");
+      const url = `/api/inventories/rows?${params.toString()}`;
 
-      setDetail(json.rows || []);
+      const { ok, data, status, rawText } = await fetchJsonSafe<any>(url);
+
+      if (!ok) {
+        console.error("[inventories/rows] ERROR", { url, status, rawText, data });
+
+        const snippet = (rawText || "").slice(0, 300);
+        throw new Error(
+          data?.error ||
+            `Errore caricamento dettaglio (HTTP ${status}). Risposta: ${snippet || "—"}`
+        );
+      }
+
+      setDetail(data.rows || []);
     } catch (e: any) {
       setDetailError(e?.message || "Errore");
     } finally {
       setDetailLoading(false);
     }
+  }
+
+  // ✅ download excel
+  function downloadExcel(g: InventoryGroup, effectiveMe: MeState) {
+    if (effectiveMe.isPv && effectiveMe.pv_id && g.pv_id !== effectiveMe.pv_id) {
+      setError("Non autorizzato.");
+      return;
+    }
+
+    const params = new URLSearchParams();
+    params.set("pv_id", g.pv_id);
+    params.set("category_id", g.category_id);
+    params.set("inventory_date", g.inventory_date);
+    if (g.subcategory_id) params.set("subcategory_id", g.subcategory_id);
+
+    window.location.href = `/api/inventories/excel?${params.toString()}`;
   }
 
   function openCompare(g: InventoryGroup) {
@@ -227,6 +294,8 @@ export default function InventoryHistoryClient() {
     setCompareOpen(true);
     setCompareError(null);
     setCompareMsg(null);
+
+    if (compareDownloadUrl) URL.revokeObjectURL(compareDownloadUrl);
     setCompareDownloadUrl(null);
   }
 
@@ -236,7 +305,10 @@ export default function InventoryHistoryClient() {
     setCompareFile(null);
     setCompareError(null);
     setCompareMsg(null);
+
+    if (compareDownloadUrl) URL.revokeObjectURL(compareDownloadUrl);
     setCompareDownloadUrl(null);
+
     setCompareLoading(false);
   }
 
@@ -250,6 +322,8 @@ export default function InventoryHistoryClient() {
     setCompareLoading(true);
     setCompareError(null);
     setCompareMsg(null);
+
+    if (compareDownloadUrl) URL.revokeObjectURL(compareDownloadUrl);
     setCompareDownloadUrl(null);
 
     try {
@@ -261,16 +335,24 @@ export default function InventoryHistoryClient() {
       if (compareTarget.subcategory_id) fd.append("subcategory_id", compareTarget.subcategory_id);
 
       const res = await fetch("/api/inventories/compare", { method: "POST", body: fd });
-      const text = await res.text();
-      let json: any = null;
-      try {
-        json = text ? JSON.parse(text) : null;
-      } catch {}
 
-      if (!res.ok || !json?.ok) throw new Error(json?.error || `Comparazione non disponibile (endpoint /api/inventories/compare).`);
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        let msg = "Errore comparazione";
+        try {
+          const j = text ? JSON.parse(text) : null;
+          msg = j?.error || msg;
+        } catch {
+          if (text) msg = text;
+        }
+        throw new Error(msg);
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
 
       setCompareMsg("Comparazione completata.");
-      setCompareDownloadUrl(json.downloadUrl || null);
+      setCompareDownloadUrl(url);
     } catch (e: any) {
       setCompareError(e?.message || "Errore comparazione");
     } finally {
@@ -290,7 +372,6 @@ export default function InventoryHistoryClient() {
 
         setDateToISO(todayISO());
 
-        // ✅ categorie servono sia a PV (per filtro categoria) sia ad admin/ammin
         await loadCategories();
 
         if (!meState.isPv) {
@@ -349,7 +430,7 @@ export default function InventoryHistoryClient() {
         </div>
       </div>
 
-      {/* PV: aggiungo Categoria (solo categoria) */}
+      {/* PV: filtro categoria */}
       {me.isPv && (
         <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-1 gap-3">
           <div>
@@ -424,10 +505,11 @@ export default function InventoryHistoryClient() {
               <th className="text-left p-3">PV</th>
               <th className="text-left p-3">Categoria</th>
               <th className="text-left p-3">Sottocat</th>
+              <th className="text-left p-3 w-44">Operatore</th>
               <th className="text-right p-3 w-28">Righe</th>
               <th className="text-right p-3 w-28">Pezzi</th>
               <th className="text-left p-3 w-36">Creato da</th>
-              <th className="text-left p-3 w-32"></th>
+              <th className="text-left p-3 w-44"></th>
               {canCompare && <th className="text-left p-3 w-32"></th>}
             </tr>
           </thead>
@@ -435,7 +517,7 @@ export default function InventoryHistoryClient() {
           <tbody>
             {loading && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={canCompare ? 9 : 8}>
+                <td className="p-3 text-gray-500" colSpan={canCompare ? 10 : 9}>
                   Caricamento...
                 </td>
               </tr>
@@ -443,7 +525,7 @@ export default function InventoryHistoryClient() {
 
             {!loading && rows.length === 0 && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={canCompare ? 9 : 8}>
+                <td className="p-3 text-gray-500" colSpan={canCompare ? 10 : 9}>
                   Nessun inventario trovato con questi filtri.
                 </td>
               </tr>
@@ -460,14 +542,20 @@ export default function InventoryHistoryClient() {
                   </td>
                   <td className="p-3">{r.category_name || r.category_id}</td>
                   <td className="p-3">{r.subcategory_name || (r.subcategory_id ? r.subcategory_id : "—")}</td>
+                  <td className="p-3">{(r.operatore || "").trim() ? r.operatore : "—"}</td>
                   <td className="p-3 text-right">{r.lines_count}</td>
                   <td className="p-3 text-right font-semibold">{r.qty_sum}</td>
                   <td className="p-3">{r.created_by_username ?? "—"}</td>
 
                   <td className="p-3">
-                    <button className="rounded-xl border px-3 py-2 hover:bg-gray-50" onClick={async () => await loadDetail(r, me)}>
-                      Dettaglio
-                    </button>
+                    <div className="flex gap-2">
+                      <button className="rounded-xl border px-3 py-2 hover:bg-gray-50" onClick={async () => await loadDetail(r, me)}>
+                        Dettaglio
+                      </button>
+                      <button className="rounded-xl border px-3 py-2 hover:bg-gray-50" onClick={() => downloadExcel(r, me)} title="Scarica Excel inventario">
+                        Excel
+                      </button>
+                    </div>
                   </td>
 
                   {canCompare && (
@@ -498,7 +586,8 @@ export default function InventoryHistoryClient() {
                 Dettaglio inventario — {formatDateIT(selected.inventory_date)} — {selected.pv_code} — {selected.category_name}
               </div>
               <div className="text-sm text-gray-600">
-                Righe: <b>{selected.lines_count}</b> — Pezzi: <b>{selected.qty_sum}</b>
+                Operatore: <b>{(selected.operatore || "").trim() ? selected.operatore : "—"}</b> — Righe: <b>{selected.lines_count}</b> — Pezzi:{" "}
+                <b>{selected.qty_sum}</b>
               </div>
             </div>
 
@@ -613,7 +702,7 @@ export default function InventoryHistoryClient() {
               </div>
 
               <p className="text-xs text-gray-500">
-                Nota: endpoint <b>/api/inventories/compare</b> ancora da implementare.
+                Nota: l’endpoint <b>/api/inventories/compare</b> restituisce un file Excel scaricabile.
               </p>
             </div>
           </div>
@@ -622,6 +711,9 @@ export default function InventoryHistoryClient() {
     </div>
   );
 }
+
+
+
 
 
 
