@@ -1,6 +1,8 @@
+// app/user/history/HistoryClient.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 
 type Row = {
   id: string;
@@ -119,21 +121,27 @@ function prettyCol(k: string) {
 function formatCell(key: string, value: any) {
   if (value == null) return "";
 
-  // formati “umani”
   if (key === "valoreVenduto" || key === "valoreDaOrdinare") return eur(value);
   if (key === "pesoKg") return kg1(value);
-  if (key === "qtaVenduta" || key === "giacenza" || key === "qtaTeorica" || key === "conf_da" || key === "qtaOrdine") {
+  if (
+    key === "qtaVenduta" ||
+    key === "giacenza" ||
+    key === "qtaTeorica" ||
+    key === "conf_da" ||
+    key === "qtaOrdine"
+  ) {
     const n = Number(value);
     return Number.isFinite(n) ? String(Math.trunc(n)) : String(value);
   }
 
-  // evita decimali chilometrici se arrivano numeri strani
   if (typeof value === "number") {
     if (Number.isInteger(value)) return String(value);
     return value.toFixed(2);
   }
   return String(value);
 }
+
+type MenuPos = { top: number; left: number; width?: number };
 
 export default function HistoryClient() {
   const [typeFilter, setTypeFilter] = useState<"ALL" | "TAB" | "GV">("ALL");
@@ -156,8 +164,9 @@ export default function HistoryClient() {
   const [previewRows, setPreviewRows] = useState<PreviewRow[]>([]);
   const [totalsByItem, setTotalsByItem] = useState<TotalsByItemRow[]>([]);
 
-  // menu ...
+  // ✅ menu “...” in portal
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [menuPos, setMenuPos] = useState<MenuPos | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -251,6 +260,27 @@ export default function HistoryClient() {
     }
   }
 
+  async function deleteOrder(orderId: string) {
+    const ok = confirm("Vuoi eliminare definitivamente questo ordine?");
+    if (!ok) return;
+
+    try {
+      const res = await fetch(`/api/reorder/history/${encodeURIComponent(orderId)}/delete`, { method: "DELETE" });
+      const json = await res.json().catch(() => null);
+
+      if (!res.ok || !json?.ok) {
+        alert(json?.error || "Errore eliminazione");
+        return;
+      }
+
+      setOpenMenuId(null);
+      setMenuPos(null);
+      await load();
+    } catch (e: any) {
+      alert(e?.message || "Errore eliminazione");
+    }
+  }
+
   // ✅ colonne preview: sequenza richiesta
   const previewColumns = useMemo(() => {
     const first = previewRows?.[0];
@@ -267,7 +297,6 @@ export default function HistoryClient() {
       "qtaOrdine",
       "pesoKg",
       "valoreDaOrdinare",
-      // (se vuoi tenere anche codice/descrizione, mettili in testa)
       "codArticolo",
       "descrizione",
     ];
@@ -280,20 +309,125 @@ export default function HistoryClient() {
     return ordered.slice(0, 12);
   }, [previewRows]);
 
-  function renderActionLink(className: string, href: string, label: string, title?: string) {
-    return (
-      <a className={className} href={href} title={title}>
-        {label}
-      </a>
-    );
-  }
-
-  // ✅ Fonte Totali: se ho totals_by_item => ordine completo (DB)
   const totalsSourceLabel = useMemo(() => {
     if (totalsByItem.length > 0) return "Ordine completo (DB)";
     if ((previewMeta?.preview_count || 0) > 0) return "Preview (parziale)";
     return "—";
   }, [totalsByItem.length, previewMeta?.preview_count]);
+
+  const canDelete = meRole === "admin" || meRole === "amministrativo";
+  const isAdmin = meRole === "admin";
+
+  function openMenuForRow(e: React.MouseEvent<HTMLButtonElement>, rowId: string) {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const btn = e.currentTarget;
+    const r = btn.getBoundingClientRect();
+
+    const top = Math.round(r.bottom + 8);
+    const width = 220;
+
+    // prova ad allineare a destra del bottone, senza uscire dallo schermo
+    let left = Math.round(r.right - width);
+    const minLeft = 8;
+    const maxLeft = window.innerWidth - width - 8;
+    if (left < minLeft) left = minLeft;
+    if (left > maxLeft) left = maxLeft;
+
+    if (openMenuId === rowId) {
+      setOpenMenuId(null);
+      setMenuPos(null);
+      return;
+    }
+
+    setOpenMenuId(rowId);
+    setMenuPos({ top, left, width });
+  }
+
+  function closeMenu() {
+    setOpenMenuId(null);
+    setMenuPos(null);
+  }
+
+  // ✅ chiudi su click fuori / ESC / scroll / resize
+  useEffect(() => {
+    if (!openMenuId) return;
+
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") closeMenu();
+    };
+
+    const onPointerDown = (ev: MouseEvent | TouchEvent) => {
+      const t = ev.target as HTMLElement | null;
+      if (!t) return;
+
+      // se clicco su un elemento del menu o sul bottone, non chiudere qui (gestiamo nei click)
+      if (t.closest("[data-actions-menu='1']")) return;
+      if (t.closest("[data-actions-btn='1']")) return;
+
+      closeMenu();
+    };
+
+    const onScroll = () => closeMenu();
+    const onResize = () => closeMenu();
+
+    window.addEventListener("keydown", onKeyDown);
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("touchstart", onPointerDown, { passive: true });
+
+    // scroll in capture: prende anche lo scroll della table overflow
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onResize);
+
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("touchstart", onPointerDown as any);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onResize);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openMenuId]);
+
+  function MenuItemLink(props: { href: string; label: string; disabled?: boolean; title?: string }) {
+    const { href, label, disabled, title } = props;
+    if (disabled) {
+      return (
+        <div
+          className="w-full text-left px-3 py-2 rounded-lg text-gray-400 cursor-not-allowed select-none"
+          title={title}
+        >
+          {label}
+        </div>
+      );
+    }
+    return (
+      <a
+        className="block w-full text-left px-3 py-2 rounded-lg hover:bg-gray-50"
+        href={href}
+        title={title}
+        onClick={() => closeMenu()}
+      >
+        {label}
+      </a>
+    );
+  }
+
+  function MenuItemButton(props: { label: string; onClick: () => void; danger?: boolean }) {
+    const { label, onClick, danger } = props;
+    return (
+      <button
+        className={`w-full text-left px-3 py-2 rounded-lg hover:bg-gray-50 ${danger ? "text-red-700" : ""}`}
+        onClick={() => {
+          closeMenu();
+          onClick();
+        }}
+      >
+        {label}
+      </button>
+    );
+  }
 
   return (
     <div className="space-y-4">
@@ -314,7 +448,11 @@ export default function HistoryClient() {
 
           <div>
             <label className="block text-sm font-medium mb-2">Punto vendita</label>
-            <select className="rounded-xl border p-3 w-full bg-white" value={pvId} onChange={(e) => setPvId(e.target.value)}>
+            <select
+              className="rounded-xl border p-3 w-full bg-white"
+              value={pvId}
+              onChange={(e) => setPvId(e.target.value)}
+            >
               <option value="">Tutti</option>
               {pvs.map((pv) => (
                 <option key={pv.id} value={pv.id}>
@@ -326,22 +464,40 @@ export default function HistoryClient() {
 
           <div>
             <label className="block text-sm font-medium mb-2">Da</label>
-            <input className="rounded-xl border p-3 w-full" type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
+            <input
+              className="rounded-xl border p-3 w-full"
+              type="date"
+              value={from}
+              onChange={(e) => setFrom(e.target.value)}
+            />
           </div>
 
           <div>
             <label className="block text-sm font-medium mb-2">A</label>
-            <input className="rounded-xl border p-3 w-full" type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+            <input
+              className="rounded-xl border p-3 w-full"
+              type="date"
+              value={to}
+              onChange={(e) => setTo(e.target.value)}
+            />
           </div>
         </div>
 
         <div className="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
           <div className="flex gap-3">
-            <button className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60" onClick={load} disabled={loading}>
+            <button
+              className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60"
+              onClick={load}
+              disabled={loading}
+            >
               {loading ? "Carico..." : "Cerca"}
             </button>
 
-            <button className="rounded-xl border px-4 py-2 hover:bg-gray-50 disabled:opacity-60" onClick={reset} disabled={loading}>
+            <button
+              className="rounded-xl border px-4 py-2 hover:bg-gray-50 disabled:opacity-60"
+              onClick={reset}
+              disabled={loading}
+            >
               Reset
             </button>
           </div>
@@ -364,7 +520,7 @@ export default function HistoryClient() {
               <th className="text-left p-3">Periodo</th>
               <th className="text-left p-3">Utente</th>
               <th className="text-left p-3">Righe</th>
-              <th className="text-left p-3">Azioni</th>
+              <th className="text-left p-3 w-36">Azioni</th>
             </tr>
           </thead>
 
@@ -392,94 +548,6 @@ export default function HistoryClient() {
               const pvNorm = normPvLabel(String(r.pv_label || ""));
               const canPAT = isTAB && PV_PAT_ALLOWED_NORM.has(pvNorm);
 
-              const isAdmin = meRole === "admin";
-
-              const primary = [
-                {
-                  key: "view",
-                  node: (
-                    <button
-                      className="inline-flex items-center rounded-xl bg-slate-900 text-white px-3 py-2 hover:bg-slate-800"
-                      onClick={() => openPreview(r)}
-                      title="Apri anteprima"
-                    >
-                      View
-                    </button>
-                  ),
-                },
-                {
-                  key: "excel",
-                  node: renderActionLink(
-                    "inline-flex items-center rounded-xl bg-orange-500 text-white px-3 py-2 hover:bg-orange-600",
-                    `/api/reorder/history/${id}/excel`,
-                    "Excel"
-                  ),
-                },
-                {
-                  key: "u88",
-                  node: renderActionLink(
-                    `inline-flex items-center rounded-xl px-3 py-2 ${
-                      isTAB ? "bg-blue-600 text-white hover:bg-blue-700" : "bg-gray-200 text-gray-500 pointer-events-none"
-                    }`,
-                    isTAB ? `/api/reorder/history/${id}/u88` : "#",
-                    "U88",
-                    isTAB ? "Scarica U88 compilato" : "U88 disponibile solo per TAB"
-                  ),
-                },
-                ...(canPAT
-                  ? [
-                      {
-                        key: "pat",
-                        node: renderActionLink(
-                          "inline-flex items-center rounded-xl px-3 py-2 bg-violet-600 text-white hover:bg-violet-700",
-                          `/api/reorder/history/${id}/pat`,
-                          "PAT",
-                          "Scarica PAT"
-                        ),
-                      },
-                    ]
-                  : []),
-              ];
-
-              const secondaryBase = [
-                {
-                  key: "logtab",
-                  node: renderActionLink(
-                    `inline-flex items-center rounded-xl px-3 py-2 ${
-                      isTAB ? "bg-emerald-600 text-white hover:bg-emerald-700" : "bg-gray-200 text-gray-500 pointer-events-none"
-                    }`,
-                    isTAB ? `/api/reorder/history/${id}/order-tab` : "#",
-                    "Log",
-                    isTAB ? "Scarica Order Tab compilato" : "Order Tab disponibile solo per TAB"
-                  ),
-                },
-                {
-                  key: "logcar",
-                  node: renderActionLink(
-                    `inline-flex items-center rounded-xl px-3 py-2 ${
-                      isTAB ? "bg-emerald-700 text-white hover:bg-emerald-800" : "bg-gray-200 text-gray-500 pointer-events-none"
-                    }`,
-                    isTAB ? `/api/reorder/history/${id}/log-car` : "#",
-                    "LOG CAR",
-                    isTAB ? "Scarica LOG CAR" : "LOG CAR disponibile solo per TAB"
-                  ),
-                },
-                ...(isAdmin
-                  ? [
-                      {
-                        key: "json",
-                        node: renderActionLink(
-                          "inline-flex items-center rounded-xl bg-slate-700 text-white px-3 py-2 hover:bg-slate-800",
-                          `/api/reorder/history/${id}/log`,
-                          "Json"
-                        ),
-                      },
-                    ]
-                  : []),
-              ];
-
-              const secondaryVisible = secondaryBase.slice(0, 3);
-              const secondaryOverflow = secondaryBase.slice(3);
               const menuOpen = openMenuId === r.id;
 
               return (
@@ -492,42 +560,25 @@ export default function HistoryClient() {
                   <td className="p-3">{r.tot_rows ?? "-"}</td>
 
                   <td className="p-3">
-                    <div className="flex flex-col gap-2">
-                      <div className="flex flex-wrap gap-2">
-                        {primary.map((a) => (
-                          <span key={a.key}>{a.node}</span>
-                        ))}
-                      </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        className="inline-flex items-center rounded-xl bg-slate-900 text-white px-3 py-2 hover:bg-slate-800"
+                        onClick={() => openPreview(r)}
+                        title="Apri anteprima"
+                      >
+                        View
+                      </button>
 
-                      <div className="flex flex-wrap gap-2 items-center">
-                        {secondaryVisible.map((a) => (
-                          <span key={a.key}>{a.node}</span>
-                        ))}
-
-                        {secondaryOverflow.length > 0 && (
-                          <div className="relative">
-                            <button
-                              className="inline-flex items-center rounded-xl border px-3 py-2 hover:bg-gray-50"
-                              onClick={() => setOpenMenuId(menuOpen ? null : r.id)}
-                              title="Altro"
-                            >
-                              ...
-                            </button>
-
-                            {menuOpen && (
-                              <div className="absolute right-0 mt-2 w-44 rounded-xl border bg-white shadow-lg p-2 z-20">
-                                <div className="flex flex-col gap-2">
-                                  {secondaryOverflow.map((a) => (
-                                    <span key={a.key} onClick={() => setOpenMenuId(null)}>
-                                      {a.node}
-                                    </span>
-                                  ))}
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
+                      <button
+                        data-actions-btn="1"
+                        className="inline-flex items-center rounded-xl border px-3 py-2 hover:bg-gray-50"
+                        onClick={(e) => openMenuForRow(e, r.id)}
+                        aria-expanded={menuOpen}
+                        aria-haspopup="menu"
+                        title="Azioni"
+                      >
+                        ...
+                      </button>
                     </div>
                   </td>
                 </tr>
@@ -537,7 +588,74 @@ export default function HistoryClient() {
         </table>
       </div>
 
-      {/* ✅ MODAL PREVIEW con scrolling + totali completi (DB) */}
+      {/* ✅ MENU PORTAL (non clippato dallo scroll della tabella) */}
+      {openMenuId && menuPos && typeof document !== "undefined" &&
+        createPortal(
+          <div
+            data-actions-menu="1"
+            className="fixed z-[9999]"
+            style={{ top: menuPos.top, left: menuPos.left, width: menuPos.width ?? 220 }}
+          >
+            <div className="rounded-xl border bg-white shadow-lg p-2">
+              {(() => {
+                const r = rows.find((x) => x.id === openMenuId);
+                if (!r) return null;
+
+                const isTAB = r.type === "TAB";
+                const id = encodeURIComponent(r.id);
+
+                const pvNorm = normPvLabel(String(r.pv_label || ""));
+                const canPAT = isTAB && PV_PAT_ALLOWED_NORM.has(pvNorm);
+
+                return (
+                  <div className="flex flex-col">
+                    <MenuItemLink href={`/api/reorder/history/${id}/excel`} label="Excel" />
+
+                    <MenuItemLink
+                      href={isTAB ? `/api/reorder/history/${id}/u88` : "#"}
+                      label="U88"
+                      disabled={!isTAB}
+                      title={isTAB ? "Scarica U88 compilato" : "U88 disponibile solo per TAB"}
+                    />
+
+                    {canPAT && <MenuItemLink href={`/api/reorder/history/${id}/pat`} label="PAT" title="Scarica PAT" />}
+
+                    <div className="my-2 border-t" />
+
+                    <MenuItemLink
+                      href={isTAB ? `/api/reorder/history/${id}/order-tab` : "#"}
+                      label="Log"
+                      disabled={!isTAB}
+                      title={isTAB ? "Scarica Order Tab compilato" : "Order Tab disponibile solo per TAB"}
+                    />
+
+                    <MenuItemLink
+                      href={isTAB ? `/api/reorder/history/${id}/log-car` : "#"}
+                      label="LOG CAR"
+                      disabled={!isTAB}
+                      title={isTAB ? "Scarica LOG CAR" : "LOG CAR disponibile solo per TAB"}
+                    />
+
+                    {isAdmin && (
+                      <MenuItemLink href={`/api/reorder/history/${id}/log`} label="Json" title="Scarica JSON log" />
+                    )}
+
+                    {canDelete && (
+                      <>
+                        <div className="my-2 border-t" />
+                        <MenuItemButton label="Elimina" danger onClick={() => deleteOrder(r.id)} />
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+          </div>,
+          document.body
+        )
+      }
+
+      {/* ✅ MODAL PREVIEW */}
       {previewOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/40" onClick={closePreview} />
@@ -565,7 +683,6 @@ export default function HistoryClient() {
 
               {!previewLoading && !previewError && previewMeta && (
                 <>
-                  {/* ✅ Totali COMPLETI dal DB */}
                   <div className="rounded-2xl border bg-white p-4">
                     <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
                       <div className="font-semibold">Totali</div>
@@ -594,7 +711,6 @@ export default function HistoryClient() {
                     </div>
                   </div>
 
-                  {/* ✅ Tabella ORDINE COMPLETO per articolo (se presente) */}
                   {totalsByItem.length > 0 && (
                     <div className="rounded-2xl border overflow-hidden">
                       <div className="bg-gray-50 px-4 py-3 flex items-center justify-between">
@@ -620,7 +736,7 @@ export default function HistoryClient() {
                               <tr key={i} className="border-t">
                                 {Object.keys(totalsByItem[0] || {}).map((k) => (
                                   <td key={k} className="p-3 whitespace-nowrap">
-                                    {formatCell(k, row?.[k])}
+                                    {formatCell(k, (row as any)?.[k])}
                                   </td>
                                 ))}
                               </tr>
@@ -631,7 +747,6 @@ export default function HistoryClient() {
                     </div>
                   )}
 
-                  {/* ✅ Preview (dettaglio righe) */}
                   <div className="rounded-2xl border overflow-hidden">
                     <div className="bg-gray-50 px-4 py-3 flex items-center justify-between">
                       <div className="font-semibold text-sm">Dettaglio righe (preview)</div>
@@ -656,7 +771,7 @@ export default function HistoryClient() {
                             <tr key={i} className="border-t">
                               {previewColumns.map((c) => (
                                 <td key={c} className="p-3 whitespace-nowrap">
-                                  {formatCell(c, row?.[c])}
+                                  {formatCell(c, (row as any)?.[c])}
                                 </td>
                               ))}
                             </tr>
@@ -675,7 +790,8 @@ export default function HistoryClient() {
                   </div>
 
                   <p className="text-xs text-gray-500">
-                    Nota: il dettaglio righe è una preview (max 200). I totali sono letti dal DB (ordine completo) quando disponibili.
+                    Nota: il dettaglio righe è una preview (max 200). I totali sono letti dal DB (ordine completo) quando
+                    disponibili.
                   </p>
                 </>
               )}
@@ -686,6 +802,9 @@ export default function HistoryClient() {
     </div>
   );
 }
+
+
+
 
 
 

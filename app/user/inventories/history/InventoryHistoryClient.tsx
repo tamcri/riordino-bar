@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 type Pv = { id: string; code: string; name: string; is_active?: boolean };
 type Category = { id: string; name: string; slug?: string; is_active?: boolean };
@@ -66,7 +67,6 @@ function todayISO() {
  * - legge SEMPRE res.text()
  * - prova a parsare JSON
  * - se non ok: errore con status + body (snippet)
- * Questo evita "TypeError: fetch failed" opaco e ti fa vedere il motivo vero.
  */
 async function fetchJsonSafe<T = any>(
   url: string,
@@ -77,7 +77,6 @@ async function fetchJsonSafe<T = any>(
   try {
     res = await fetch(url, { cache: "no-store", ...init });
   } catch (e: any) {
-    // questo è il vero "fetch failed": DNS/connessione chiusa/crash server
     console.error("[fetchJsonSafe] NETWORK ERROR", { url, err: e });
     throw new Error(`Fetch fallita (rete/endpoint): ${url}`);
   }
@@ -96,6 +95,8 @@ async function fetchJsonSafe<T = any>(
 
   return { ok, data, status, rawText };
 }
+
+type MenuPos = { top: number; left: number; width: number };
 
 export default function InventoryHistoryClient() {
   const [me, setMe] = useState<MeState>({
@@ -206,7 +207,8 @@ export default function InventoryHistoryClient() {
 
       if (dateFromISO) params.set("from", dateFromISO);
       if (dateToISO) params.set("to", dateToISO);
-      if (dateFromISO && dateToISO && dateFromISO > dateToISO) throw new Error("Intervallo date non valido: 'Dal' è dopo 'Al'.");
+      if (dateFromISO && dateToISO && dateFromISO > dateToISO)
+        throw new Error("Intervallo date non valido: 'Dal' è dopo 'Al'.");
 
       if (effectiveMe.isPv) {
         if (categoryId) params.set("category_id", categoryId);
@@ -242,7 +244,8 @@ export default function InventoryHistoryClient() {
     setSearchDetail("");
 
     try {
-      if (effectiveMe.isPv && effectiveMe.pv_id && g.pv_id !== effectiveMe.pv_id) throw new Error("Non autorizzato.");
+      if (effectiveMe.isPv && effectiveMe.pv_id && g.pv_id !== effectiveMe.pv_id)
+        throw new Error("Non autorizzato.");
 
       const params = new URLSearchParams();
       params.set("pv_id", g.pv_id);
@@ -256,11 +259,9 @@ export default function InventoryHistoryClient() {
 
       if (!ok) {
         console.error("[inventories/rows] ERROR", { url, status, rawText, data });
-
         const snippet = (rawText || "").slice(0, 300);
         throw new Error(
-          data?.error ||
-            `Errore caricamento dettaglio (HTTP ${status}). Risposta: ${snippet || "—"}`
+          data?.error || `Errore caricamento dettaglio (HTTP ${status}). Risposta: ${snippet || "—"}`
         );
       }
 
@@ -360,6 +361,152 @@ export default function InventoryHistoryClient() {
     }
   }
 
+  // =========================
+  // ✅ AZIONI: menu a tendina in PORTAL (non clippato dall'overflow)
+  // =========================
+  const [actionsOpenKey, setActionsOpenKey] = useState<string | null>(null);
+  const [menuPos, setMenuPos] = useState<MenuPos | null>(null);
+  const actionsMenuRef = useRef<HTMLDivElement | null>(null);
+
+  // refs dei bottoni "..." per riga
+  const btnRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+
+  function computeMenuPos(key: string) {
+    const btn = btnRefs.current[key];
+    if (!btn) return;
+
+    const r = btn.getBoundingClientRect();
+    const width = 220;
+
+    // default: apre sotto, allineato a destra del bottone
+    let left = r.right - width;
+    let top = r.bottom + 8;
+
+    // clamp viewport
+    const pad = 8;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    if (left < pad) left = pad;
+    if (left + width > vw - pad) left = Math.max(pad, vw - pad - width);
+
+    // se sotto non c'è spazio, apri sopra
+    const approxMenuH = 160;
+    if (top + approxMenuH > vh - pad) {
+      top = Math.max(pad, r.top - 8 - approxMenuH);
+    }
+
+    setMenuPos({ top, left, width });
+  }
+
+  function toggleActions(key: string) {
+    if (actionsOpenKey === key) {
+      setActionsOpenKey(null);
+      setMenuPos(null);
+      return;
+    }
+    setActionsOpenKey(key);
+    setTimeout(() => computeMenuPos(key), 0);
+  }
+
+  // chiusura su click fuori / ESC
+  useEffect(() => {
+    if (!actionsOpenKey) return;
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setActionsOpenKey(null);
+        setMenuPos(null);
+      }
+    };
+
+    const onDown = (e: MouseEvent) => {
+      const menu = actionsMenuRef.current;
+      const btn = btnRefs.current[actionsOpenKey];
+
+      const t = e.target as Node | null;
+      if (!t) return;
+
+      if (menu && menu.contains(t)) return;
+      if (btn && btn.contains(t)) return;
+
+      setActionsOpenKey(null);
+      setMenuPos(null);
+    };
+
+    // se scrolli la pagina, il menu segue
+    const onScroll = () => computeMenuPos(actionsOpenKey);
+    const onResize = () => computeMenuPos(actionsOpenKey);
+
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onResize);
+
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onResize);
+    };
+  }, [actionsOpenKey]);
+
+  // ✅ elimina (solo admin) — conferma sempre
+  async function deleteInventory(g: InventoryGroup) {
+    if (me.role !== "admin") return;
+
+    const label = `${g.pv_code} — ${g.category_name}${g.subcategory_id ? ` — ${g.subcategory_name}` : ""} — ${formatDateIT(
+      g.inventory_date
+    )}`;
+    const ok = window.confirm(`Confermi eliminazione inventario?\n\n${label}\n\nOperazione irreversibile.`);
+    if (!ok) return;
+
+    try {
+      setError(null);
+      const params = new URLSearchParams();
+      params.set("pv_id", g.pv_id);
+      params.set("category_id", g.category_id);
+      params.set("inventory_date", g.inventory_date);
+      if (g.subcategory_id) params.set("subcategory_id", g.subcategory_id);
+
+      const res = await fetch(`/api/inventories/delete?${params.toString()}`, { method: "DELETE" });
+const text = await res.text().catch(() => "");
+
+let json: any = null;
+try {
+  json = text ? JSON.parse(text) : null;
+} catch {
+  json = null;
+}
+
+if (!res.ok) {
+  // se Next ti restituisce HTML (404 ecc.), non lo spariamo in UI
+  const looksHtml = (text || "").trim().startsWith("<!DOCTYPE") || (text || "").includes("<html");
+  if (looksHtml) throw new Error("Errore eliminazione: endpoint /api/inventories/delete non trovato o risposta non valida.");
+  throw new Error(json?.error || text || `Errore eliminazione (HTTP ${res.status})`);
+}
+
+if (!json?.ok) {
+  throw new Error(json?.error || "Eliminazione fallita");
+}
+
+
+      // chiudi eventuali selezioni/menu
+      setActionsOpenKey(null);
+      setMenuPos(null);
+
+      if (selected?.key === g.key) {
+        setSelected(null);
+        setDetail([]);
+        setDetailError(null);
+      }
+
+      await loadList(me);
+    } catch (e: any) {
+      setError(e?.message || "Errore eliminazione");
+    }
+  }
+
   // bootstrap
   useEffect(() => {
     (async () => {
@@ -420,13 +567,27 @@ export default function InventoryHistoryClient() {
       <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
         <div>
           <label className="block text-sm font-medium mb-2">Dal</label>
-          <input type="date" className="w-full rounded-xl border p-3 bg-white" value={dateFromISO} onChange={(e) => setDateFromISO(e.target.value)} />
-          <div className="text-xs text-gray-500 mt-1">Formato mostrato: {dateFromISO ? formatDateIT(dateFromISO) : "—"}</div>
+          <input
+            type="date"
+            className="w-full rounded-xl border p-3 bg-white"
+            value={dateFromISO}
+            onChange={(e) => setDateFromISO(e.target.value)}
+          />
+          <div className="text-xs text-gray-500 mt-1">
+            Formato mostrato: {dateFromISO ? formatDateIT(dateFromISO) : "—"}
+          </div>
         </div>
         <div>
           <label className="block text-sm font-medium mb-2">Al</label>
-          <input type="date" className="w-full rounded-xl border p-3 bg-white" value={dateToISO} onChange={(e) => setDateToISO(e.target.value)} />
-          <div className="text-xs text-gray-500 mt-1">Formato mostrato: {dateToISO ? formatDateIT(dateToISO) : "—"}</div>
+          <input
+            type="date"
+            className="w-full rounded-xl border p-3 bg-white"
+            value={dateToISO}
+            onChange={(e) => setDateToISO(e.target.value)}
+          />
+          <div className="text-xs text-gray-500 mt-1">
+            Formato mostrato: {dateToISO ? formatDateIT(dateToISO) : "—"}
+          </div>
         </div>
       </div>
 
@@ -435,7 +596,11 @@ export default function InventoryHistoryClient() {
         <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-1 gap-3">
           <div>
             <label className="block text-sm font-medium mb-2">Categoria</label>
-            <select className="w-full rounded-xl border p-3 bg-white" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
+            <select
+              className="w-full rounded-xl border p-3 bg-white"
+              value={categoryId}
+              onChange={(e) => setCategoryId(e.target.value)}
+            >
               <option value="">— Tutte le categorie —</option>
               {categories.map((c) => (
                 <option key={c.id} value={c.id}>
@@ -443,7 +608,9 @@ export default function InventoryHistoryClient() {
                 </option>
               ))}
             </select>
-            <p className="text-xs text-gray-500 mt-1">Nel Punto Vendita, nello storico filtriamo per data e (opzionale) categoria.</p>
+            <p className="text-xs text-gray-500 mt-1">
+              Nel Punto Vendita, nello storico filtriamo per data e (opzionale) categoria.
+            </p>
           </div>
         </div>
       )}
@@ -453,7 +620,11 @@ export default function InventoryHistoryClient() {
         <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-3 gap-3">
           <div>
             <label className="block text-sm font-medium mb-2">Punto Vendita (opzionale)</label>
-            <select className="w-full rounded-xl border p-3 bg-white" value={pvId} onChange={(e) => setPvId(e.target.value)}>
+            <select
+              className="w-full rounded-xl border p-3 bg-white"
+              value={pvId}
+              onChange={(e) => setPvId(e.target.value)}
+            >
               <option value="">— Tutti i PV —</option>
               {pvs.map((pv) => (
                 <option key={pv.id} value={pv.id}>
@@ -465,7 +636,11 @@ export default function InventoryHistoryClient() {
 
           <div>
             <label className="block text-sm font-medium mb-2">Categoria</label>
-            <select className="w-full rounded-xl border p-3 bg-white" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
+            <select
+              className="w-full rounded-xl border p-3 bg-white"
+              value={categoryId}
+              onChange={(e) => setCategoryId(e.target.value)}
+            >
               <option value="">— Tutte le categorie —</option>
               {categories.map((c) => (
                 <option key={c.id} value={c.id}>
@@ -509,15 +684,14 @@ export default function InventoryHistoryClient() {
               <th className="text-right p-3 w-28">Righe</th>
               <th className="text-right p-3 w-28">Pezzi</th>
               <th className="text-left p-3 w-36">Creato da</th>
-              <th className="text-left p-3 w-44"></th>
-              {canCompare && <th className="text-left p-3 w-32"></th>}
+              <th className="text-left p-3 w-44">Azioni</th>
             </tr>
           </thead>
 
           <tbody>
             {loading && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={canCompare ? 10 : 9}>
+                <td className="p-3 text-gray-500" colSpan={9}>
                   Caricamento...
                 </td>
               </tr>
@@ -525,7 +699,7 @@ export default function InventoryHistoryClient() {
 
             {!loading && rows.length === 0 && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={canCompare ? 10 : 9}>
+                <td className="p-3 text-gray-500" colSpan={9}>
                   Nessun inventario trovato con questi filtri.
                 </td>
               </tr>
@@ -533,6 +707,8 @@ export default function InventoryHistoryClient() {
 
             {rows.map((r) => {
               const isSel = selected?.key === r.key;
+              const menuOpen = actionsOpenKey === r.key;
+
               return (
                 <tr key={r.key} className={`border-t ${isSel ? "bg-yellow-50" : ""}`}>
                   <td className="p-3 font-medium">{formatDateIT(r.inventory_date)}</td>
@@ -541,35 +717,40 @@ export default function InventoryHistoryClient() {
                     <div className="text-xs text-gray-500">{r.pv_name}</div>
                   </td>
                   <td className="p-3">{r.category_name || r.category_id}</td>
-                  <td className="p-3">{r.subcategory_name || (r.subcategory_id ? r.subcategory_id : "—")}</td>
+                  <td className="p-3">
+                    {r.subcategory_name || (r.subcategory_id ? r.subcategory_id : "—")}
+                  </td>
                   <td className="p-3">{(r.operatore || "").trim() ? r.operatore : "—"}</td>
                   <td className="p-3 text-right">{r.lines_count}</td>
                   <td className="p-3 text-right font-semibold">{r.qty_sum}</td>
                   <td className="p-3">{r.created_by_username ?? "—"}</td>
 
+                  {/* ✅ Azioni: come Storico Ordini: Dettaglio + ... (menu con Excel/Compara/Elimina) */}
                   <td className="p-3">
-                    <div className="flex gap-2">
-                      <button className="rounded-xl border px-3 py-2 hover:bg-gray-50" onClick={async () => await loadDetail(r, me)}>
+                    <div className="inline-flex items-center gap-2 whitespace-nowrap">
+                      <button
+                        className="rounded-lg border px-3 py-1.5 hover:bg-gray-50 text-sm"
+                        onClick={async () => await loadDetail(r, me)}
+                      >
                         Dettaglio
                       </button>
-                      <button className="rounded-xl border px-3 py-2 hover:bg-gray-50" onClick={() => downloadExcel(r, me)} title="Scarica Excel inventario">
-                        Excel
+
+                      <button
+                        ref={(el) => {
+                          btnRefs.current[r.key] = el;
+                        }}
+                        className={`rounded-lg border px-3 py-1.5 hover:bg-gray-50 text-sm ${
+                          menuOpen ? "bg-gray-50" : ""
+                        }`}
+                        onClick={() => toggleActions(r.key)}
+                        aria-haspopup="menu"
+                        aria-expanded={menuOpen}
+                        title="Altre azioni"
+                      >
+                        ...
                       </button>
                     </div>
                   </td>
-
-                  {canCompare && (
-                    <td className="p-3">
-                      <button
-                        className="rounded-xl bg-slate-900 text-white px-3 py-2 hover:bg-slate-800 disabled:opacity-60"
-                        onClick={() => openCompare(r)}
-                        disabled={!canCompare}
-                        title="Carica file del gestionale e compara"
-                      >
-                        Compara
-                      </button>
-                    </td>
-                  )}
                 </tr>
               );
             })}
@@ -577,17 +758,88 @@ export default function InventoryHistoryClient() {
         </table>
       </div>
 
+      {/* ✅ MENU in portal: non viene clippato dallo scroll (Excel + Compara + Elimina) */}
+      {actionsOpenKey &&
+        menuPos &&
+        typeof document !== "undefined" &&
+        createPortal(
+          <div
+            ref={actionsMenuRef}
+            style={{
+              position: "fixed",
+              top: menuPos.top,
+              left: menuPos.left,
+              width: menuPos.width,
+              zIndex: 9999,
+            }}
+            className="rounded-xl border bg-white shadow-lg p-2"
+            role="menu"
+          >
+            {(() => {
+              const g = rows.find((x) => x.key === actionsOpenKey);
+              if (!g) return null;
+
+              return (
+                <div className="flex flex-col">
+                  <button
+                    className="text-left rounded-lg px-3 py-2 hover:bg-gray-50 text-sm"
+                    onClick={() => {
+                      setActionsOpenKey(null);
+                      setMenuPos(null);
+                      downloadExcel(g, me);
+                    }}
+                    role="menuitem"
+                  >
+                    Excel
+                  </button>
+
+                  {canCompare && (
+                    <button
+                      className="text-left rounded-lg px-3 py-2 hover:bg-gray-50 text-sm"
+                      onClick={() => {
+                        setActionsOpenKey(null);
+                        setMenuPos(null);
+                        openCompare(g);
+                      }}
+                      role="menuitem"
+                    >
+                      Compara
+                    </button>
+                  )}
+
+                  {me.role === "admin" && (
+                    <button
+                      className="text-left rounded-lg px-3 py-2 hover:bg-red-50 text-sm text-red-600"
+                      onClick={async () => {
+                        setActionsOpenKey(null);
+                        setMenuPos(null);
+                        await deleteInventory(g);
+                      }}
+                      role="menuitem"
+                    >
+                      Elimina
+                    </button>
+                  )}
+                </div>
+              );
+            })()}
+          </div>,
+          document.body
+        )}
+
       {/* dettaglio */}
       {selected && (
         <div className="rounded-2xl border bg-white p-4 space-y-3">
           <div className="flex items-start justify-between gap-3">
             <div>
               <div className="font-semibold">
-                Dettaglio inventario — {formatDateIT(selected.inventory_date)} — {selected.pv_code} — {selected.category_name}
+                Dettaglio inventario — {formatDateIT(selected.inventory_date)} — {selected.pv_code} —{" "}
+                {selected.category_name}
               </div>
               <div className="text-sm text-gray-600">
-                Operatore: <b>{(selected.operatore || "").trim() ? selected.operatore : "—"}</b> — Righe: <b>{selected.lines_count}</b> — Pezzi:{" "}
-                <b>{selected.qty_sum}</b>
+                Operatore:{" "}
+                <b>{(selected.operatore || "").trim() ? selected.operatore : "—"}</b> — Righe:{" "}
+                <b>{selected.lines_count}</b> — Pezzi: <b>{selected.qty_sum}</b>
               </div>
             </div>
 
@@ -661,7 +913,8 @@ export default function InventoryHistoryClient() {
               <div>
                 <div className="text-lg font-semibold">Compara inventario</div>
                 <div className="text-sm text-gray-600 mt-1">
-                  {formatDateIT(compareTarget.inventory_date)} — {compareTarget.pv_code} — {compareTarget.category_name}
+                  {formatDateIT(compareTarget.inventory_date)} — {compareTarget.pv_code} —{" "}
+                  {compareTarget.category_name}
                   {compareTarget.subcategory_name ? ` — ${compareTarget.subcategory_name}` : ""}
                 </div>
               </div>
@@ -674,7 +927,11 @@ export default function InventoryHistoryClient() {
             <div className="mt-4 space-y-3">
               <div>
                 <label className="block text-sm font-medium mb-2">File gestionale (.xlsx)</label>
-                <input type="file" accept=".xlsx" onChange={(e) => setCompareFile(e.target.files?.[0] || null)} />
+                <input
+                  type="file"
+                  accept=".xlsx"
+                  onChange={(e) => setCompareFile(e.target.files?.[0] || null)}
+                />
                 {compareFile && (
                   <p className="text-xs text-gray-600 mt-2">
                     Selezionato: <b>{compareFile.name}</b>
@@ -695,7 +952,10 @@ export default function InventoryHistoryClient() {
                 </button>
 
                 {compareDownloadUrl && (
-                  <button className="rounded-xl border px-4 py-2 hover:bg-gray-50" onClick={() => (window.location.href = compareDownloadUrl)}>
+                  <button
+                    className="rounded-xl border px-4 py-2 hover:bg-gray-50"
+                    onClick={() => (window.location.href = compareDownloadUrl)}
+                  >
                     Scarica risultato
                   </button>
                 )}
@@ -711,6 +971,13 @@ export default function InventoryHistoryClient() {
     </div>
   );
 }
+
+
+
+
+
+
+
 
 
 

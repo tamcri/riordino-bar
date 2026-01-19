@@ -133,9 +133,19 @@ export async function POST(req: Request) {
   }));
 
   // 5) confronto
-  // ⚠️ NON filtrare "solo righe con valori in entrambe le colonne":
-  // quella condizione ti ammazza tutte le righe “mancanti” e non potrai mai evidenziarle.
   const compareLines = buildCompareLines(inventoryLines, gestionaleMap);
+
+  // ✅ DEBUG (server)
+  try {
+    const missingInGestionale = compareLines.filter((l) => (l as any)?.foundInInventory && !(l as any)?.foundInGestionale).length;
+    const onlyGestionale = compareLines.filter((l) => !(l as any)?.foundInInventory && (l as any)?.foundInGestionale).length;
+
+    console.log("[inventories/compare] PV:", pvRes.data?.code ?? pv_id, "date:", inventory_date);
+    console.log("[inventories/compare] inventoryLines:", inventoryLines.length);
+    console.log("[inventories/compare] gestionaleCodes:", gestionaleMap.size);
+    console.log("[inventories/compare] compareLines:", compareLines.length);
+    console.log("[inventories/compare] missingInGestionale:", missingInGestionale, "| onlyGestionale:", onlyGestionale);
+  } catch {}
 
   const xlsx = await buildInventoryCompareXlsx(
     { inventoryDate: inventory_date, operatore, pvLabel, categoryName, subcategoryName },
@@ -154,6 +164,7 @@ export async function POST(req: Request) {
     },
   });
 }
+
 
 
 

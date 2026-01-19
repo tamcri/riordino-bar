@@ -1,3 +1,4 @@
+// app/api/items/update/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
@@ -17,20 +18,28 @@ export async function PATCH(req: Request) {
   const is_active = body?.is_active;
   const peso_kg = body?.peso_kg;
   const prezzo_vendita_eur = body?.prezzo_vendita_eur;
+  const conf_da = body?.conf_da; // ✅ NEW
 
   if (!id) return NextResponse.json({ ok: false, error: "ID mancante" }, { status: 400 });
 
   function toNullableNumber(v: any): number | null | undefined {
-    // undefined => non aggiornare la colonna
-    if (v === undefined) return undefined;
-    // null / "" => setta NULL in DB
-    if (v === null || v === "") return null;
+    if (v === undefined) return undefined; // non aggiornare
+    if (v === null || v === "") return null; // set NULL
     const n = typeof v === "number" ? v : Number(String(v).replace(",", "."));
     if (!Number.isFinite(n)) return null;
     return n;
   }
 
+  function toNullableInt(v: any): number | null | undefined {
+    if (v === undefined) return undefined;
+    if (v === null || v === "") return null;
+    const n = Number(v);
+    if (!Number.isFinite(n)) return null;
+    return Math.max(0, Math.trunc(n));
+  }
+
   const patch: any = { updated_at: new Date().toISOString() };
+
   if (typeof description === "string") patch.description = description.trim();
   if (typeof is_active === "boolean") patch.is_active = is_active;
 
@@ -40,6 +49,9 @@ export async function PATCH(req: Request) {
   const nextPrezzo = toNullableNumber(prezzo_vendita_eur);
   if (nextPrezzo !== undefined) patch.prezzo_vendita_eur = nextPrezzo;
 
+  const nextConf = toNullableInt(conf_da);
+  if (nextConf !== undefined) patch.conf_da = nextConf; // ✅ NEW
+
   const { error } = await supabaseAdmin.from("items").update(patch).eq("id", id);
   if (error) {
     console.error("[items/update] error:", error);
@@ -48,5 +60,6 @@ export async function PATCH(req: Request) {
 
   return NextResponse.json({ ok: true });
 }
+
 
 

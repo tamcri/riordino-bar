@@ -8,7 +8,7 @@ export type CompareLine = {
 
   qtyInventory: number; // inventario
   qtyGestionale: number; // gestionale
-  diff: number; // gestionale - inventario ✅
+  diff: number; // inventario - gestionale ✅
 
   prezzoVenditaEur?: number | null;
   valoreDiffEur?: number | null; // diff * prezzo
@@ -38,9 +38,9 @@ function cellText(v: any): string {
   if (typeof v === "string") return v;
   if (typeof v === "number") return String(v);
   if (typeof v === "object") {
-    if (v.text) return String(v.text);
-    if (Array.isArray(v.richText)) return v.richText.map((x: any) => x?.text ?? "").join("");
-    if (v.result != null) return String(v.result);
+    if ((v as any).text) return String((v as any).text);
+    if (Array.isArray((v as any).richText)) return (v as any).richText.map((x: any) => x?.text ?? "").join("");
+    if ((v as any).result != null) return String((v as any).result);
   }
   return String(v);
 }
@@ -96,22 +96,52 @@ function isCodeHeader(h: string): boolean {
   return false;
 }
 
-function isQtyHeader(h: string): boolean {
-  const s = normHeader(h).replace(/\s+/g, "");
+/**
+ * ✅ Valuta quanto un header è “codice articolo”
+ * più alto = migliore
+ */
+function scoreCodeHeader(h: string): number {
+  const s = normHeader(h);
+  if (!s) return 0;
+  const ns = s.replace(/\s+/g, "");
 
-  // target tuo
-  if (s === "giacenzaqta1") return true;
+  if (s === "codice articolo" || s === "cod articolo") return 100;
+  if (s === "codice" || s === "cod") return 90;
+  if (s === "codicearticolo" || s === "codarticolo") return 95;
 
-  // fallback
-  if (s === "giacenzaqta") return true;
-  if (s === "giacenza") return true;
-  if (s === "qta1") return true;
-  if (s === "quantita1") return true;
+  if (ns.includes("cod") && ns.includes("art")) return 80;
+  if (s.includes("cod") && s.includes("art")) return 70;
 
-  if (s.includes("giacenza")) return true;
-  if (s.includes("qta") && s.includes("1")) return true;
+  return 0;
+}
 
-  return false;
+/**
+ * ✅ Valuta quanto un header è “Giacenza qta1”
+ * più alto = migliore
+ */
+function scoreQtyHeader(h: string): number {
+  const s0 = normHeader(h);
+  if (!s0) return 0;
+
+  const s = s0.replace(/\s+/g, ""); // senza spazi per match robusti
+
+  // target tuo: PRIORITÀ ASSOLUTA
+  if (s === "giacenzaqta1") return 200;
+
+  // varianti molto comuni
+  if (s === "giacenzaqta01") return 190;
+  if (s === "giacenzaqta") return 120;
+  if (s === "giacenza") return 80;
+
+  if (s === "qta1" || s === "quantita1") return 70;
+
+  // fallback “contiene”
+  if (s.includes("giacenza") && s.includes("qta") && s.includes("1")) return 110;
+  if (s.includes("giacenza") && s.includes("qta")) return 95;
+  if (s.includes("giacenza")) return 60;
+  if (s.includes("qta") && s.includes("1")) return 55;
+
+  return 0;
 }
 
 /** header composito (2 righe) */
@@ -153,32 +183,43 @@ function findHeaderAt(ws: ExcelJS.Worksheet, r: number): HeaderHit | null {
 
   const maxC = rowMaxCol(ws, r);
 
-  // 1) header su singola riga
-  let codeCol: number | null = null;
-  let qtyCol: number | null = null;
+  // 1) header su singola riga: scegli MIGLIORI per score
+  let bestCode: { col: number; score: number } | null = null;
+  let bestQty: { col: number; score: number } | null = null;
 
   for (let c = 1; c <= maxC; c++) {
     const t = cellText(ws.getRow(r).getCell(c).value);
-    if (!codeCol && isCodeHeader(t)) codeCol = c;
-    if (!qtyCol && isQtyHeader(t)) qtyCol = c;
-    if (codeCol && qtyCol) break;
+
+    const scCode = scoreCodeHeader(t);
+    if (scCode > 0 && (!bestCode || scCode > bestCode.score)) bestCode = { col: c, score: scCode };
+
+    const scQty = scoreQtyHeader(t);
+    if (scQty > 0 && (!bestQty || scQty > bestQty.score)) bestQty = { col: c, score: scQty };
   }
-  if (codeCol && qtyCol) return { codeCol, qtyCol, headerRow: r, headerMode: "single" };
+
+  if (bestCode?.col && bestQty?.col && bestCode.col !== bestQty.col) {
+    return { codeCol: bestCode.col, qtyCol: bestQty.col, headerRow: r, headerMode: "single" };
+  }
 
   // 2) header su due righe
   if (r < ws.rowCount) {
     const maxC2 = Math.max(maxC, rowMaxCol(ws, r + 1));
-    codeCol = null;
-    qtyCol = null;
+    bestCode = null;
+    bestQty = null;
 
     for (let c = 1; c <= maxC2; c++) {
       const h = compositeHeader(ws, r, r + 1, c);
-      if (!codeCol && isCodeHeader(h)) codeCol = c;
-      if (!qtyCol && isQtyHeader(h)) qtyCol = c;
-      if (codeCol && qtyCol) break;
+
+      const scCode = scoreCodeHeader(h);
+      if (scCode > 0 && (!bestCode || scCode > bestCode.score)) bestCode = { col: c, score: scCode };
+
+      const scQty = scoreQtyHeader(h);
+      if (scQty > 0 && (!bestQty || scQty > bestQty.score)) bestQty = { col: c, score: scQty };
     }
 
-    if (codeCol && qtyCol) return { codeCol, qtyCol, headerRow: r, headerMode: "double" };
+    if (bestCode?.col && bestQty?.col && bestCode.col !== bestQty.col) {
+      return { codeCol: bestCode.col, qtyCol: bestQty.col, headerRow: r, headerMode: "double" };
+    }
   }
 
   return null;
@@ -237,7 +278,11 @@ export async function parseGestionaleXlsx(buffer: ArrayBuffer): Promise<Map<stri
       const qtyNum = toNumberLoose(qtyRaw);
       if (qtyNum != null) {
         const code = normCode(cellText(codeRaw));
-        if (looksLikeItemCode(code)) out.set(code, qtyNum);
+        if (looksLikeItemCode(code)) {
+          // ✅ SOMMA: se lo stesso codice compare più volte nel gestionale
+          const prev = out.get(code) ?? 0;
+          out.set(code, prev + qtyNum);
+        }
       }
 
       dataRow++;
@@ -373,7 +418,7 @@ export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines:
   ws.getCell(totalRow, 2).value = "TOTALI";
   ws.getCell(totalRow, 3).value = totInv;
   ws.getCell(totalRow, 4).value = totGes;
-  ws.getCell(totalRow, 5).value = totGes - totInv; // ✅ gestionale - inventario
+  ws.getCell(totalRow, 5).value = totInv - totGes; // ✅ inventario - gestionale
   ws.getCell(totalRow, 6).value = "";
   ws.getCell(totalRow, 7).value = totVal;
   ws.getRow(totalRow).font = { bold: true };
@@ -428,7 +473,7 @@ export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines:
 
 /**
  * Utility: costruisce righe confronto.
- * DIFFERENZA = Qtà gestionale - Qtà inventario ✅
+ * DIFFERENZA = Qtà inventario - Qtà gestionale ✅
  * + flags foundInGestionale / foundInInventory per evidenziazioni.
  */
 export function buildCompareLines(
@@ -465,7 +510,7 @@ export function buildCompareLines(
     const qtyInv = Number(inv?.qty ?? 0);
     const qtyGes = Number(gestionaleMap.get(code) ?? 0);
 
-    const diff = qtyGes - qtyInv;
+    const diff = qtyInv - qtyGes; // ✅ inventario - gestionale
 
     const prezzo = inv?.prezzo ?? null;
     const valore = prezzo == null ? null : diff * prezzo;
@@ -486,6 +531,8 @@ export function buildCompareLines(
   out.sort((a, b) => String(a.code || "").localeCompare(String(b.code || "")));
   return out;
 }
+
+
 
 
 

@@ -50,6 +50,14 @@ function round1(n: number) {
   return Math.round((n + Number.EPSILON) * 10) / 10;
 }
 
+function roundUpToMultiple(qty: number, multiple: number): number {
+  const q = Math.trunc(n0(qty));
+  const m = Math.trunc(n0(multiple));
+  if (q <= 0) return 0;
+  const mm = m > 0 ? m : 10;
+  return Math.ceil(q / mm) * mm;
+}
+
 async function findTabacchiCategoryId(): Promise<string | null> {
   // Provo prima con slug "tabacchi"
   {
@@ -117,7 +125,6 @@ async function loadItemMetaByCodes(
       apply(data || []);
     }
 
-    // se ho trovato qualcosa qui, ok (ma comunque posso aver trovato solo conf_da o solo peso)
     if (pesoMap.size > 0 || confMap.size > 0) return { pesoMap, confMap };
   }
 
@@ -186,7 +193,7 @@ export async function POST(req: Request) {
 
     const input = await file.arrayBuffer();
 
-    // 1) parse gestionale
+    // 1) parse gestionale (qui confDa=10 è solo placeholder)
     const parsed = await parseReorderExcel(input, weeks, days);
 
     // 2) meta da anagrafica (peso + conf_da)
@@ -194,13 +201,11 @@ export async function POST(req: Request) {
     const { pesoMap, confMap } = await loadItemMetaByCodes(codes);
 
     const fallbackPesoUnitKg = 0.02;
+    const fallbackConfDa = 10;
 
-    // 3) arricchisci righe (peso + conf_da)
-    const enrichedRows: PreviewRow[] = parsed.rows.map((r) => {
-      const code = normCode((r as any).codArticolo);
-
-      const qtaDaOrdinareRaw = Number((r as any).qtaOrdine);
-      const qtaDaOrdinare = Number.isFinite(qtaDaOrdinareRaw) ? qtaDaOrdinareRaw : 0;
+    // 3) arricchisci righe (applica conf_da reale + ricalcolo qtaOrdine + pesoKg + valoreDaOrdinare)
+    const enrichedRows: PreviewRow[] = parsed.rows.map((r: any) => {
+      const code = normCode(r?.codArticolo);
 
       const pesoAnagrafica = pesoMap.get(code);
       const pesoUnitKg =
@@ -208,20 +213,40 @@ export async function POST(req: Request) {
           ? pesoAnagrafica
           : fallbackPesoUnitKg;
 
-      const pesoKg = round1(qtaDaOrdinare * pesoUnitKg);
+      const confAnagrafica = confMap.get(code);
+      const confDa =
+        typeof confAnagrafica === "number" && Number.isFinite(confAnagrafica) && confAnagrafica > 0
+          ? Math.trunc(confAnagrafica)
+          : fallbackConfDa;
 
-      const conf_da_raw = confMap.get(code);
-      const conf_da =
-        typeof conf_da_raw === "number" && Number.isFinite(conf_da_raw) && conf_da_raw > 0
-          ? Math.trunc(conf_da_raw)
-          : null;
+      // qtaTeorica viene dal parse (mancante prima dei pack)
+      const qtaTeorica = Math.trunc(n0(r?.qtaTeorica));
+      const qtaOrdine = roundUpToMultiple(qtaTeorica, confDa);
 
-      return { ...r, conf_da, pesoKg };
+      // ricalcolo valoreDaOrdinare con qtaOrdine aggiornata (prezzo unit = valoreVenduto/qtaVenduta)
+      const qtaVenduta = n0(r?.qtaVenduta);
+      const valoreVenduto = n0(r?.valoreVenduto);
+      const unitValue = qtaVenduta > 0 ? valoreVenduto / qtaVenduta : 0;
+      const valoreDaOrdinare = qtaOrdine > 0 && unitValue > 0 ? round2(unitValue * qtaOrdine) : 0;
+
+      // pesoKg = qtaOrdine arrotondata * pesoUnit
+      const pesoKg = round1(qtaOrdine * pesoUnitKg);
+
+      // IMPORTANTE:
+      // - buildReorderXlsx usa `confDa` (non `conf_da`)
+      // - ma per storico/totali teniamo anche `conf_da` per compatibilità
+      return {
+        ...r,
+        confDa,
+        conf_da: confDa,
+        qtaOrdine,
+        valoreDaOrdinare,
+        pesoKg,
+      };
     });
 
     // ✅ TOTALI COMPLETI (ordine intero)
     const tot_rows = enrichedRows.length;
-
     const tot_order_qty = Math.trunc(enrichedRows.reduce((acc, r: any) => acc + n0(r?.qtaOrdine), 0));
     const tot_weight_kg = round1(enrichedRows.reduce((acc, r: any) => acc + n0(r?.pesoKg), 0));
     const tot_value_eur = round2(enrichedRows.reduce((acc, r: any) => acc + n0(r?.valoreDaOrdinare), 0));
@@ -247,13 +272,11 @@ export async function POST(req: Request) {
       next.pesoKg = round1(n0(next.pesoKg) + n0(rr?.pesoKg));
       next.valoreDaOrdinare = round2(n0(next.valoreDaOrdinare) + n0(rr?.valoreDaOrdinare));
 
-      // se conf_da prima era null e ora c'è, la tengo
       if ((next.conf_da == null || next.conf_da === 0) && rr?.conf_da) next.conf_da = rr.conf_da;
 
       byItem.set(cod, next);
     }
 
-    // ordinamento: per valore desc (ma NON è la “top 20” — qui è la tabella completa)
     const totals_by_item = Array.from(byItem.values()).sort(
       (a, b) => n0(b.valoreDaOrdinare) - n0(a.valoreDaOrdinare)
     );
@@ -330,6 +353,8 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: err?.message || "Errore interno" }, { status: 500 });
   }
 }
+
+
 
 
 
