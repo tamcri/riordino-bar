@@ -96,9 +96,9 @@ function eur(v: any) {
   return `€ ${n.toFixed(2)}`;
 }
 
-function kg1(v: any) {
+function kg3(v: any) {
   const n = n0(v);
-  return n.toFixed(1);
+  return n.toFixed(3);
 }
 
 // label colonne più leggibili
@@ -122,7 +122,7 @@ function formatCell(key: string, value: any) {
   if (value == null) return "";
 
   if (key === "valoreVenduto" || key === "valoreDaOrdinare") return eur(value);
-  if (key === "pesoKg") return kg1(value);
+  if (key === "pesoKg") return kg3(value);
   if (
     key === "qtaVenduta" ||
     key === "giacenza" ||
@@ -702,7 +702,7 @@ export default function HistoryClient() {
                       </div>
                       <div className="rounded-xl border p-3">
                         <div className="text-gray-500">Tot. Peso (kg)</div>
-                        <div className="font-semibold">{kg1(previewMeta.tot_weight_kg)}</div>
+                        <div className="font-semibold">{kg3(previewMeta.tot_weight_kg)}</div>
                       </div>
                       <div className="rounded-xl border p-3">
                         <div className="text-gray-500">Tot. Valore (€)</div>

@@ -50,6 +50,10 @@ function round1(n: number) {
   return Math.round((n + Number.EPSILON) * 10) / 10;
 }
 
+function round3(n: number) {
+  return Math.round((n + Number.EPSILON) * 1000) / 1000;
+}
+
 function roundUpToMultiple(qty: number, multiple: number): number {
   const q = Math.trunc(n0(qty));
   const m = Math.trunc(n0(multiple));
@@ -230,7 +234,8 @@ export async function POST(req: Request) {
       const valoreDaOrdinare = qtaOrdine > 0 && unitValue > 0 ? round2(unitValue * qtaOrdine) : 0;
 
       // pesoKg = qtaOrdine arrotondata * pesoUnit
-      const pesoKg = round1(qtaOrdine * pesoUnitKg);
+      const pesoKg = round3(qtaOrdine * pesoUnitKg);
+
 
       // IMPORTANTE:
       // - buildReorderXlsx usa `confDa` (non `conf_da`)
@@ -248,7 +253,7 @@ export async function POST(req: Request) {
     // ✅ TOTALI COMPLETI (ordine intero)
     const tot_rows = enrichedRows.length;
     const tot_order_qty = Math.trunc(enrichedRows.reduce((acc, r: any) => acc + n0(r?.qtaOrdine), 0));
-    const tot_weight_kg = round1(enrichedRows.reduce((acc, r: any) => acc + n0(r?.pesoKg), 0));
+    const tot_weight_kg = round3(enrichedRows.reduce((acc, r: any) => acc + n0(r?.pesoKg), 0));
     const tot_value_eur = round2(enrichedRows.reduce((acc, r: any) => acc + n0(r?.valoreDaOrdinare), 0));
 
     // ✅ TOTALI PER ARTICOLO (ordine intero)
@@ -269,7 +274,7 @@ export async function POST(req: Request) {
       };
 
       next.qtaOrdine += Math.trunc(n0(rr?.qtaOrdine));
-      next.pesoKg = round1(n0(next.pesoKg) + n0(rr?.pesoKg));
+      next.pesoKg = round3(n0(next.pesoKg) + n0(rr?.pesoKg));
       next.valoreDaOrdinare = round2(n0(next.valoreDaOrdinare) + n0(rr?.valoreDaOrdinare));
 
       if ((next.conf_da == null || next.conf_da === 0) && rr?.conf_da) next.conf_da = rr.conf_da;

@@ -90,6 +90,10 @@ function round1(n: number) {
   return Math.round((n + Number.EPSILON) * 10) / 10;
 }
 
+function round3(n: number) {
+  return Math.round((n + Number.EPSILON) * 1000) / 1000;
+}
+
 /* -------------------- types -------------------- */
 
 export type PreviewRow = {
@@ -181,7 +185,7 @@ export async function buildReorderXlsx(pvLabel: string, rows: PreviewRow[]): Pro
     ws.getCell(r, 6).numFmt = "0";
     ws.getCell(r, 7).numFmt = "0";
     ws.getCell(r, 8).numFmt = "€ #,##0.00";
-    ws.getCell(r, 9).numFmt = "0.0";
+    ws.getCell(r, 9).numFmt = "0.000";
 
     totVend += Number(row.qtaVenduta || 0);
     totGiac += Number(row.giacenza || 0);
@@ -202,14 +206,14 @@ export async function buildReorderXlsx(pvLabel: string, rows: PreviewRow[]): Pro
   ws.getCell(totalRow, 5).value = totTeo;
   ws.getCell(totalRow, 7).value = totOrd;
   ws.getCell(totalRow, 8).value = round2(totValOrd);
-  ws.getCell(totalRow, 9).value = round1(totPeso);
+  ws.getCell(totalRow, 9).value = round3(totPeso);
 
   ws.getCell(totalRow, 3).numFmt = "0";
   ws.getCell(totalRow, 4).numFmt = "0";
   ws.getCell(totalRow, 5).numFmt = "0";
   ws.getCell(totalRow, 7).numFmt = "0";
   ws.getCell(totalRow, 8).numFmt = "€ #,##0.00";
-  ws.getCell(totalRow, 9).numFmt = "0.0";
+  ws.getCell(totalRow, 9).numFmt = "0.000";
 
   const last = totalRow;
   for (let rr = headerRow; rr <= last; rr++) {
@@ -363,7 +367,7 @@ export async function processReorderExcel(
   const { pvLabel, rows } = await parseReorderExcel(input, weeks, days);
 
   for (const r of rows) {
-    if (r.qtaOrdine > 0) r.pesoKg = round1(r.qtaOrdine * 0.02);
+    if (r.qtaOrdine > 0) r.pesoKg = round3(r.qtaOrdine * 0.02);
     else r.pesoKg = 0;
   }
 
