@@ -18,7 +18,8 @@ export async function PATCH(req: Request) {
   const is_active = body?.is_active;
   const peso_kg = body?.peso_kg;
   const prezzo_vendita_eur = body?.prezzo_vendita_eur;
-  const conf_da = body?.conf_da; // ✅ NEW
+  const conf_da = body?.conf_da; // ✅ NEW (già c’era)
+  const barcode = body?.barcode; // ✅ NEW
 
   if (!id) return NextResponse.json({ ok: false, error: "ID mancante" }, { status: 400 });
 
@@ -38,6 +39,14 @@ export async function PATCH(req: Request) {
     return Math.max(0, Math.trunc(n));
   }
 
+  function toNullableText(v: any): string | null | undefined {
+    if (v === undefined) return undefined; // non aggiornare
+    if (v === null) return null; // set NULL
+    const s = String(v).trim();
+    if (!s) return null; // vuoto => NULL
+    return s;
+  }
+
   const patch: any = { updated_at: new Date().toISOString() };
 
   if (typeof description === "string") patch.description = description.trim();
@@ -50,7 +59,10 @@ export async function PATCH(req: Request) {
   if (nextPrezzo !== undefined) patch.prezzo_vendita_eur = nextPrezzo;
 
   const nextConf = toNullableInt(conf_da);
-  if (nextConf !== undefined) patch.conf_da = nextConf; // ✅ NEW
+  if (nextConf !== undefined) patch.conf_da = nextConf;
+
+  const nextBarcode = toNullableText(barcode);
+  if (nextBarcode !== undefined) patch.barcode = nextBarcode;
 
   const { error } = await supabaseAdmin.from("items").update(patch).eq("id", id);
   if (error) {
@@ -60,6 +72,7 @@ export async function PATCH(req: Request) {
 
   return NextResponse.json({ ok: true });
 }
+
 
 
 

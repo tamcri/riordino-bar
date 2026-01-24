@@ -11,6 +11,20 @@ function isUuid(v: string | null) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v.trim());
 }
 
+// Normalizza testo per ricerca (no virgole che rompono .or, no spazi multipli)
+function normSearchText(q: string) {
+  return q.replace(/,/g, " ").replace(/\s+/g, " ").trim();
+}
+
+// Normalizza possibili barcode: tieni solo cifre
+function extractDigits(q: string) {
+  return q.replace(/[^\d]/g, "");
+}
+
+function looksLikeBarcode(digits: string) {
+  return digits.length >= 8;
+}
+
 export async function GET(req: Request) {
   const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
 
@@ -28,9 +42,11 @@ export async function GET(req: Request) {
   // ✅ vecchio schema (retro-compat)
   const legacyCategory = (url.searchParams.get("category") || "").trim().toUpperCase(); // TAB | GV
 
-  const q = (url.searchParams.get("q") || "").trim();
+  const qRaw = (url.searchParams.get("q") || "").trim();
   const active = (url.searchParams.get("active") || "1").toLowerCase(); // 1 | 0 | all
-  const limit = Math.min(Number(url.searchParams.get("limit") || 200), 500);
+
+  // ✅ CAP 1000
+  const limit = Math.min(Number(url.searchParams.get("limit") || 200), 1000);
 
   // validazioni leggere
   if (category_id && !isUuid(category_id)) {
@@ -43,11 +59,11 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: "Categoria non valida" }, { status: 400 });
   }
 
-  // ✅ Base select: includo anche peso_kg + conf_da + prezzo_vendita_eur
+  // ✅ Base select: includo anche barcode + tabacchi fields
   let query = supabaseAdmin
     .from("items")
     .select(
-      "id, category, category_id, subcategory_id, code, description, peso_kg, conf_da, prezzo_vendita_eur, is_active, created_at, updated_at"
+      "id, category, category_id, subcategory_id, code, description, barcode, peso_kg, conf_da, prezzo_vendita_eur, is_active, created_at, updated_at"
     )
     .order("code", { ascending: true })
     .limit(limit);
@@ -66,9 +82,29 @@ export async function GET(req: Request) {
     query = query.eq("category", cat);
   }
 
-  // Ricerca testuale
-  if (q) {
-    query = query.or(`code.ilike.%${q}%,description.ilike.%${q}%`);
+  // ✅ Ricerca: code/description sempre, barcode con logica intelligente
+  if (qRaw) {
+    const safeText = normSearchText(qRaw);
+    const digits = extractDigits(qRaw);
+
+    if (looksLikeBarcode(digits)) {
+      const orExpr = [
+        `barcode.eq.${digits}`,
+        `code.ilike.%${safeText}%`,
+        `description.ilike.%${safeText}%`,
+        `barcode.ilike.%${digits}%`,
+      ].join(",");
+
+      query = query.or(orExpr);
+    } else {
+      const orExpr = [
+        `code.ilike.%${safeText}%`,
+        `description.ilike.%${safeText}%`,
+        `barcode.ilike.%${safeText}%`,
+      ].join(",");
+
+      query = query.or(orExpr);
+    }
   }
 
   const { data, error } = await query;
@@ -80,6 +116,11 @@ export async function GET(req: Request) {
 
   return NextResponse.json({ ok: true, rows: data || [] });
 }
+
+
+
+
+
 
 
 

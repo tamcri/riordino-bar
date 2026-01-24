@@ -13,10 +13,45 @@ function normCode(v: any): string {
 function normDesc(v: any): string {
   return String(v ?? "").trim();
 }
+function normBarcode(v: any): string {
+  const s = String(v ?? "").trim();
+  return s; // barcode come stringa (può avere zeri iniziali)
+}
 
 function isUuid(v: string | null) {
   if (!v) return false;
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v.trim());
+}
+
+// Lettura cella robusta (testo/numero/formula)
+function readCellString(cell: ExcelJS.Cell): string {
+  const anyCell: any = cell as any;
+
+  const t = String(anyCell?.text ?? "").trim();
+  if (t) return t;
+
+  const v = anyCell?.value;
+  if (v == null) return "";
+
+  if (typeof v === "number") {
+    if (!Number.isFinite(v)) return "";
+    return String(Math.trunc(v));
+  }
+
+  if (typeof v === "object") {
+    if (typeof (v as any).result === "number") return String(Math.trunc((v as any).result));
+    if (typeof (v as any).result === "string") return String((v as any).result).trim();
+    if (Array.isArray((v as any).richText)) {
+      try {
+        const s = ((v as any).richText || []).map((x: any) => x?.text ?? "").join("");
+        return String(s).trim();
+      } catch {
+        return "";
+      }
+    }
+  }
+
+  return String(v).trim();
 }
 
 type ExtractedRow = {
@@ -24,15 +59,10 @@ type ExtractedRow = {
   description: string;
   peso_kg: number | null;
   prezzo_vendita_eur: number | null;
-  conf_da: number | null; // ✅ NEW
+  conf_da: number | null;
+  barcode?: string | null;
 };
 
-/**
- * PESO: tu mi hai confermato che nel tuo file è in KG.
- * Mantengo comunque parsing robusto:
- * - 0,02 / 0.02 / "0,02 kg" ecc.
- * - se proprio qualcuno mette "20 g" lo converte (ma non è richiesto)
- */
 function parsePesoKg(cellText: string, headerHint: string | null): number | null {
   const t0 = String(cellText ?? "").trim();
   if (!t0) return null;
@@ -46,21 +76,20 @@ function parsePesoKg(cellText: string, headerHint: string | null): number | null
 
   const h = (headerHint || "").toLowerCase();
 
-  // Se per caso header/cella parlano di grammi, converto
-  if (h.includes("gram") || h.includes(" gr") || h === "g" || cleaned.includes("gram") || cleaned.includes(" gr") || cleaned.endsWith("g")) {
+  if (
+    h.includes("gram") ||
+    h.includes(" gr") ||
+    h === "g" ||
+    cleaned.includes("gram") ||
+    cleaned.includes(" gr") ||
+    cleaned.endsWith("g")
+  ) {
     return n / 1000;
   }
 
-  // Default: KG (come da tuo file)
   return n;
 }
 
-/**
- * Prezzo vendita in EUR:
- * - "12,34" / "12.34" / "€ 12,34" / "12,34 €" ecc.
- * - ritorna null se vuoto o non numerico
- * - accetta anche 0 (se proprio serve)
- */
 function parsePrezzoEur(cellText: string): number | null {
   const t0 = String(cellText ?? "").trim();
   if (!t0) return null;
@@ -81,12 +110,6 @@ function parsePrezzoEur(cellText: string): number | null {
   return n;
 }
 
-/**
- * Conf. da:
- * - accetta numeri tipo "10", "20", "conf 20", "20 pz" ecc.
- * - ritorna null se vuoto / non valido
- * - accetta solo >= 2
- */
 function parseConfDa(cellText: string): number | null {
   const t0 = String(cellText ?? "").trim();
   if (!t0) return null;
@@ -108,13 +131,59 @@ async function getExistingCodesLegacy(category: "TAB" | "GV", codes: string[]) {
 
   for (let i = 0; i < codes.length; i += chunkSize) {
     const chunk = codes.slice(i, i + chunkSize);
-    const { data, error } = await supabaseAdmin.from("items").select("code").eq("category", category).in("code", chunk);
+    const { data, error } = await supabaseAdmin
+      .from("items")
+      .select("code")
+      .eq("category", category)
+      .in("code", chunk);
 
     if (error) throw error;
     (data || []).forEach((r: any) => existing.add(r.code));
   }
 
   return existing;
+}
+
+async function getExistingItemsByCodeNew(category_id: string, codes: string[]) {
+  const map = new Map<string, string>(); // code -> id
+  const chunkSize = 500;
+
+  for (let i = 0; i < codes.length; i += chunkSize) {
+    const chunk = codes.slice(i, i + chunkSize);
+    const { data, error } = await supabaseAdmin
+      .from("items")
+      .select("id, code")
+      .eq("category_id", category_id)
+      .in("code", chunk);
+
+    if (error) throw error;
+    (data || []).forEach((r: any) => {
+      if (r?.code && r?.id) map.set(String(r.code), String(r.id));
+    });
+  }
+
+  return map;
+}
+
+async function getExistingItemsByCodeLegacy(category: "TAB" | "GV", codes: string[]) {
+  const map = new Map<string, string>(); // code -> id
+  const chunkSize = 500;
+
+  for (let i = 0; i < codes.length; i += chunkSize) {
+    const chunk = codes.slice(i, i + chunkSize);
+    const { data, error } = await supabaseAdmin
+      .from("items")
+      .select("id, code")
+      .eq("category", category)
+      .in("code", chunk);
+
+    if (error) throw error;
+    (data || []).forEach((r: any) => {
+      if (r?.code && r?.id) map.set(String(r.code), String(r.id));
+    });
+  }
+
+  return map;
 }
 
 export async function POST(req: Request) {
@@ -150,14 +219,20 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: false, error: "subcategory_id non valido" }, { status: 400 });
       }
 
-      // category_id deve esistere
-      const { data: catRow, error: catErr } = await supabaseAdmin.from("categories").select("id").eq("id", category_id as string).maybeSingle();
+      const { data: catRow, error: catErr } = await supabaseAdmin
+        .from("categories")
+        .select("id")
+        .eq("id", category_id as string)
+        .maybeSingle();
       if (catErr) return NextResponse.json({ ok: false, error: catErr.message }, { status: 500 });
       if (!catRow) return NextResponse.json({ ok: false, error: "Categoria non trovata" }, { status: 400 });
 
-      // subcategory deve appartenere alla category
       if (subcategory_id) {
-        const { data: subRow, error: subErr } = await supabaseAdmin.from("subcategories").select("id, category_id").eq("id", subcategory_id).maybeSingle();
+        const { data: subRow, error: subErr } = await supabaseAdmin
+          .from("subcategories")
+          .select("id, category_id")
+          .eq("id", subcategory_id)
+          .maybeSingle();
         if (subErr) return NextResponse.json({ ok: false, error: subErr.message }, { status: 500 });
         if (!subRow) return NextResponse.json({ ok: false, error: "Sottocategoria non trovata" }, { status: 400 });
         if (subRow.category_id !== category_id) {
@@ -168,7 +243,6 @@ export async function POST(req: Request) {
 
     const input = await file.arrayBuffer();
 
-    // ✅ Excel header-based robusto + Peso + Prezzo Vendita + Conf. da
     const extracted: ExtractedRow[] = [];
 
     const wb = new ExcelJS.Workbook();
@@ -191,6 +265,7 @@ export async function POST(req: Request) {
     let pesoCol = -1;
     let prezzoVenditaCol = -1;
     let confDaCol = -1;
+    let barcodeCol = -1;
 
     let pesoHeaderHint: string | null = null;
 
@@ -203,6 +278,7 @@ export async function POST(req: Request) {
       let tmpPeso = -1;
       let tmpPrezzoVendita = -1;
       let tmpConfDa = -1;
+      let tmpBarcode = -1;
 
       let tmpPesoHint: string | null = null;
 
@@ -210,9 +286,10 @@ export async function POST(req: Request) {
         const t = cellTextLower(row, c);
         if (!t) continue;
 
+        // match "Codice" stretto
         if (
           tmpCode === -1 &&
-          ["codice", "cod", "codice articolo", "cod. articolo", "code", "articolo", "cod_articolo"].some((k) => t.includes(k))
+          ["codice", "cod", "codice articolo", "cod. articolo", "cod_articolo", "code", "item code"].some((k) => t.includes(k))
         ) {
           tmpCode = c;
         }
@@ -229,7 +306,6 @@ export async function POST(req: Request) {
           tmpPesoHint = t;
         }
 
-        // Prezzo di vendita: includo "prezzo" / "vendita" ma escludo colonne costo/acquisto/carico
         if (tmpPrezzoVendita === -1) {
           const hasPrezzo = t.includes("prezzo");
           const hasVendita = t.includes("vendita");
@@ -242,90 +318,100 @@ export async function POST(req: Request) {
           }
         }
 
-        // ✅ Conf. da (confezione)
         if (tmpConfDa === -1) {
           const hasConf = t.includes("conf");
           const hasConfez = t.includes("confez");
           const hasDa = /\bda\b/.test(t);
           const hasPz = t.includes("pz") || t.includes("pezzi") || t.includes("pezzo");
 
-          // esempi: "Conf. da", "Conf da", "Confezione", "Confez.", "Conf (pz)"
           if (hasConf || hasConfez) {
-            // preferisco colonne tipo "conf da" o "confezione"
             if (hasDa || hasPz || t.includes("confezione") || t.includes("confez")) {
               tmpConfDa = c;
             }
           }
         }
+
+        if (tmpBarcode === -1) {
+          if (["barcode", "bar code", "ean", "ean13", "codice a barre", "codice barre"].some((k) => t.includes(k))) {
+            tmpBarcode = c;
+          }
+        }
       }
 
-      if (tmpCode !== -1 && tmpDesc !== -1 && tmpCode !== tmpDesc) {
+      if (tmpCode !== -1) {
         headerRow = r;
         codeCol = tmpCode;
         descCol = tmpDesc;
-        pesoCol = tmpPeso; // opzionale
-        prezzoVenditaCol = tmpPrezzoVendita; // opzionale
-        confDaCol = tmpConfDa; // opzionale
+        pesoCol = tmpPeso;
+        prezzoVenditaCol = tmpPrezzoVendita;
+        confDaCol = tmpConfDa;
+        barcodeCol = tmpBarcode;
         pesoHeaderHint = tmpPesoHint;
         break;
       }
     }
 
-    if (headerRow === -1) {
+    if (headerRow === -1 || codeCol === -1) {
       return NextResponse.json(
         {
           ok: false,
-          error:
-            "Non sono riuscito a trovare le colonne Codice/Descrizione. Usa un Excel con intestazioni tipo 'Codice Articolo' e 'Descrizione' (e opzionali 'Peso', 'Prezzo di Vendita', 'Conf. da').",
+          error: "Non sono riuscito a trovare la colonna Codice. Usa un Excel con intestazione tipo 'Codice'/'Codice Articolo' e 'Barcode'.",
         },
         { status: 400 }
       );
     }
 
+    // barcode import: serve Barcode, e NON devono esserci Peso/Prezzo/Conf. (Descrizione può esserci)
+    const barcodeImportMode = barcodeCol !== -1 && pesoCol === -1 && prezzoVenditaCol === -1 && confDaCol === -1;
+
+    let skipped_no_code = 0;
+
     for (let rr = headerRow + 1; rr <= (ws.rowCount || headerRow); rr++) {
       const row = ws.getRow(rr);
 
-      const codeCell = row.getCell(codeCol);
-      const descCell = row.getCell(descCol);
+      const code = normCode(readCellString(row.getCell(codeCol)));
+      if (!code) {
+        skipped_no_code++;
+        continue;
+      }
 
-      const code = normCode((codeCell as any)?.text ?? codeCell.value);
-      const desc = normDesc((descCell as any)?.text ?? descCell.value);
-
-      if (!code && !desc) continue;
+      const desc = descCol !== -1 ? normDesc(readCellString(row.getCell(descCol))) : "";
 
       const low = `${code} ${desc}`.toLowerCase();
       if (low.includes("pagina") && low.includes("di")) continue;
 
       let peso_kg: number | null = null;
       if (pesoCol !== -1) {
-        const pCell = row.getCell(pesoCol);
-        const pText = String((pCell as any)?.text ?? pCell.value ?? "").trim();
+        const pText = String(readCellString(row.getCell(pesoCol)) ?? "").trim();
         peso_kg = parsePesoKg(pText, pesoHeaderHint);
       }
 
       let prezzo_vendita_eur: number | null = null;
       if (prezzoVenditaCol !== -1) {
-        const prCell = row.getCell(prezzoVenditaCol);
-        const prText = String((prCell as any)?.text ?? prCell.value ?? "").trim();
+        const prText = String(readCellString(row.getCell(prezzoVenditaCol)) ?? "").trim();
         prezzo_vendita_eur = parsePrezzoEur(prText);
       }
 
       let conf_da: number | null = null;
       if (confDaCol !== -1) {
-        const cCell = row.getCell(confDaCol);
-        const cText = String((cCell as any)?.text ?? cCell.value ?? "").trim();
+        const cText = String(readCellString(row.getCell(confDaCol)) ?? "").trim();
         conf_da = parseConfDa(cText);
       }
 
-      if (code) {
-        extracted.push({
-          code,
-          description: desc || code,
-          peso_kg,
-          prezzo_vendita_eur,
-          conf_da,
-        });
+      let barcode: string | null = null;
+      if (barcodeCol !== -1) {
+        const bText = normBarcode(readCellString(row.getCell(barcodeCol)));
+        barcode = bText ? bText : null;
       }
+
+      extracted.push({
+        code,
+        description: desc || code,
+        peso_kg,
+        prezzo_vendita_eur,
+        conf_da,
+        barcode,
+      });
     }
 
     if (extracted.length === 0) {
@@ -339,8 +425,13 @@ export async function POST(req: Request) {
       if (!code) continue;
 
       const pesoNorm = typeof r.peso_kg === "number" && Number.isFinite(r.peso_kg) ? r.peso_kg : null;
-      const prezzoNorm = typeof r.prezzo_vendita_eur === "number" && Number.isFinite(r.prezzo_vendita_eur) ? r.prezzo_vendita_eur : null;
-      const confNorm = typeof r.conf_da === "number" && Number.isFinite(r.conf_da) && r.conf_da >= 2 ? Math.trunc(r.conf_da) : null;
+      const prezzoNorm =
+        typeof r.prezzo_vendita_eur === "number" && Number.isFinite(r.prezzo_vendita_eur) ? r.prezzo_vendita_eur : null;
+      const confNorm =
+        typeof r.conf_da === "number" && Number.isFinite(r.conf_da) && r.conf_da >= 2 ? Math.trunc(r.conf_da) : null;
+
+      const barcodeNorm =
+        r.barcode === undefined ? undefined : r.barcode && String(r.barcode).trim() ? String(r.barcode).trim() : null;
 
       map.set(code, {
         code,
@@ -348,30 +439,123 @@ export async function POST(req: Request) {
         peso_kg: pesoNorm,
         prezzo_vendita_eur: prezzoNorm,
         conf_da: confNorm,
+        barcode: barcodeNorm ?? null,
       });
     }
 
-    const rows = Array.from(map.values());
-    const codes = rows.map((r) => r.code);
+    const rows = Array.from(map.values()).filter((r) => r && r.code && String(r.code).trim() !== "");
+    if (rows.length === 0) {
+      return NextResponse.json({ ok: false, error: "Nessun codice valido trovato (dopo dedup)." }, { status: 400 });
+    }
 
+    const codes = rows.map((r) => r.code);
     const now = new Date().toISOString();
 
-    // ===== NEW MODE: upsert su (category_id, code) =====
+    // ==========================
+    // BARCODE IMPORT MODE (UPDATE ONLY, NO INSERT)
+    // ==========================
+    if (barcodeImportMode) {
+      if (useNew) {
+        const existing = await getExistingItemsByCodeNew(category_id as string, codes);
+
+        // ✅ FIX: includo SEMPRE code (e description) per evitare insert con code=null in casi limite
+        const payload = rows
+          .map((r) => {
+            const id = existing.get(r.code);
+            if (!id) return null;
+            return {
+              id,
+              code: r.code,
+              description: r.description,
+              barcode: r.barcode ?? null,
+              updated_at: now,
+            };
+          })
+          .filter(Boolean) as any[];
+
+        const updated = payload.length;
+        const not_found = rows.length - updated;
+
+        if (payload.length > 0) {
+          const { error: upErr } = await supabaseAdmin.from("items").upsert(payload, { onConflict: "id" });
+          if (upErr) {
+            console.error("[items/import][barcode][new] upsert error:", upErr);
+            return NextResponse.json({ ok: false, error: upErr.message || "Errore import barcode" }, { status: 500 });
+          }
+        }
+
+        return NextResponse.json({
+          ok: true,
+          mode: "barcode",
+          schema: "new",
+          category_id,
+          subcategory_id: subcategory_id || null,
+          total: rows.length,
+          updated,
+          not_found,
+          skipped_no_code,
+        });
+      } else {
+        const legacyCategory = legacyCategoryRaw as "TAB" | "GV";
+        const existing = await getExistingItemsByCodeLegacy(legacyCategory, codes);
+
+        // ✅ FIX: includo SEMPRE code (e description)
+        const payload = rows
+          .map((r) => {
+            const id = existing.get(r.code);
+            if (!id) return null;
+            return {
+              id,
+              code: r.code,
+              description: r.description,
+              barcode: r.barcode ?? null,
+              updated_at: now,
+            };
+          })
+          .filter(Boolean) as any[];
+
+        const updated = payload.length;
+        const not_found = rows.length - updated;
+
+        if (payload.length > 0) {
+          const { error: upErr } = await supabaseAdmin.from("items").upsert(payload, { onConflict: "id" });
+          if (upErr) {
+            console.error("[items/import][barcode][legacy] upsert error:", upErr);
+            return NextResponse.json({ ok: false, error: upErr.message || "Errore import barcode" }, { status: 500 });
+          }
+        }
+
+        return NextResponse.json({
+          ok: true,
+          mode: "barcode",
+          schema: "legacy",
+          category: legacyCategory,
+          total: rows.length,
+          updated,
+          not_found,
+          skipped_no_code,
+        });
+      }
+    }
+
+    // ==========================
+    // NORMAL IMPORT MODE (UPSERT ANAGRAFICA)
+    // ==========================
     if (useNew) {
       const payload = rows.map((r) => ({
         category_id,
         subcategory_id: subcategory_id || null,
         code: r.code,
         description: r.description,
+        barcode: r.barcode ?? null,
         peso_kg: r.peso_kg,
         prezzo_vendita_eur: r.prezzo_vendita_eur,
-        conf_da: r.conf_da, // ✅ NEW
+        conf_da: r.conf_da,
         is_active: true,
         updated_at: now,
       }));
 
       const { error: upErr } = await supabaseAdmin.from("items").upsert(payload, { onConflict: "category_id,code" });
-
       if (upErr) {
         console.error("[items/import][new] upsert error:", upErr);
         return NextResponse.json({ ok: false, error: upErr.message || "Errore import" }, { status: 500 });
@@ -383,10 +567,10 @@ export async function POST(req: Request) {
         category_id,
         subcategory_id: subcategory_id || null,
         total: rows.length,
+        skipped_no_code,
       });
     }
 
-    // ===== LEGACY MODE: upsert su (category, code) =====
     const legacyCategory = legacyCategoryRaw as "TAB" | "GV";
 
     let existingSet: Set<string>;
@@ -404,15 +588,15 @@ export async function POST(req: Request) {
       category: legacyCategory,
       code: r.code,
       description: r.description,
+      barcode: r.barcode ?? null,
       peso_kg: r.peso_kg,
       prezzo_vendita_eur: r.prezzo_vendita_eur,
-      conf_da: r.conf_da, // ✅ NEW
+      conf_da: r.conf_da,
       is_active: true,
       updated_at: now,
     }));
 
     const { error: upErr } = await supabaseAdmin.from("items").upsert(payload, { onConflict: "category,code" });
-
     if (upErr) {
       console.error("[items/import][legacy] upsert error:", upErr);
       return NextResponse.json({ ok: false, error: upErr.message || "Errore import" }, { status: 500 });
@@ -425,12 +609,17 @@ export async function POST(req: Request) {
       total: rows.length,
       inserted,
       updated,
+      skipped_no_code,
     });
   } catch (e: any) {
     console.error("[items/import] FATAL:", e);
     return NextResponse.json({ ok: false, error: e?.message || String(e) || "Errore interno" }, { status: 500 });
   }
 }
+
+
+
+
 
 
 

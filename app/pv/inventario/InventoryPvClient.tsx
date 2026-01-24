@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 
 type Category = { id: string; name: string };
 type Subcategory = { id: string; category_id: string; name: string };
-type Item = { id: string; code: string; description: string };
+type Item = { id: string; code: string; description: string; barcode?: string | null }; // ✅ barcode
 
 type InventoryLine = {
   item_id: string;
@@ -48,11 +48,14 @@ export default function InventoryPvClient() {
 
   const [qtyMap, setQtyMap] = useState<Record<string, string>>({});
 
-  // ✅ NEW: operatore
+  // ✅ operatore
   const [operatore, setOperatore] = useState("");
 
-  // ✅ filtro ricerca (client-side)
+  // ✅ filtro ricerca (client-side) + scan
   const [search, setSearch] = useState("");
+
+  // ✅ lista “Scansionati”
+  const [scannedIds, setScannedIds] = useState<string[]>([]);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -62,16 +65,108 @@ export default function InventoryPvClient() {
   // ✅ operatore obbligatorio
   const canSave = useMemo(() => !!pvId && !!categoryId && items.length > 0 && !!operatore.trim(), [pvId, categoryId, items.length, operatore]);
 
+  // ✅ ricerca “furba” per barcode:
+  // - se sembra barcode (solo cifre, lungo) → match ESATTO su barcode/code
+  // - altrimenti: contains su codice/descrizione/barcode
   const filteredItems = useMemo(() => {
-    const t = search.trim().toLowerCase();
-    if (!t) return items;
+    const raw = search.trim();
+    if (!raw) return items;
+
+    const t = raw.toLowerCase();
+    const digits = onlyDigits(raw);
+    const isLikelyBarcode = digits.length >= 8;
+
+    if (isLikelyBarcode) {
+      const exact = items.filter((it) => {
+        const bcDigits = onlyDigits(String(it.barcode ?? ""));
+        const codeDigits = onlyDigits(String(it.code ?? ""));
+        return (bcDigits && bcDigits === digits) || (codeDigits && codeDigits === digits);
+      });
+      if (exact.length > 0) return exact;
+
+      return items.filter((it) => {
+        const code = String(it.code || "").toLowerCase();
+        const desc = String(it.description || "").toLowerCase();
+        const bc = String(it.barcode || "").toLowerCase();
+        const bcDigits = onlyDigits(String(it.barcode ?? ""));
+        return code.includes(t) || desc.includes(t) || bc.includes(t) || (digits && bcDigits.includes(digits));
+      });
+    }
 
     return items.filter((it) => {
       const code = String(it.code || "").toLowerCase();
       const desc = String(it.description || "").toLowerCase();
-      return code.includes(t) || desc.includes(t);
+      const bc = String(it.barcode || "").toLowerCase();
+      return code.includes(t) || desc.includes(t) || bc.includes(t);
     });
   }, [items, search]);
+
+  const scannedItems = useMemo(() => {
+    const set = new Set(scannedIds);
+    return items.filter((it) => set.has(it.id));
+  }, [items, scannedIds]);
+
+  const totScannedPieces = useMemo(() => {
+    return scannedItems.reduce((sum, it) => sum + (Number(qtyMap[it.id]) || 0), 0);
+  }, [scannedItems, qtyMap]);
+
+  const totScannedDistinct = scannedItems.length;
+
+  function setQty(itemId: string, v: string) {
+    const cleaned = onlyDigits(v);
+    setQtyMap((prev) => ({ ...prev, [itemId]: cleaned }));
+  }
+
+  function incrementQty(itemId: string, delta: number = 1) {
+    setQtyMap((prev) => {
+      const current = Number(prev[itemId] || "0") || 0;
+      const next = Math.max(0, current + delta);
+      return { ...prev, [itemId]: String(next) };
+    });
+  }
+
+  function handleScanEnter() {
+    const raw = search.trim();
+    if (!raw) return;
+
+    const digits = onlyDigits(raw);
+    const isLikelyBarcode = digits.length >= 8;
+
+    let found: Item | undefined;
+
+    if (isLikelyBarcode) {
+      found = items.find((it) => {
+        const bcDigits = onlyDigits(String(it.barcode ?? ""));
+        const codeDigits = onlyDigits(String(it.code ?? ""));
+        return (bcDigits && bcDigits === digits) || (codeDigits && codeDigits === digits);
+      });
+    } else {
+      // fallback: prova match esatto sul codice (case-insensitive)
+      const t = raw.toLowerCase();
+      found = items.find((it) => String(it.code || "").toLowerCase() === t);
+    }
+
+    // sempre svuoto il campo ricerca dopo invio (trovato o no)
+    setSearch("");
+
+    if (!found) {
+      setMsg(null);
+      setError("Barcode non trovato.");
+      return;
+    }
+
+    setError(null);
+    setMsg(null);
+
+    // aggiungo a Scansionati se non presente
+    setScannedIds((prev) => {
+      if (prev.includes(found!.id)) return prev;
+      return [found!.id, ...prev];
+    });
+
+    // multi-scan: +1
+    incrementQty(found.id, 1);
+  }
 
   /* =========================
      AUTH / PV
@@ -114,23 +209,24 @@ export default function InventoryPvClient() {
 
   async function loadItems(catId: string, subId: string) {
     setItems([]);
-    setQtyMap({}); // 🔥 reset TOTALE
-    setSearch(""); // ✅ reset ricerca quando ricarico dataset
+    setQtyMap({});
+    setSearch("");
+    setScannedIds([]);
 
     if (!catId) return;
 
     const params = new URLSearchParams();
     params.set("category_id", catId);
     if (subId) params.set("subcategory_id", subId);
+    params.set("limit", "1000"); // ✅ cap 1000
 
-    const res = await fetch(`/api/items/list?${params}`, { cache: "no-store" });
+    const res = await fetch(`/api/items/list?${params.toString()}`, { cache: "no-store" });
     const json = await res.json();
     if (!json.ok) throw new Error(json.error || "Errore articoli");
 
     const rows: Item[] = json.rows || [];
     setItems(rows);
 
-    // inizializza tutto vuoto
     const m: Record<string, string> = {};
     rows.forEach((it) => (m[it.id] = ""));
     setQtyMap(m);
@@ -147,9 +243,9 @@ export default function InventoryPvClient() {
     params.set("inventory_date", inventoryDate); // ISO
     if (subcategoryId) params.set("subcategory_id", subcategoryId);
 
-    const res = await fetch(`/api/inventories/rows?${params}`, { cache: "no-store" });
+    const res = await fetch(`/api/inventories/rows?${params.toString()}`, { cache: "no-store" });
     const json = await res.json();
-    if (!json.ok) return; // se non c’è inventario → rimane vuoto
+    if (!json.ok) return;
 
     const map = new Map<string, number>();
     (json.rows || []).forEach((r: InventoryLine) => {
@@ -215,7 +311,6 @@ export default function InventoryPvClient() {
     })();
   }, [subcategoryId]);
 
-  // ✅ prefill quando cambiano dataset/data/sottocat/PV
   useEffect(() => {
     (async () => {
       try {
@@ -231,7 +326,6 @@ export default function InventoryPvClient() {
      SAVE
   ========================== */
   async function save() {
-    // doppia guardia: UI + sicurezza
     if (!pvId || !categoryId || items.length === 0) return;
 
     if (!operatore.trim()) {
@@ -253,9 +347,7 @@ export default function InventoryPvClient() {
         })
         .filter(Boolean);
 
-      if (rows.length === 0) {
-        throw new Error("Inserisci almeno una quantità");
-      }
+      if (rows.length === 0) throw new Error("Inserisci almeno una quantità");
 
       const res = await fetch("/api/inventories/save", {
         method: "POST",
@@ -264,8 +356,8 @@ export default function InventoryPvClient() {
           pv_id: pvId,
           category_id: categoryId,
           subcategory_id: subcategoryId || null,
-          inventory_date: inventoryDate, // ISO
-          operatore: operatore.trim(), // ✅ NEW
+          inventory_date: inventoryDate,
+          operatore: operatore.trim(),
           rows,
         }),
       });
@@ -288,15 +380,10 @@ export default function InventoryPvClient() {
 
   return (
     <div className="space-y-4">
-      {/* ✅ operatore (obbligatorio) */}
+      {/* operatore */}
       <div className="rounded-2xl border bg-white p-4">
         <label className="block text-sm font-medium mb-2">Nome Operatore</label>
-        <input
-          className="w-full rounded-xl border p-3"
-          placeholder="Es. Mario Rossi"
-          value={operatore}
-          onChange={(e) => setOperatore(e.target.value)}
-        />
+        <input className="w-full rounded-xl border p-3" placeholder="Es. Mario Rossi" value={operatore} onChange={(e) => setOperatore(e.target.value)} />
         <p className="text-xs text-gray-500 mt-1">Obbligatorio per salvare.</p>
       </div>
 
@@ -331,12 +418,7 @@ export default function InventoryPvClient() {
 
         <div>
           <label className="block text-sm font-medium mb-2">Data inventario</label>
-          <input
-            type="date"
-            className="w-full rounded-xl border p-3 bg-white"
-            value={inventoryDate}
-            onChange={(e) => setInventoryDate(e.target.value)}
-          />
+          <input type="date" className="w-full rounded-xl border p-3 bg-white" value={inventoryDate} onChange={(e) => setInventoryDate(e.target.value)} />
           <div className="text-xs text-gray-500 mt-1">
             Formato mostrato: <b>{formatDateIT(inventoryDate)}</b>
           </div>
@@ -353,23 +435,83 @@ export default function InventoryPvClient() {
         </button>
       </div>
 
-      {/* ✅ ricerca (client-side) */}
+      {/* ricerca + scan */}
       <div className="rounded-2xl border bg-white p-4">
-        <label className="block text-sm font-medium mb-2">Cerca</label>
+        <label className="block text-sm font-medium mb-2">Cerca / Scansiona (Invio)</label>
         <input
           className="w-full rounded-xl border p-3"
-          placeholder="Cerca per codice o descrizione..."
+          placeholder="Cerca per codice, descrizione o barcode... (usa Enter dopo scan)"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              handleScanEnter();
+            }
+          }}
         />
         <div className="mt-2 text-sm text-gray-600">
           Visualizzati: <b>{filteredItems.length}</b> / {items.length}
         </div>
       </div>
 
+      {/* SCANSIONATI */}
+      <div className="rounded-2xl border bg-white p-4 space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-medium">Scansionati</div>
+            <div className="text-sm text-gray-600">
+              Tot. Scansionati: <b>{totScannedPieces}</b> pezzi (<b>{totScannedDistinct}</b> articoli)
+            </div>
+          </div>
+
+          <button
+            className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-60"
+            disabled={scannedIds.length === 0}
+            onClick={() => setScannedIds([])}
+          >
+            Svuota lista
+          </button>
+        </div>
+
+        {scannedItems.length === 0 ? (
+          <div className="text-sm text-gray-500">Nessun articolo scansionato.</div>
+        ) : (
+          <div className="overflow-auto rounded-xl border">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="text-left p-3 w-40">Codice</th>
+                  <th className="text-left p-3">Descrizione</th>
+                  <th className="text-right p-3 w-32">Quantità</th>
+                </tr>
+              </thead>
+              <tbody>
+                {scannedItems.map((it) => (
+                  <tr key={it.id} className="border-t">
+                    <td className="p-3 font-medium">{it.code}</td>
+                    <td className="p-3">{it.description}</td>
+                    <td className="p-3 text-right">
+                      <input
+                        className="w-24 rounded-xl border p-2 text-right"
+                        inputMode="numeric"
+                        placeholder="0"
+                        value={qtyMap[it.id] ?? ""}
+                        onChange={(e) => setQty(it.id, e.target.value)}
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
       {msg && <p className="text-green-700 text-sm">{msg}</p>}
       {error && <p className="text-red-600 text-sm">{error}</p>}
 
+      {/* lista completa */}
       <div className="overflow-auto rounded-2xl border bg-white">
         <table className="w-full text-sm">
           <thead className="bg-gray-50">
@@ -390,12 +532,7 @@ export default function InventoryPvClient() {
                     inputMode="numeric"
                     placeholder="(vuoto)"
                     value={qtyMap[it.id] ?? ""}
-                    onChange={(e) =>
-                      setQtyMap((prev) => ({
-                        ...prev,
-                        [it.id]: onlyDigits(e.target.value),
-                      }))
-                    }
+                    onChange={(e) => setQty(it.id, e.target.value)}
                   />
                 </td>
               </tr>
@@ -413,6 +550,16 @@ export default function InventoryPvClient() {
     </div>
   );
 }
+
+
+
+
+
+
+
+
+
+
 
 
 

@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 type Pv = { id: string; code: string; name: string; is_active?: boolean };
 type Category = { id: string; name: string; slug?: string; is_active?: boolean };
 type Subcategory = { id: string; category_id: string; name: string; slug?: string; is_active?: boolean };
-type Item = { id: string; code: string; description: string; is_active: boolean };
+type Item = { id: string; code: string; description: string; barcode?: string | null; is_active: boolean };
 
 type InventoryRow = {
   id: string;
@@ -25,6 +25,10 @@ function todayISO() {
 
 function isIsoDate(s: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test((s || "").trim());
+}
+
+function onlyDigits(v: string) {
+  return v.replace(/[^\d]/g, "");
 }
 
 export default function InventoryClient() {
@@ -49,24 +53,58 @@ export default function InventoryClient() {
   // qty per item_id
   const [qtyMap, setQtyMap] = useState<Record<string, string>>({});
 
-  // filtro ricerca (client-side)
+  // ✅ ricerca + scan
   const [search, setSearch] = useState("");
 
+  // ✅ lista “Scansionati”
+  const [scannedIds, setScannedIds] = useState<string[]>([]);
+
   const canLoad = useMemo(() => !!pvId && !!categoryId && !!inventoryDate, [pvId, categoryId, inventoryDate]);
-  const canSave = useMemo(
-    () => !!operatore.trim() && !!pvId && !!categoryId && items.length > 0,
-    [operatore, pvId, categoryId, items.length]
-  );
+  const canSave = useMemo(() => !!operatore.trim() && !!pvId && !!categoryId && items.length > 0, [operatore, pvId, categoryId, items.length]);
 
   const filteredItems = useMemo(() => {
-    const t = search.trim().toLowerCase();
-    if (!t) return items;
+    const raw = search.trim();
+    if (!raw) return items;
+
+    const t = raw.toLowerCase();
+    const digits = onlyDigits(raw);
+    const isLikelyBarcode = digits.length >= 8;
+
+    if (isLikelyBarcode) {
+      const exact = items.filter((it) => {
+        const bcDigits = onlyDigits(String(it.barcode ?? ""));
+        const codeDigits = onlyDigits(String(it.code ?? ""));
+        return (bcDigits && bcDigits === digits) || (codeDigits && codeDigits === digits);
+      });
+      if (exact.length > 0) return exact;
+
+      return items.filter((it) => {
+        const code = String(it.code || "").toLowerCase();
+        const desc = String(it.description || "").toLowerCase();
+        const bc = String(it.barcode || "").toLowerCase();
+        const bcDigits = onlyDigits(String(it.barcode ?? ""));
+        return code.includes(t) || desc.includes(t) || bc.includes(t) || (digits && bcDigits.includes(digits));
+      });
+    }
+
     return items.filter((it) => {
       const code = String(it.code || "").toLowerCase();
       const desc = String(it.description || "").toLowerCase();
-      return code.includes(t) || desc.includes(t);
+      const bc = String(it.barcode || "").toLowerCase();
+      return code.includes(t) || desc.includes(t) || bc.includes(t);
     });
   }, [items, search]);
+
+  const scannedItems = useMemo(() => {
+    const set = new Set(scannedIds);
+    return items.filter((it) => set.has(it.id));
+  }, [items, scannedIds]);
+
+  const totScannedPieces = useMemo(() => {
+    return scannedItems.reduce((sum, it) => sum + (Number(qtyMap[it.id]) || 0), 0);
+  }, [scannedItems, qtyMap]);
+
+  const totScannedDistinct = scannedItems.length;
 
   async function loadPvs() {
     const res = await fetch("/api/pvs/list", { cache: "no-store" });
@@ -99,6 +137,7 @@ export default function InventoryClient() {
     setItems([]);
     setQtyMap({});
     setSearch("");
+    setScannedIds([]);
 
     if (!nextCategoryId) return;
 
@@ -106,8 +145,8 @@ export default function InventoryClient() {
     params.set("category_id", nextCategoryId);
     if (nextSubcategoryId) params.set("subcategory_id", nextSubcategoryId);
 
-    // ✅ IMPORTANTISSIMO: altrimenti /api/items/list ti tronca a 200 righe
-    params.set("limit", "500");
+    // ✅ cap 1000
+    params.set("limit", "1000");
 
     const res = await fetch(`/api/items/list?${params.toString()}`, { cache: "no-store" });
     const json = await res.json().catch(() => null);
@@ -122,13 +161,7 @@ export default function InventoryClient() {
   }
 
   // Prefill inventario esistente
-  async function loadExistingInventory(
-    nextPvId: string,
-    nextCategoryId: string,
-    nextSubcategoryId: string,
-    nextDate: string,
-    currentItems: Item[]
-  ) {
+  async function loadExistingInventory(nextPvId: string, nextCategoryId: string, nextSubcategoryId: string, nextDate: string, currentItems: Item[]) {
     if (!nextPvId || !nextCategoryId || !nextDate) return;
 
     const params = new URLSearchParams();
@@ -156,6 +189,59 @@ export default function InventoryClient() {
       });
       return next;
     });
+  }
+
+  function setQty(itemId: string, v: string) {
+    const cleaned = onlyDigits(v);
+    setQtyMap((prev) => ({ ...prev, [itemId]: cleaned }));
+  }
+
+  function incrementQty(itemId: string, delta: number = 1) {
+    setQtyMap((prev) => {
+      const current = Number(prev[itemId] || "0") || 0;
+      const next = Math.max(0, current + delta);
+      return { ...prev, [itemId]: String(next) };
+    });
+  }
+
+  function handleScanEnter() {
+    const raw = search.trim();
+    if (!raw) return;
+
+    const digits = onlyDigits(raw);
+    const isLikelyBarcode = digits.length >= 8;
+
+    let found: Item | undefined;
+
+    if (isLikelyBarcode) {
+      found = items.find((it) => {
+        const bcDigits = onlyDigits(String(it.barcode ?? ""));
+        const codeDigits = onlyDigits(String(it.code ?? ""));
+        return (bcDigits && bcDigits === digits) || (codeDigits && codeDigits === digits);
+      });
+    } else {
+      const t = raw.toLowerCase();
+      found = items.find((it) => String(it.code || "").toLowerCase() === t);
+    }
+
+    // sempre svuoto
+    setSearch("");
+
+    if (!found) {
+      setMsg(null);
+      setError("Barcode non trovato.");
+      return;
+    }
+
+    setError(null);
+    setMsg(null);
+
+    setScannedIds((prev) => {
+      if (prev.includes(found!.id)) return prev;
+      return [found!.id, ...prev];
+    });
+
+    incrementQty(found.id, 1);
   }
 
   useEffect(() => {
@@ -195,7 +281,7 @@ export default function InventoryClient() {
       setError(null);
       try {
         await loadSubcategories(categoryId);
-        await loadItems(categoryId, ""); // reset subcat
+        await loadItems(categoryId, "");
       } catch (e: any) {
         setError(e?.message || "Errore");
       }
@@ -233,11 +319,6 @@ export default function InventoryClient() {
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pvId, categoryId, subcategoryId, inventoryDate, items.length]);
-
-  function setQty(itemId: string, v: string) {
-    const cleaned = v.replace(/[^\d]/g, "");
-    setQtyMap((prev) => ({ ...prev, [itemId]: cleaned }));
-  }
 
   async function save(forceOverwrite: boolean = false, overrideDate?: string) {
     if (!canSave) return;
@@ -382,12 +463,71 @@ export default function InventoryClient() {
         </button>
       </div>
 
+      {/* ricerca + scan */}
       <div className="rounded-2xl border bg-white p-4">
-        <label className="block text-sm font-medium mb-2">Cerca</label>
-        <input className="w-full rounded-xl border p-3" placeholder="Cerca per codice o descrizione..." value={search} onChange={(e) => setSearch(e.target.value)} />
+        <label className="block text-sm font-medium mb-2">Cerca / Scansiona (Invio)</label>
+        <input
+          className="w-full rounded-xl border p-3"
+          placeholder="Cerca per codice, descrizione o barcode... (usa Enter dopo scan)"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              handleScanEnter();
+            }
+          }}
+        />
         <div className="mt-2 text-sm text-gray-600">
           Visualizzati: <b>{filteredItems.length}</b> / {items.length}
         </div>
+      </div>
+
+      {/* SCANSIONATI */}
+      <div className="rounded-2xl border bg-white p-4 space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-medium">Scansionati</div>
+            <div className="text-sm text-gray-600">
+              Tot. Scansionati: <b>{totScannedPieces}</b> pezzi (<b>{totScannedDistinct}</b> articoli)
+            </div>
+          </div>
+
+          <button
+            className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-60"
+            disabled={scannedIds.length === 0}
+            onClick={() => setScannedIds([])}
+          >
+            Svuota lista
+          </button>
+        </div>
+
+        {scannedItems.length === 0 ? (
+          <div className="text-sm text-gray-500">Nessun articolo scansionato.</div>
+        ) : (
+          <div className="overflow-auto rounded-xl border">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="text-left p-3 w-40">Codice</th>
+                  <th className="text-left p-3">Descrizione</th>
+                  <th className="text-left p-3 w-40">Quantità</th>
+                </tr>
+              </thead>
+              <tbody>
+                {scannedItems.map((it) => (
+                  <tr key={it.id} className="border-t">
+                    <td className="p-3 font-medium">{it.code}</td>
+                    <td className="p-3">{it.description}</td>
+                    <td className="p-3">
+                      <input className="w-full rounded-xl border p-2" inputMode="numeric" placeholder="0" value={qtyMap[it.id] ?? ""} onChange={(e) => setQty(it.id, e.target.value)} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {msg && <p className="text-sm text-green-700">{msg}</p>}
@@ -424,13 +564,7 @@ export default function InventoryClient() {
                 <td className="p-3 font-medium">{it.code}</td>
                 <td className="p-3">{it.description}</td>
                 <td className="p-3">
-                  <input
-                    className="w-full rounded-xl border p-2"
-                    inputMode="numeric"
-                    placeholder="0"
-                    value={qtyMap[it.id] ?? ""}
-                    onChange={(e) => setQty(it.id, e.target.value)}
-                  />
+                  <input className="w-full rounded-xl border p-2" inputMode="numeric" placeholder="0" value={qtyMap[it.id] ?? ""} onChange={(e) => setQty(it.id, e.target.value)} />
                 </td>
               </tr>
             ))}
@@ -440,6 +574,13 @@ export default function InventoryClient() {
     </div>
   );
 }
+
+
+
+
+
+
+
 
 
 

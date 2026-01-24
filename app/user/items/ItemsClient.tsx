@@ -10,6 +10,7 @@ type Item = {
   id: string;
   code: string;
   description: string;
+  barcode?: string | null; // ✅ NEW
   is_active: boolean;
   category_id: string | null;
   subcategory_id: string | null;
@@ -63,8 +64,9 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   const [editOpen, setEditOpen] = useState(false);
   const [editItem, setEditItem] = useState<Item | null>(null);
   const [editDescription, setEditDescription] = useState("");
+  const [editBarcode, setEditBarcode] = useState<string>(""); // ✅ NEW
   const [editPesoKg, setEditPesoKg] = useState<string>("");
-  const [editConfDa, setEditConfDa] = useState<string>(""); // ✅ NEW
+  const [editConfDa, setEditConfDa] = useState<string>(""); // ✅
   const [editPrezzo, setEditPrezzo] = useState<string>("");
   const [savingEdit, setSavingEdit] = useState(false);
 
@@ -81,10 +83,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   const [newSubName, setNewSubName] = useState("");
   const [newSubCatId, setNewSubCatId] = useState("");
 
-  const selectedCategory = useMemo(
-    () => categories.find((c) => c.id === categoryId) || null,
-    [categories, categoryId]
-  );
+  const selectedCategory = useMemo(() => categories.find((c) => c.id === categoryId) || null, [categories, categoryId]);
   const showTabacchiCols = useMemo(() => isTabacchiCategory(selectedCategory), [selectedCategory]);
 
   const qs = useMemo(() => {
@@ -113,9 +112,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
       setSubcategories([]);
       return;
     }
-    const res = await fetch(`/api/subcategories/list?category_id=${encodeURIComponent(catId)}`, {
-      cache: "no-store",
-    });
+    const res = await fetch(`/api/subcategories/list?category_id=${encodeURIComponent(catId)}`, { cache: "no-store" });
     const json = await res.json().catch(() => null);
     if (res.ok && json?.ok && Array.isArray(json?.rows)) setSubcategories(json.rows);
   }
@@ -176,7 +173,16 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
 
       if (!res.ok || !json?.ok) throw new Error(json?.error || "Import fallito");
 
-      setMsg(`Import OK — Tot: ${json.total}, Inseriti: ${json.inserted}, Aggiornati: ${json.updated}`);
+      // ✅ supporto import barcode (mode=barcode) + import normale
+      if (json.mode === "barcode") {
+        setMsg(`Import BARCODE OK — Tot: ${json.total}, Aggiornati: ${json.updated}, Non trovati: ${json.not_found}`);
+      } else {
+        // compat legacy/new
+        const inserted = json.inserted ?? 0;
+        const updated = json.updated ?? 0;
+        setMsg(`Import OK — Tot: ${json.total}, Inseriti: ${inserted}, Aggiornati: ${updated}`);
+      }
+
       setFile(null);
       await loadItems();
     } catch (e: any) {
@@ -212,8 +218,9 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     setError(null);
     setEditItem(item);
     setEditDescription(item.description ?? "");
+    setEditBarcode(item.barcode == null ? "" : String(item.barcode)); // ✅ NEW
     setEditPesoKg(item.peso_kg == null ? "" : String(item.peso_kg));
-    setEditConfDa(item.conf_da == null ? "" : String(item.conf_da)); // ✅ NEW
+    setEditConfDa(item.conf_da == null ? "" : String(item.conf_da));
     setEditPrezzo(item.prezzo_vendita_eur == null ? "" : String(item.prezzo_vendita_eur));
     setEditOpen(true);
   }
@@ -240,6 +247,12 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     return Math.max(0, Math.trunc(n));
   }
 
+  function normalizeNullableText(v: string): string | null {
+    const s = String(v ?? "").trim();
+    if (!s) return null;
+    return s;
+  }
+
   async function saveEdit() {
     if (!isAdmin || !editItem) return;
 
@@ -257,8 +270,9 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
       const payload: any = {
         id: editItem.id,
         description: nextDesc,
+        barcode: normalizeNullableText(editBarcode), // ✅ NEW
         peso_kg: editPesoKg.trim() === "" ? null : normalizeNullableNumber(editPesoKg),
-        conf_da: editConfDa.trim() === "" ? null : normalizeNullableInt(editConfDa), // ✅ NEW
+        conf_da: editConfDa.trim() === "" ? null : normalizeNullableInt(editConfDa),
         prezzo_vendita_eur: editPrezzo.trim() === "" ? null : normalizeNullableNumber(editPrezzo),
       };
 
@@ -329,14 +343,8 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     <div className="space-y-4">
       {/* MODAL MODIFICA */}
       {editOpen && editItem && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-          onMouseDown={closeEditModal}
-        >
-          <div
-            className="w-full max-w-xl rounded-2xl bg-white p-5 shadow-xl"
-            onMouseDown={(e) => e.stopPropagation()}
-          >
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onMouseDown={closeEditModal}>
+          <div className="w-full max-w-xl rounded-2xl bg-white p-5 shadow-xl" onMouseDown={(e) => e.stopPropagation()}>
             <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="text-lg font-semibold">Modifica articolo</div>
@@ -344,11 +352,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
                   Codice: <b>{editItem.code}</b>
                 </div>
               </div>
-              <button
-                className="rounded-xl border px-3 py-2 hover:bg-gray-50"
-                onClick={closeEditModal}
-                disabled={savingEdit}
-              >
+              <button className="rounded-xl border px-3 py-2 hover:bg-gray-50" onClick={closeEditModal} disabled={savingEdit}>
                 Chiudi
               </button>
             </div>
@@ -356,11 +360,19 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
             <div className="mt-4 grid grid-cols-1 md:grid-cols-4 gap-3">
               <div className="md:col-span-4">
                 <label className="block text-sm font-medium mb-2">Descrizione</label>
+                <input className="w-full rounded-xl border p-3" value={editDescription} onChange={(e) => setEditDescription(e.target.value)} />
+              </div>
+
+              <div className="md:col-span-4">
+                <label className="block text-sm font-medium mb-2">Barcode</label>
                 <input
                   className="w-full rounded-xl border p-3"
-                  value={editDescription}
-                  onChange={(e) => setEditDescription(e.target.value)}
+                  inputMode="numeric"
+                  placeholder="Es. 8001234567890"
+                  value={editBarcode}
+                  onChange={(e) => setEditBarcode(e.target.value)}
                 />
+                <div className="mt-1 text-xs text-gray-500">Lascia vuoto per NULL.</div>
               </div>
 
               <div>
@@ -400,11 +412,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
               </div>
 
               <div className="flex items-end">
-                <button
-                  className="w-full rounded-xl bg-slate-900 text-white px-4 py-3 disabled:opacity-60"
-                  onClick={saveEdit}
-                  disabled={savingEdit}
-                >
+                <button className="w-full rounded-xl bg-slate-900 text-white px-4 py-3 disabled:opacity-60" onClick={saveEdit} disabled={savingEdit}>
                   {savingEdit ? "Salvo..." : "Salva"}
                 </button>
               </div>
@@ -418,22 +426,13 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
         <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
           <form onSubmit={createCategory} className="space-y-2">
             <div className="font-semibold">Crea Categoria</div>
-            <input
-              className="w-full rounded-xl border p-3"
-              placeholder="Es. Food"
-              value={newCatName}
-              onChange={(e) => setNewCatName(e.target.value)}
-            />
+            <input className="w-full rounded-xl border p-3" placeholder="Es. Food" value={newCatName} onChange={(e) => setNewCatName(e.target.value)} />
             <button className="rounded-xl bg-slate-900 text-white px-4 py-2">Crea</button>
           </form>
 
           <form onSubmit={createSubcategory} className="space-y-2">
             <div className="font-semibold">Crea Sottocategoria</div>
-            <select
-              className="w-full rounded-xl border p-3 bg-white"
-              value={newSubCatId}
-              onChange={(e) => setNewSubCatId(e.target.value)}
-            >
+            <select className="w-full rounded-xl border p-3 bg-white" value={newSubCatId} onChange={(e) => setNewSubCatId(e.target.value)}>
               <option value="">— Seleziona categoria padre —</option>
               {categories.map((c) => (
                 <option key={c.id} value={c.id}>
@@ -441,12 +440,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
                 </option>
               ))}
             </select>
-            <input
-              className="w-full rounded-xl border p-3"
-              placeholder="Es. Cornetti"
-              value={newSubName}
-              onChange={(e) => setNewSubName(e.target.value)}
-            />
+            <input className="w-full rounded-xl border p-3" placeholder="Es. Cornetti" value={newSubName} onChange={(e) => setNewSubName(e.target.value)} />
             <button className="rounded-xl bg-slate-900 text-white px-4 py-2">Crea</button>
           </form>
         </div>
@@ -456,11 +450,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
       <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-5 gap-3">
         <div className="md:col-span-2">
           <label className="block text-sm font-medium mb-2">Categoria</label>
-          <select
-            className="w-full rounded-xl border p-3 bg-white"
-            value={categoryId}
-            onChange={(e) => setCategoryId(e.target.value)}
-          >
+          <select className="w-full rounded-xl border p-3 bg-white" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
             <option value="">— Seleziona —</option>
             {categories.map((c) => (
               <option key={c.id} value={c.id}>
@@ -489,11 +479,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
 
         <div>
           <label className="block text-sm font-medium mb-2">Stato</label>
-          <select
-            className="w-full rounded-xl border p-3 bg-white"
-            value={active}
-            onChange={(e) => setActive(e.target.value as any)}
-          >
+          <select className="w-full rounded-xl border p-3 bg-white" value={active} onChange={(e) => setActive(e.target.value as any)}>
             <option value="1">Attivi</option>
             <option value="0">Disattivi</option>
             <option value="all">Tutti</option>
@@ -502,12 +488,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
 
         <div className="md:col-span-5">
           <label className="block text-sm font-medium mb-2">Cerca</label>
-          <input
-            className="w-full rounded-xl border p-3"
-            placeholder="Codice o descrizione..."
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-          />
+          <input className="w-full rounded-xl border p-3" placeholder="Codice o descrizione..." value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
       </div>
 
@@ -517,14 +498,9 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
           <div className="flex items-center justify-between">
             <div>
               <div className="font-semibold">Import articoli (Excel)</div>
-              <div className="text-sm text-gray-600">
-                Seleziona categoria/sottocategoria e importa. (Excel: Codice/Descrizione)
-              </div>
+              <div className="text-sm text-gray-600">Seleziona categoria/sottocategoria e importa. (Excel: Codice/Descrizione oppure Codice/Barcode)</div>
             </div>
-            <button
-              className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60"
-              disabled={!file || importing}
-            >
+            <button className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60" disabled={!file || importing}>
               {importing ? "Importo..." : "Importa"}
             </button>
           </div>
@@ -548,6 +524,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
             <tr>
               <th className="text-left p-3">Codice</th>
               <th className="text-left p-3">Descrizione</th>
+              <th className="text-left p-3 w-48">Barcode</th>
 
               {/* ✅ SOLO TABACCHI */}
               {showTabacchiCols && <th className="text-right p-3 w-32">Peso (kg)</th>}
@@ -561,7 +538,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
           <tbody>
             {loading && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={showTabacchiCols ? 7 : 4}>
+                <td className="p-3 text-gray-500" colSpan={showTabacchiCols ? 8 : 5}>
                   Caricamento...
                 </td>
               </tr>
@@ -569,7 +546,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
 
             {!loading && rows.length === 0 && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={showTabacchiCols ? 7 : 4}>
+                <td className="p-3 text-gray-500" colSpan={showTabacchiCols ? 8 : 5}>
                   Nessun articolo trovato.
                 </td>
               </tr>
@@ -579,13 +556,12 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
               <tr key={r.id} className="border-t">
                 <td className="p-3 font-medium">{r.code}</td>
                 <td className="p-3">{r.description}</td>
+                <td className="p-3 font-mono text-xs">{r.barcode || "—"}</td>
 
                 {/* ✅ SOLO TABACCHI */}
                 {showTabacchiCols && <td className="p-3 text-right font-medium">{formatPesoKg(r.peso_kg)}</td>}
                 {showTabacchiCols && <td className="p-3 text-right font-medium">{formatConfDa(r.conf_da)}</td>}
-                {showTabacchiCols && (
-                  <td className="p-3 text-right font-medium">{formatEuro(r.prezzo_vendita_eur)}</td>
-                )}
+                {showTabacchiCols && <td className="p-3 text-right font-medium">{formatEuro(r.prezzo_vendita_eur)}</td>}
 
                 <td className="p-3">{r.is_active ? "SI" : "NO"}</td>
                 <td className="p-3">
@@ -610,6 +586,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     </div>
   );
 }
+
 
 
 
