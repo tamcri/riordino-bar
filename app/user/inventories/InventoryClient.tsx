@@ -146,8 +146,9 @@ export default function InventoryClient() {
     setScannedIds([]);
   }
 
-  function handleScanEnter() {
-    const raw = search.trim();
+  // ✅ NUOVO: stessa logica di handleScanEnter, ma prende un rawInput (tablet-friendly)
+  function handleScanFromRaw(rawInput: string) {
+    const raw = (rawInput || "").trim();
     if (!raw) return;
 
     const digits = onlyDigits(raw);
@@ -166,6 +167,7 @@ export default function InventoryClient() {
       found = items.find((it) => String(it.code || "").toLowerCase() === t);
     }
 
+    // sempre svuoto
     setSearch("");
 
     if (!found) {
@@ -183,6 +185,10 @@ export default function InventoryClient() {
     });
 
     incrementQty(found.id, 1);
+  }
+
+  function handleScanEnter() {
+    handleScanFromRaw(search);
   }
 
   async function loadPvs() {
@@ -469,7 +475,15 @@ export default function InventoryClient() {
           className="w-full rounded-xl border p-3"
           placeholder="Cerca per codice, descrizione o barcode... (usa Enter dopo scan)"
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(e) => {
+            const v = e.target.value;
+            setSearch(v);
+
+            // ✅ Tablet/Android scanner USB: spesso arriva un terminatore (\n/\r o \t)
+            if (/[\r\n\t]/.test(v)) {
+              handleScanFromRaw(v.replace(/[\r\n\t]+/g, " "));
+            }
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
@@ -569,6 +583,8 @@ export default function InventoryClient() {
     </div>
   );
 }
+
+
 
 
 

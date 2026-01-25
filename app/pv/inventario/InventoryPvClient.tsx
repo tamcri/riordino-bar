@@ -155,8 +155,11 @@ export default function InventoryPvClient() {
     setScannedIds([]);
   }
 
-  function handleScanEnter() {
-    const raw = search.trim();
+  // ✅ NUOVO: gestione scan "tablet-friendly"
+  // Molti scanner USB su Android non triggerano onKeyDown Enter come su PC,
+  // ma inseriscono direttamente un \n/\r o \t nel valore dell'input.
+  function handleScanFromRaw(rawInput: string) {
+    const raw = (rawInput || "").trim();
     if (!raw) return;
 
     const digits = onlyDigits(raw);
@@ -192,6 +195,10 @@ export default function InventoryPvClient() {
     });
 
     incrementQty(found.id, 1);
+  }
+
+  function handleScanEnter() {
+    handleScanFromRaw(search);
   }
 
   async function loadMe() {
@@ -443,7 +450,16 @@ export default function InventoryPvClient() {
           className="w-full rounded-xl border p-3"
           placeholder="Cerca per codice, descrizione o barcode... (usa Enter dopo scan)"
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(e) => {
+            const v = e.target.value;
+            setSearch(v);
+
+            // ✅ Tablet/Android scanner USB: spesso arriva un terminatore (\n/\r o \t)
+            // Appena lo vedo, processo lo scan e svuoto campo (lo fa già handleScanFromRaw)
+            if (/[\r\n\t]/.test(v)) {
+              handleScanFromRaw(v.replace(/[\r\n\t]+/g, " "));
+            }
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
@@ -534,6 +550,8 @@ export default function InventoryPvClient() {
     </div>
   );
 }
+
+
 
 
 
