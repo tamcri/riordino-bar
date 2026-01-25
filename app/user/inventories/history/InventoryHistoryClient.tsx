@@ -32,6 +32,10 @@ type InventoryLine = {
   code: string;
   description: string;
   qty: number;
+
+  // ✅ se /api/inventories/rows lo restituisce, calcoliamo il valore.
+  // Se non arriva, mostriamo "—".
+  prezzo_vendita_eur?: number | null;
 };
 
 type MeResponse = {
@@ -60,6 +64,10 @@ function formatDateIT(iso: string) {
 function todayISO() {
   const d = new Date();
   return d.toISOString().slice(0, 10);
+}
+
+function formatEUR(n: number) {
+  return new Intl.NumberFormat("it-IT", { style: "currency", currency: "EUR" }).format(n);
 }
 
 /**
@@ -152,6 +160,24 @@ export default function InventoryHistoryClient() {
       return code.includes(t) || desc.includes(t);
     });
   }, [detail, searchDetail]);
+
+  // ✅ NEW: Articoli + Valore (calcolati sul dettaglio caricato)
+  const detailArticoli = useMemo(() => {
+    return detail.reduce((n, r) => n + ((Number(r.qty) || 0) > 0 ? 1 : 0), 0);
+  }, [detail]);
+
+  const detailValueEur = useMemo(() => {
+    return detail.reduce((sum, r) => {
+      const q = Number(r.qty) || 0;
+      const p = Number((r as any).prezzo_vendita_eur);
+      if (!Number.isFinite(p)) return sum;
+      return sum + q * p;
+    }, 0);
+  }, [detail]);
+
+  const hasAnyPriceInDetail = useMemo(() => {
+    return detail.some((r) => Number.isFinite(Number((r as any).prezzo_vendita_eur)));
+  }, [detail]);
 
   async function fetchMe(): Promise<MeState> {
     const { ok, data, status, rawText } = await fetchJsonSafe<MeResponse>("/api/me");
@@ -470,28 +496,25 @@ export default function InventoryHistoryClient() {
       if (g.subcategory_id) params.set("subcategory_id", g.subcategory_id);
 
       const res = await fetch(`/api/inventories/delete?${params.toString()}`, { method: "DELETE" });
-const text = await res.text().catch(() => "");
+      const text = await res.text().catch(() => "");
 
-let json: any = null;
-try {
-  json = text ? JSON.parse(text) : null;
-} catch {
-  json = null;
-}
+      let json: any = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        json = null;
+      }
 
-if (!res.ok) {
-  // se Next ti restituisce HTML (404 ecc.), non lo spariamo in UI
-  const looksHtml = (text || "").trim().startsWith("<!DOCTYPE") || (text || "").includes("<html");
-  if (looksHtml) throw new Error("Errore eliminazione: endpoint /api/inventories/delete non trovato o risposta non valida.");
-  throw new Error(json?.error || text || `Errore eliminazione (HTTP ${res.status})`);
-}
+      if (!res.ok) {
+        const looksHtml = (text || "").trim().startsWith("<!DOCTYPE") || (text || "").includes("<html");
+        if (looksHtml) throw new Error("Errore eliminazione: endpoint /api/inventories/delete non trovato o risposta non valida.");
+        throw new Error(json?.error || text || `Errore eliminazione (HTTP ${res.status})`);
+      }
 
-if (!json?.ok) {
-  throw new Error(json?.error || "Eliminazione fallita");
-}
+      if (!json?.ok) {
+        throw new Error(json?.error || "Eliminazione fallita");
+      }
 
-
-      // chiudi eventuali selezioni/menu
       setActionsOpenKey(null);
       setMenuPos(null);
 
@@ -725,7 +748,6 @@ if (!json?.ok) {
                   <td className="p-3 text-right font-semibold">{r.qty_sum}</td>
                   <td className="p-3">{r.created_by_username ?? "—"}</td>
 
-                  {/* ✅ Azioni: come Storico Ordini: Dettaglio + ... (menu con Excel/Compara/Elimina) */}
                   <td className="p-3">
                     <div className="inline-flex items-center gap-2 whitespace-nowrap">
                       <button
@@ -758,7 +780,6 @@ if (!json?.ok) {
         </table>
       </div>
 
-      {/* ✅ MENU in portal: non viene clippato dallo scroll (Excel + Compara + Elimina) */}
       {actionsOpenKey &&
         menuPos &&
         typeof document !== "undefined" &&
@@ -836,10 +857,13 @@ if (!json?.ok) {
                 Dettaglio inventario — {formatDateIT(selected.inventory_date)} — {selected.pv_code} —{" "}
                 {selected.category_name}
               </div>
+
               <div className="text-sm text-gray-600">
                 Operatore:{" "}
                 <b>{(selected.operatore || "").trim() ? selected.operatore : "—"}</b> — Righe:{" "}
-                <b>{selected.lines_count}</b> — Pezzi: <b>{selected.qty_sum}</b>
+                <b>{selected.lines_count}</b> — Articoli: <b>{detailArticoli}</b> — Pezzi:{" "}
+                <b>{selected.qty_sum}</b> — Valore:{" "}
+                <b>{hasAnyPriceInDetail ? formatEUR(detailValueEur) : "—"}</b>
               </div>
             </div>
 
@@ -971,6 +995,7 @@ if (!json?.ok) {
     </div>
   );
 }
+
 
 
 

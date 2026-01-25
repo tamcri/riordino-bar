@@ -106,7 +106,8 @@ export async function GET(req: Request) {
   try {
     let q = supabaseAdmin
       .from("inventories")
-      .select("id, item_id, qty, created_by_username, items:items(code, description)")
+      // ✅ aggiungo prezzo_vendita_eur dagli items
+      .select("id, item_id, qty, created_by_username, items:items(code, description, prezzo_vendita_eur)")
       .eq("pv_id", effectivePvId)
       .eq("category_id", category_id)
       .eq("inventory_date", inventory_date);
@@ -135,6 +136,8 @@ export async function GET(req: Request) {
         code: r?.items?.code ?? "",
         description: r?.items?.description ?? "",
         qty: Number(r?.qty ?? 0),
+        // ✅ esposto per calcolo "Valore" nello storico
+        prezzo_vendita_eur: r?.items?.prezzo_vendita_eur ?? null,
       }))
       .filter((x) => Number.isFinite(x.qty) && x.qty > 0)
       .sort((a, b) => (a.code || "").localeCompare(b.code || ""));
@@ -145,6 +148,7 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: e?.message || "TypeError: fetch failed" }, { status: 500 });
   }
 }
+
 
 
 

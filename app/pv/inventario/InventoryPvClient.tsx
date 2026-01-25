@@ -27,8 +27,12 @@ type MeResponse = {
 
 function todayISO() {
   const d = new Date();
-  return d.toISOString().slice(0, 10);
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
 }
+
 
 function onlyDigits(v: string) {
   return v.replace(/[^\d]/g, "");
@@ -58,6 +62,11 @@ export default function InventoryPvClient() {
   const [inventoryDate, setInventoryDate] = useState(todayISO()); // ISO per input date
 
   const [qtyMap, setQtyMap] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+  setInventoryDate(todayISO());
+}, []);
+
 
   // ✅ operatore
   const [operatore, setOperatore] = useState("");
@@ -132,7 +141,20 @@ export default function InventoryPvClient() {
 
   function setQty(itemId: string, v: string) {
     const cleaned = onlyDigits(v);
+
     setQtyMap((prev) => ({ ...prev, [itemId]: cleaned }));
+
+    // ✅ Se metto qty manuale (>0) lo considero "scansionato"
+    const n = Number(cleaned || "0") || 0;
+
+    setScannedIds((prev) => {
+      const has = prev.includes(itemId);
+
+      if (n > 0 && !has) return [itemId, ...prev];
+      if (n <= 0 && has) return prev.filter((id) => id !== itemId);
+
+      return prev;
+    });
   }
 
   function incrementQty(itemId: string, delta: number = 1) {
@@ -143,23 +165,20 @@ export default function InventoryPvClient() {
     });
   }
 
-  // ✅ FIX: svuota lista + azzera qty SOLO degli scansionati
+  // ✅ svuota lista + azzera qty SOLO degli scansionati
   function clearScannedList() {
     setQtyMap((prev) => {
       const next = { ...prev };
       scannedIds.forEach((id) => {
-        next[id] = "";
+        next[id] = "0";
       });
       return next;
     });
     setScannedIds([]);
   }
 
-  // ✅ NUOVO: gestione scan "tablet-friendly"
-  // Molti scanner USB su Android non triggerano onKeyDown Enter come su PC,
-  // ma inseriscono direttamente un \n/\r o \t nel valore dell'input.
-  function handleScanFromRaw(rawInput: string) {
-    const raw = (rawInput || "").trim();
+  function handleScanEnter() {
+    const raw = search.trim();
     if (!raw) return;
 
     const digits = onlyDigits(raw);
@@ -195,10 +214,6 @@ export default function InventoryPvClient() {
     });
 
     incrementQty(found.id, 1);
-  }
-
-  function handleScanEnter() {
-    handleScanFromRaw(search);
   }
 
   async function loadMe() {
@@ -255,10 +270,12 @@ export default function InventoryPvClient() {
     setItems(rows);
 
     const m: Record<string, string> = {};
-    rows.forEach((it) => (m[it.id] = ""));
+    rows.forEach((it) => (m[it.id] = "0"));
     setQtyMap(m);
+
   }
 
+  // ⚠️ Rimane definita ma NON viene più chiamata in PV:
   async function prefillInventory() {
     if (!pvId || !categoryId || items.length === 0) return;
 
@@ -332,64 +349,79 @@ export default function InventoryPvClient() {
     })();
   }, [subcategoryId]);
 
+  // ✅ FIX DEFINITIVO: in PV NON precompiliamo mai dal DB (altrimenti “sembra memoria” anche dopo riavvio)
   useEffect(() => {
-    (async () => {
-      try {
-        setMsg(null);
-        setError(null);
-        await prefillInventory();
-      } catch {}
-    })();
+    return;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pvId, categoryId, subcategoryId, items.length, inventoryDate]);
 
   async function save() {
-    if (!pvId || !categoryId || items.length === 0) return;
+  if (!pvId || !categoryId || items.length === 0) return;
 
-    if (!operatore.trim()) {
-      setError("Inserisci il Nome Operatore prima di salvare.");
+  if (!operatore.trim()) {
+    setError("Inserisci il Nome Operatore prima di salvare.");
+    setMsg(null);
+    return;
+  }
+
+  setSaving(true);
+  setMsg(null);
+  setError(null);
+
+  try {
+    const rows = items
+      .map((it) => {
+        const v = qtyMap[it.id];
+        if (v === "") return null;
+        return { item_id: it.id, qty: Number(v) };
+      })
+      .filter(Boolean);
+
+    if (rows.length === 0) throw new Error("Inserisci almeno una quantità");
+
+    const res = await fetch("/api/inventories/save", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        pv_id: pvId,
+        category_id: categoryId,
+        subcategory_id: subcategoryId || null,
+        inventory_date: inventoryDate,
+        operatore: operatore.trim(),
+        rows,
+      }),
+    });
+
+    const json = await res.json().catch(() => null);
+
+    // ✅ se inventario già presente: azzera tutto e stop
+    if (res.status === 409 || json?.code === "INVENTORY_ALREADY_EXISTS") {
       setMsg(null);
+      setError(json?.error || "Esiste già un inventario: non è consentito sovrascrivere.");
+
+      // reset “riparti da zero”
+      setOperatore("");
+      setSearch("");
+      setScannedIds([]);
+      setQtyMap((prev) => {
+        const next: Record<string, string> = { ...prev };
+        items.forEach((it) => (next[it.id] = ""));
+        return next;
+      });
+
       return;
     }
 
-    setSaving(true);
-    setMsg(null);
-    setError(null);
+    if (!json?.ok) throw new Error(json?.error || "Errore salvataggio");
 
-    try {
-      const rows = items
-        .map((it) => {
-          const v = qtyMap[it.id];
-          if (v === "") return null;
-          return { item_id: it.id, qty: Number(v) };
-        })
-        .filter(Boolean);
-
-      if (rows.length === 0) throw new Error("Inserisci almeno una quantità");
-
-      const res = await fetch("/api/inventories/save", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          pv_id: pvId,
-          category_id: categoryId,
-          subcategory_id: subcategoryId || null,
-          inventory_date: inventoryDate,
-          operatore: operatore.trim(),
-          rows,
-        }),
-      });
-
-      const json = await res.json();
-      if (!json.ok) throw new Error(json.error || "Errore salvataggio");
-
-      setMsg("Inventario salvato correttamente");
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setSaving(false);
-    }
+    setMsg("Inventario salvato correttamente");
+  } catch (e: any) {
+    setError(e.message);
+  } finally {
+    setSaving(false);
   }
+}
+
 
   if (loading) return <p className="text-gray-500">Caricamento…</p>;
 
@@ -450,16 +482,7 @@ export default function InventoryPvClient() {
           className="w-full rounded-xl border p-3"
           placeholder="Cerca per codice, descrizione o barcode... (usa Enter dopo scan)"
           value={search}
-          onChange={(e) => {
-            const v = e.target.value;
-            setSearch(v);
-
-            // ✅ Tablet/Android scanner USB: spesso arriva un terminatore (\n/\r o \t)
-            // Appena lo vedo, processo lo scan e svuoto campo (lo fa già handleScanFromRaw)
-            if (/[\r\n\t]/.test(v)) {
-              handleScanFromRaw(v.replace(/[\r\n\t]+/g, " "));
-            }
-          }}
+          onChange={(e) => setSearch(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
@@ -550,26 +573,3 @@ export default function InventoryPvClient() {
     </div>
   );
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

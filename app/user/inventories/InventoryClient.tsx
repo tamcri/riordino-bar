@@ -123,7 +123,19 @@ export default function InventoryClient() {
 
   function setQty(itemId: string, v: string) {
     const cleaned = onlyDigits(v);
+
     setQtyMap((prev) => ({ ...prev, [itemId]: cleaned }));
+
+    const n = Number(cleaned || "0") || 0;
+
+    setScannedIds((prev) => {
+      const has = prev.includes(itemId);
+
+      if (n > 0 && !has) return [itemId, ...prev];
+      if (n <= 0 && has) return prev.filter((id) => id !== itemId);
+
+      return prev;
+    });
   }
 
   function incrementQty(itemId: string, delta: number = 1) {
@@ -134,7 +146,6 @@ export default function InventoryClient() {
     });
   }
 
-  // ✅ FIX: svuota lista + azzera qty SOLO degli scansionati
   function clearScannedList() {
     setQtyMap((prev) => {
       const next = { ...prev };
@@ -146,9 +157,8 @@ export default function InventoryClient() {
     setScannedIds([]);
   }
 
-  // ✅ NUOVO: stessa logica di handleScanEnter, ma prende un rawInput (tablet-friendly)
-  function handleScanFromRaw(rawInput: string) {
-    const raw = (rawInput || "").trim();
+  function handleScanEnter() {
+    const raw = search.trim();
     if (!raw) return;
 
     const digits = onlyDigits(raw);
@@ -167,7 +177,6 @@ export default function InventoryClient() {
       found = items.find((it) => String(it.code || "").toLowerCase() === t);
     }
 
-    // sempre svuoto
     setSearch("");
 
     if (!found) {
@@ -185,10 +194,6 @@ export default function InventoryClient() {
     });
 
     incrementQty(found.id, 1);
-  }
-
-  function handleScanEnter() {
-    handleScanFromRaw(search);
   }
 
   async function loadPvs() {
@@ -243,36 +248,6 @@ export default function InventoryClient() {
     setQtyMap(m);
   }
 
-  async function loadExistingInventory(nextPvId: string, nextCategoryId: string, nextSubcategoryId: string, nextDate: string, currentItems: Item[]) {
-    if (!nextPvId || !nextCategoryId || !nextDate) return;
-
-    const params = new URLSearchParams();
-    params.set("pv_id", nextPvId);
-    params.set("category_id", nextCategoryId);
-    params.set("inventory_date", nextDate);
-    if (nextSubcategoryId) params.set("subcategory_id", nextSubcategoryId);
-
-    const res = await fetch(`/api/inventories/rows?${params.toString()}`, { cache: "no-store" });
-    const json = await res.json().catch(() => null);
-    if (!res.ok || !json?.ok) return;
-
-    const map = new Map<string, number>();
-    (json.rows || []).forEach((r: InventoryRow) => {
-      if (r?.item_id) map.set(String(r.item_id), Number(r.qty ?? 0));
-    });
-
-    setQtyMap((prev) => {
-      const next = { ...prev };
-      currentItems.forEach((it) => {
-        if (map.has(it.id)) {
-          const v = String(map.get(it.id) ?? 0);
-          next[it.id] = v === "0" ? "" : v;
-        }
-      });
-      return next;
-    });
-  }
-
   useEffect(() => {
     (async () => {
       setLoading(true);
@@ -315,93 +290,75 @@ export default function InventoryClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subcategoryId]);
 
+  // ✅ FIX DEFINITIVO: in admin/amministrativo NON precompiliamo dal DB (altrimenti “sembra memoria”)
   useEffect(() => {
-    if (!canLoad) return;
-    if (items.length === 0) return;
-
-    (async () => {
-      setMsg(null);
-      setError(null);
-      try {
-        await loadExistingInventory(pvId, categoryId, subcategoryId || "", inventoryDate, items);
-      } catch (e: any) {
-        setError(e?.message || "Errore");
-      }
-    })();
+    return;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pvId, categoryId, subcategoryId, inventoryDate, items.length]);
 
   async function save(forceOverwrite: boolean = false, overrideDate?: string) {
-    if (!canSave) return;
+  if (!canSave) return;
 
-    const dateToUse = (overrideDate ?? inventoryDate).trim();
-    if (!isIsoDate(dateToUse)) {
-      setError("Data inventario non valida (YYYY-MM-DD).");
+  const dateToUse = (overrideDate ?? inventoryDate).trim();
+  if (!isIsoDate(dateToUse)) {
+    setError("Data inventario non valida (YYYY-MM-DD).");
+    return;
+  }
+
+  setSaving(true);
+  setMsg(null);
+  setError(null);
+
+  try {
+    const rows = items.map((it) => ({
+      item_id: it.id,
+      qty: qtyMap[it.id] === "" ? 0 : Number(qtyMap[it.id]),
+    }));
+
+    const res = await fetch("/api/inventories/save", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        pv_id: pvId,
+        category_id: categoryId,
+        subcategory_id: subcategoryId || null,
+        inventory_date: dateToUse,
+        operatore: operatore.trim(),
+        rows,
+        force_overwrite: forceOverwrite, // (compat) ignorato dal backend
+      }),
+    });
+
+    const json = await res.json().catch(() => null);
+
+    // ✅ se inventario già presente: azzera tutto e stop (anche per admin/ammin)
+    if (res.status === 409 || json?.code === "INVENTORY_ALREADY_EXISTS") {
+      setMsg(null);
+      setError(json?.error || "Esiste già un inventario: non è consentito sovrascrivere.");
+
+      // reset “riparti da zero”
+      setOperatore("");
+      setSearch("");
+      setScannedIds([]);
+      setQtyMap((prev) => {
+        const next: Record<string, string> = { ...prev };
+        items.forEach((it) => (next[it.id] = ""));
+        return next;
+      });
+
       return;
     }
 
-    setSaving(true);
-    setMsg(null);
-    setError(null);
+    if (!res.ok || !json?.ok) throw new Error(json?.error || "Salvataggio fallito");
 
-    try {
-      const rows = items.map((it) => ({
-        item_id: it.id,
-        qty: qtyMap[it.id] === "" ? 0 : Number(qtyMap[it.id]),
-      }));
-
-      const res = await fetch("/api/inventories/save", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          pv_id: pvId,
-          category_id: categoryId,
-          subcategory_id: subcategoryId || null,
-          inventory_date: dateToUse,
-          operatore: operatore.trim(),
-          rows,
-          force_overwrite: forceOverwrite,
-        }),
-      });
-
-      const json = await res.json().catch(() => null);
-
-      if (res.status === 409 || json?.code === "INVENTORY_ALREADY_EXISTS") {
-        const choice = window.prompt(
-          "Esiste già un inventario per PV/Categoria/Sottocategoria/Data.\n\nScrivi:\n1 = Sovrascrivi\n2 = Salva come nuovo (nuova data)\n0 = Annulla",
-          "0"
-        );
-
-        if (choice === "1") {
-          await save(true, dateToUse);
-          return;
-        }
-
-        if (choice === "2") {
-          const suggested = todayISO();
-          const newDate = window.prompt("Inserisci la nuova data inventario (YYYY-MM-DD):", suggested) || "";
-          if (!isIsoDate(newDate.trim())) {
-            setError("Data non valida. Formato richiesto: YYYY-MM-DD");
-            return;
-          }
-          setInventoryDate(newDate.trim());
-          await save(false, newDate.trim());
-          return;
-        }
-
-        setMsg("Salvataggio annullato. Inventario esistente mantenuto.");
-        return;
-      }
-
-      if (!res.ok || !json?.ok) throw new Error(json?.error || "Salvataggio fallito");
-
-      setMsg(`Salvataggio OK — righe: ${json.saved}${json.overwritten ? " (sovrascritto)" : ""}`);
-    } catch (e: any) {
-      setError(e?.message || "Errore salvataggio");
-    } finally {
-      setSaving(false);
-    }
+    setMsg(`Salvataggio OK — righe: ${json.saved}`);
+  } catch (e: any) {
+    setError(e?.message || "Errore salvataggio");
+  } finally {
+    setSaving(false);
   }
+}
+
 
   return (
     <div className="space-y-4">
@@ -464,7 +421,7 @@ export default function InventoryClient() {
           )}
         </div>
 
-        <button className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60" disabled={!canSave || saving} onClick={() => save(false)}>
+        <button className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60" disabled={!canSave || saving} onClick={() => save()}>
           {saving ? "Salvo..." : "Salva giacenze"}
         </button>
       </div>
@@ -475,15 +432,7 @@ export default function InventoryClient() {
           className="w-full rounded-xl border p-3"
           placeholder="Cerca per codice, descrizione o barcode... (usa Enter dopo scan)"
           value={search}
-          onChange={(e) => {
-            const v = e.target.value;
-            setSearch(v);
-
-            // ✅ Tablet/Android scanner USB: spesso arriva un terminatore (\n/\r o \t)
-            if (/[\r\n\t]/.test(v)) {
-              handleScanFromRaw(v.replace(/[\r\n\t]+/g, " "));
-            }
-          }}
+          onChange={(e) => setSearch(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
@@ -496,7 +445,6 @@ export default function InventoryClient() {
         </div>
       </div>
 
-      {/* SCANSIONATI */}
       <div className="rounded-2xl border bg-white p-4 space-y-3">
         <div className="flex items-center justify-between gap-3">
           <div>
@@ -583,22 +531,4 @@ export default function InventoryClient() {
     </div>
   );
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 

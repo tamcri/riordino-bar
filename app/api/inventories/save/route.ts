@@ -15,11 +15,9 @@ type Body = {
   category_id?: string;
   subcategory_id?: string | null;
   inventory_date?: string; // YYYY-MM-DD
-  operatore?: string; // ✅ NEW
+  operatore?: string;
   rows?: Row[];
-
-  // ✅ NEW: per evitare sovrascrittura accidentale
-  force_overwrite?: boolean;
+  force_overwrite?: boolean; // (compat) NON USATO: sovrascrittura bloccata per tutti
 };
 
 function isUuid(v: string | null | undefined) {
@@ -80,9 +78,7 @@ export async function POST(req: Request) {
   const category_id = body.category_id?.trim();
   const subcategory_id = (body.subcategory_id ?? null)?.toString().trim() || null;
   const inventory_date = (body.inventory_date || "").trim();
-  const force_overwrite = !!body.force_overwrite;
 
-  // ✅ operatore obbligatorio
   const operatore = (body.operatore || "").trim();
   if (!operatore) return NextResponse.json({ ok: false, error: "Operatore mancante" }, { status: 400 });
   if (operatore.length > 80) return NextResponse.json({ ok: false, error: "Operatore troppo lungo (max 80)" }, { status: 400 });
@@ -126,10 +122,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "pv_id mancante" }, { status: 400 });
   }
 
-  // ✅ BLOCCO anti-sovrascrittura: se esiste già un inventario per quella chiave e non forzi, stop.
+  // ✅ 0) verifica header esistente (chiave logica)
   let existsQ = supabaseAdmin
     .from("inventories_headers")
-    .select("id")
+    .select("id, created_by_username")
     .eq("pv_id", pv_id)
     .eq("category_id", category_id)
     .eq("inventory_date", dateOrNull);
@@ -138,25 +134,26 @@ export async function POST(req: Request) {
   else existsQ = existsQ.is("subcategory_id", null);
 
   const { data: existing, error: existsErr } = await existsQ.limit(1);
+  if (existsErr) return NextResponse.json({ ok: false, error: existsErr.message }, { status: 500 });
 
-  if (existsErr) {
-    return NextResponse.json({ ok: false, error: existsErr.message }, { status: 500 });
-  }
+  const existingRow = Array.isArray(existing) && existing.length > 0 ? (existing[0] as any) : null;
+  const existingId = existingRow?.id ?? null;
+  const alreadyExists = !!existingId;
 
-  const alreadyExists = Array.isArray(existing) && existing.length > 0;
-
-  if (alreadyExists && !force_overwrite) {
+  // ✅ REGOLA DEFINITIVA: inventario unico al giorno, NESSUNA sovrascrittura per nessun ruolo.
+  if (alreadyExists) {
     return NextResponse.json(
       {
         ok: false,
-        error: "Esiste già un inventario per questa combinazione (PV/Categoria/Sottocategoria/Data). Se vuoi sovrascriverlo, riprova confermando.",
+        error:
+          "Esiste già un inventario per questa combinazione (PV/Categoria/Sottocategoria/Data). Per regola di sistema non è consentito crearne o salvarne un altro nello stesso giorno. Cambia data.",
         code: "INVENTORY_ALREADY_EXISTS",
       },
       { status: 409 }
     );
   }
 
-  // ✅ 1) upsert TESTATA inventario
+  // ✅ 1) inserisci header (solo se NON esiste)
   const headerPayload = {
     pv_id,
     category_id,
@@ -167,16 +164,13 @@ export async function POST(req: Request) {
     updated_at: new Date().toISOString(),
   };
 
-  const { error: headerErr } = await supabaseAdmin
-    .from("inventories_headers")
-    .upsert(headerPayload as any, { onConflict: "pv_id,category_id,subcategory_id,inventory_date" });
-
-  if (headerErr) {
-    console.error("[inventories/save] header error:", headerErr);
-    return NextResponse.json({ ok: false, error: headerErr.message }, { status: 500 });
+  const { error: insErr } = await supabaseAdmin.from("inventories_headers").insert(headerPayload as any);
+  if (insErr) {
+    console.error("[inventories/save] header insert error:", insErr);
+    return NextResponse.json({ ok: false, error: insErr.message }, { status: 500 });
   }
 
-  // ✅ 2) upsert RIGHE inventario
+  // ✅ 2) prepara righe
   const payload = rows
     .filter((r) => isUuid(r.item_id))
     .map((r) => ({
@@ -193,11 +187,12 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "Nessuna riga valida" }, { status: 400 });
   }
 
-  const { error } = await supabaseAdmin.from("inventories").upsert(payload as any, { onConflict: "pv_id,item_id,inventory_date" });
+  // ✅ 3) insert righe (header nuovo => non serve delete)
+  const { error: insRowsErr } = await supabaseAdmin.from("inventories").insert(payload as any);
 
-  if (error) {
-    console.error("[inventories/save] rows error:", error);
-    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+  if (insRowsErr) {
+    console.error("[inventories/save] rows insert error:", insRowsErr);
+    return NextResponse.json({ ok: false, error: insRowsErr.message }, { status: 500 });
   }
 
   return NextResponse.json({
@@ -206,9 +201,13 @@ export async function POST(req: Request) {
     pv_id,
     operatore,
     enforced_pv: session.role === "punto_vendita",
-    overwritten: alreadyExists && force_overwrite,
+    overwritten: false,
   });
 }
+
+
+
+
 
 
 
