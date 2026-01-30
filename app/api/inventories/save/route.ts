@@ -17,7 +17,8 @@ type Body = {
   inventory_date?: string; // YYYY-MM-DD
   operatore?: string;
   rows?: Row[];
-  force_overwrite?: boolean; // (compat) NON USATO: sovrascrittura bloccata per tutti
+  force_overwrite?: boolean; // (compat)
+  mode?: "close" | "continue"; // (UI) non cambia la logica server
 };
 
 function isUuid(v: string | null | undefined) {
@@ -138,36 +139,69 @@ export async function POST(req: Request) {
 
   const existingRow = Array.isArray(existing) && existing.length > 0 ? (existing[0] as any) : null;
   const existingId = existingRow?.id ?? null;
+  const existingCreatedBy = (existingRow?.created_by_username ?? null) as string | null;
+
   const alreadyExists = !!existingId;
 
-  // ✅ REGOLA DEFINITIVA: inventario unico al giorno, NESSUNA sovrascrittura per nessun ruolo.
-  if (alreadyExists) {
+  // ✅ REGOLA: inventario unico al giorno.
+  // - se esiste e creato da ALTRO utente => 409
+  // - se esiste e creato dallo STESSO utente => aggiornamento progressivo (NO force_overwrite)
+  if (alreadyExists && existingCreatedBy && existingCreatedBy !== session.username) {
     return NextResponse.json(
       {
         ok: false,
         error:
-          "Esiste già un inventario per questa combinazione (PV/Categoria/Sottocategoria/Data). Per regola di sistema non è consentito crearne o salvarne un altro nello stesso giorno. Cambia data.",
+          "Esiste già un inventario per questa combinazione (PV/Categoria/Sottocategoria/Data) creato da un altro utente. Non puoi modificarlo.",
         code: "INVENTORY_ALREADY_EXISTS",
       },
       { status: 409 }
     );
   }
 
-  // ✅ 1) inserisci header (solo se NON esiste)
-  const headerPayload = {
-    pv_id,
-    category_id,
-    subcategory_id,
-    inventory_date: dateOrNull,
-    operatore,
-    created_by_username: session.username,
-    updated_at: new Date().toISOString(),
-  };
+  // ✅ 1) header: insert se non esiste, update se esiste (stesso utente)
+  if (!alreadyExists) {
+    const headerPayload = {
+      pv_id,
+      category_id,
+      subcategory_id,
+      inventory_date: dateOrNull,
+      operatore,
+      created_by_username: session.username,
+      updated_at: new Date().toISOString(),
+    };
 
-  const { error: insErr } = await supabaseAdmin.from("inventories_headers").insert(headerPayload as any);
-  if (insErr) {
-    console.error("[inventories/save] header insert error:", insErr);
-    return NextResponse.json({ ok: false, error: insErr.message }, { status: 500 });
+    const { error: insErr } = await supabaseAdmin.from("inventories_headers").insert(headerPayload as any);
+    if (insErr) {
+      console.error("[inventories/save] header insert error:", insErr);
+      return NextResponse.json({ ok: false, error: insErr.message }, { status: 500 });
+    }
+  } else {
+    const { error: updErr } = await supabaseAdmin
+      .from("inventories_headers")
+      .update({ operatore, updated_at: new Date().toISOString() } as any)
+      .eq("id", existingId);
+
+    if (updErr) {
+      console.error("[inventories/save] header update error:", updErr);
+      return NextResponse.json({ ok: false, error: updErr.message }, { status: 500 });
+    }
+
+    // ✅ aggiornamento progressivo: sostituisco le righe della stessa chiave logica
+    let delQ = supabaseAdmin
+      .from("inventories")
+      .delete()
+      .eq("pv_id", pv_id)
+      .eq("category_id", category_id)
+      .eq("inventory_date", dateOrNull);
+
+    if (subcategory_id) delQ = delQ.eq("subcategory_id", subcategory_id);
+    else delQ = delQ.is("subcategory_id", null);
+
+    const { error: delErr } = await delQ;
+    if (delErr) {
+      console.error("[inventories/save] rows delete error:", delErr);
+      return NextResponse.json({ ok: false, error: delErr.message }, { status: 500 });
+    }
   }
 
   // ✅ 2) prepara righe
@@ -187,7 +221,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "Nessuna riga valida" }, { status: 400 });
   }
 
-  // ✅ 3) insert righe (header nuovo => non serve delete)
+  // ✅ 3) insert righe
   const { error: insRowsErr } = await supabaseAdmin.from("inventories").insert(payload as any);
 
   if (insRowsErr) {
@@ -201,9 +235,12 @@ export async function POST(req: Request) {
     pv_id,
     operatore,
     enforced_pv: session.role === "punto_vendita",
-    overwritten: false,
+    overwritten: alreadyExists, // true se update progressivo
   });
 }
+
+
+
 
 
 

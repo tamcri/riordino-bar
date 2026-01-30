@@ -352,7 +352,7 @@ export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines:
   const wb = new ExcelJS.Workbook();
 
   // ==========================
-  // 1) FOGLIO PRINCIPALE: solo inventario > 0
+  // FOGLIO UNICO: TUTTO INSIEME
   // ==========================
   const ws = wb.addWorksheet("CONFRONTO");
   writeMeta(ws, meta);
@@ -375,10 +375,16 @@ export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines:
   let totGes = 0;
   let totVal = 0;
 
-  // ✅ QUI: solo righe inventario > 0 (no inv=0)
-  const invOnlyView = (lines || []).filter((l) => Number(l.qtyInventory || 0) > 0);
+  // ✅ NEW: includo anche righe “solo gestionale” (inv=0, ges>0)
+  // Tengo comunque fuori roba completamente vuota (inv=0 e ges=0)
+  const mergedView = (lines || []).filter((l) => Number(l.qtyInventory || 0) > 0 || Number(l.qtyGestionale || 0) > 0);
 
-  for (const line of invOnlyView) {
+  // ✅ totali SOLO negativi (diff < 0) richiesti:
+  // mostro come positivi per leggibilità
+  let totNegPieces = 0; // somma di -diff dove diff<0
+  let totNegValue = 0; // somma di (-diff * prezzo) dove diff<0 e prezzo presente
+
+  for (const line of mergedView) {
     const qi = Number(line.qtyInventory || 0);
     const qg = Number(line.qtyGestionale || 0);
     const diff = Number(line.diff || 0);
@@ -402,8 +408,10 @@ export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines:
     ws.getCell(rr, 6).numFmt = "0.00";
     ws.getCell(rr, 7).numFmt = "0.00";
 
-    // ✅ rosso SOLO se “codice mancante” lato gestionale (non trovato proprio)
-    if (!line.foundInGestionale) {
+    // ✅ evidenzio “mancante” da uno dei due lati:
+    // - solo inventario (manca in gestionale)
+    // - solo gestionale (manca in inventario)
+    if (!line.foundInGestionale || !line.foundInInventory) {
       applyRedRow(ws, rr, 7);
     }
 
@@ -411,61 +419,46 @@ export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines:
     totGes += qg;
     if (valore != null) totVal += valore;
 
+    if (diff < 0) {
+      totNegPieces += -diff;
+      if (prezzo != null) totNegValue += (-diff) * prezzo;
+    }
+
     rr++;
   }
 
+  // ====== TOTALI “classici” (senza somma diff) ======
   const totalRow = rr + 1;
   ws.getCell(totalRow, 2).value = "TOTALI";
   ws.getCell(totalRow, 3).value = totInv;
   ws.getCell(totalRow, 4).value = totGes;
-  ws.getCell(totalRow, 5).value = totInv - totGes; // ✅ inventario - gestionale
+
+  // ✅ richiesto: niente somma in colonna Differenza (perché si azzera)
+  ws.getCell(totalRow, 5).value = "";
+
   ws.getCell(totalRow, 6).value = "";
   ws.getCell(totalRow, 7).value = totVal;
   ws.getRow(totalRow).font = { bold: true };
 
   ws.getCell(totalRow, 3).numFmt = "0";
   ws.getCell(totalRow, 4).numFmt = "0";
-  ws.getCell(totalRow, 5).numFmt = "0";
   ws.getCell(totalRow, 7).numFmt = "0.00";
 
+  // ====== TOTALI NEGATIVI richiesti ======
+  const negRow1 = totalRow + 2;
+  ws.getCell(negRow1, 2).value = "Totale pezzi in negativo";
+  ws.getCell(negRow1, 5).value = totNegPieces; // metto nella colonna “Differenza” come valore positivo leggibile
+  ws.getRow(negRow1).font = { bold: true };
+  ws.getCell(negRow1, 5).numFmt = "0";
+
+  const negRow2 = totalRow + 3;
+  ws.getCell(negRow2, 2).value = "Totale valore in negativo";
+  ws.getCell(negRow2, 7).value = totNegValue; // valore in euro
+  ws.getRow(negRow2).font = { bold: true };
+  ws.getCell(negRow2, 7).numFmt = "0.00";
+
+  // tabella bordata fino ai totali
   styleTable(ws, headerRow, totalRow, 7);
-
-  // ==========================
-  // 2) FOGLIO EXTRA: righe solo gestionale (inv=0, ges>0)
-  // ==========================
-  const ws2 = wb.addWorksheet("SOLO_GESTIONALE");
-  ws2.getCell("A1").value = "RIGHE PRESENTI NEL GESTIONALE (QTA>0) MA ASSENTI IN INVENTARIO";
-  ws2.getCell("A1").font = { bold: true, size: 12 };
-
-  const h2 = 3;
-  ws2.getRow(h2).values = ["Codice", "Descrizione", "Qtà inventario", "Qtà gestionale", "Differenza"];
-  ws2.getRow(h2).font = { bold: true };
-
-  ws2.getColumn(1).width = 18;
-  ws2.getColumn(2).width = 60;
-  ws2.getColumn(3).width = 14;
-  ws2.getColumn(4).width = 14;
-  ws2.getColumn(5).width = 16;
-
-  const onlyGes = (lines || []).filter((l) => Number(l.qtyInventory || 0) === 0 && Number(l.qtyGestionale || 0) > 0);
-
-  let r2 = h2 + 1;
-  for (const line of onlyGes) {
-    ws2.getRow(r2).values = [line.code || "", line.description || "", 0, Number(line.qtyGestionale || 0), Number(line.diff || 0)];
-    ws2.getCell(r2, 3).numFmt = "0";
-    ws2.getCell(r2, 4).numFmt = "0";
-    ws2.getCell(r2, 5).numFmt = "0";
-
-    // qui è “mancante” lato inventario per definizione → rosso
-    applyRedRow(ws2, r2, 5);
-    r2++;
-  }
-
-  if (r2 === h2 + 1) {
-    ws2.getCell("A5").value = "Nessuna riga extra trovata.";
-  } else {
-    styleTable(ws2, h2, r2 - 1, 5);
-  }
 
   const outBuf = await wb.xlsx.writeBuffer();
   return Buffer.from(outBuf as any);
@@ -531,6 +524,7 @@ export function buildCompareLines(
   out.sort((a, b) => String(a.code || "").localeCompare(String(b.code || "")));
   return out;
 }
+
 
 
 

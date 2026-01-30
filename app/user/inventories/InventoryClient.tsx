@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type Pv = { id: string; code: string; name: string; is_active?: boolean };
 type Category = { id: string; name: string; slug?: string; is_active?: boolean };
@@ -13,14 +13,6 @@ type Item = {
   barcode?: string | null;
   prezzo_vendita_eur?: number | null;
   is_active: boolean;
-};
-
-type InventoryRow = {
-  id: string;
-  item_id: string;
-  code: string;
-  description: string;
-  qty: number;
 };
 
 function todayISO() {
@@ -43,6 +35,14 @@ function formatEUR(n: number) {
   return new Intl.NumberFormat("it-IT", { style: "currency", currency: "EUR" }).format(n);
 }
 
+type DraftAdmin = {
+  operatore: string;
+  qtyMap: Record<string, string>;
+  scannedIds: string[];
+  showAllScanned: boolean;
+  addQtyMap: Record<string, string>;
+};
+
 export default function InventoryClient() {
   const [pvs, setPvs] = useState<Pv[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -64,12 +64,115 @@ export default function InventoryClient() {
   const [qtyMap, setQtyMap] = useState<Record<string, string>>({});
 
   const [search, setSearch] = useState("");
+
+  // ✅ lista “Scansionati” in ordine cronologico: ultimo in cima
   const [scannedIds, setScannedIds] = useState<string[]>([]);
 
-  const canLoad = useMemo(() => !!pvId && !!categoryId && !!inventoryDate, [pvId, categoryId, inventoryDate]);
+  // ✅ evidenza verde “ultimo toccato” (resta finché ne tocchi un altro)
+  const [highlightScannedId, setHighlightScannedId] = useState<string | null>(null);
+
+  // ✅ mostra solo ultimi 10 di default
+  const [showAllScanned, setShowAllScanned] = useState(false);
+
+  // ✅ qty “da aggiungere” (solo in sezione Scansionati)
+  const [addQtyMap, setAddQtyMap] = useState<Record<string, string>>({});
+
+  // ✅ dopo scan/Invio, nella tabella sotto mostro SOLO l’articolo trovato
+  const [focusItemId, setFocusItemId] = useState<string | null>(null);
+
+  // ✅ UX: focus automatico tra ricerca <-> quantità
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const qtyInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+
   const canSave = useMemo(() => !!operatore.trim() && !!pvId && !!categoryId && items.length > 0, [operatore, pvId, categoryId, items.length]);
 
+  const draftKey = useMemo(() => {
+    const sub = subcategoryId || "null";
+    return `inv_draft_admin:${pvId}:${categoryId}:${sub}:${inventoryDate}`;
+  }, [pvId, categoryId, subcategoryId, inventoryDate]);
+
+  function loadDraftIfAny(rows: Item[]) {
+    try {
+      if (!draftKey || !rows?.length) return;
+
+      const raw = localStorage.getItem(draftKey);
+      if (!raw) return;
+
+      const d = JSON.parse(raw) as DraftAdmin;
+      if (!d || typeof d !== "object") return;
+
+      if (typeof d.operatore === "string") setOperatore(d.operatore);
+
+      if (d.qtyMap && typeof d.qtyMap === "object") {
+        setQtyMap((prev) => {
+          const next: Record<string, string> = { ...prev };
+          rows.forEach((it) => {
+            if (d.qtyMap[it.id] != null) next[it.id] = String(d.qtyMap[it.id] ?? "");
+          });
+          return next;
+        });
+      }
+
+      if (Array.isArray(d.scannedIds)) {
+        const set = new Set(rows.map((r) => r.id));
+        setScannedIds(d.scannedIds.filter((id) => set.has(id)));
+      }
+
+      if (typeof d.showAllScanned === "boolean") setShowAllScanned(d.showAllScanned);
+
+      if (d.addQtyMap && typeof d.addQtyMap === "object") {
+        const next: Record<string, string> = {};
+        rows.forEach((it) => {
+          if (d.addQtyMap[it.id] != null) next[it.id] = String(d.addQtyMap[it.id] ?? "");
+        });
+        setAddQtyMap(next);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  function persistDraft() {
+    try {
+      if (!draftKey) return;
+      const draft: DraftAdmin = {
+        operatore,
+        qtyMap,
+        scannedIds,
+        showAllScanned,
+        addQtyMap,
+      };
+      localStorage.setItem(draftKey, JSON.stringify(draft));
+    } catch {
+      // ignore
+    }
+  }
+
+  function clearDraft() {
+    try {
+      if (!draftKey) return;
+      localStorage.removeItem(draftKey);
+    } catch {
+      // ignore
+    }
+  }
+
+  useEffect(() => {
+    if (!pvId || !categoryId || !inventoryDate) return;
+    if (!items.length) return;
+
+    const t = window.setTimeout(() => persistDraft(), 250);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pvId, categoryId, subcategoryId, inventoryDate, items.length, operatore, scannedIds, showAllScanned, addQtyMap, qtyMap]);
+
   const filteredItems = useMemo(() => {
+    // ✅ focus attivo => mostro SOLO l’articolo trovato
+    if (focusItemId) {
+      const it = items.find((x) => x.id === focusItemId);
+      return it ? [it] : [];
+    }
+
     const raw = search.trim();
     if (!raw) return items;
 
@@ -100,12 +203,17 @@ export default function InventoryClient() {
       const bc = String(it.barcode || "").toLowerCase();
       return code.includes(t) || desc.includes(t) || bc.includes(t);
     });
-  }, [items, search]);
+  }, [items, search, focusItemId]);
 
   const scannedItems = useMemo(() => {
-    const set = new Set(scannedIds);
-    return items.filter((it) => set.has(it.id));
+    const byId = new Map(items.map((it) => [it.id, it]));
+    return scannedIds.map((id) => byId.get(id)).filter(Boolean) as Item[];
   }, [items, scannedIds]);
+
+  const scannedItemsVisible = useMemo(() => {
+    if (showAllScanned) return scannedItems;
+    return scannedItems.slice(0, 10);
+  }, [scannedItems, showAllScanned]);
 
   const totScannedPieces = useMemo(() => {
     return scannedItems.reduce((sum, it) => sum + (Number(qtyMap[it.id]) || 0), 0);
@@ -121,6 +229,14 @@ export default function InventoryClient() {
     }, 0);
   }, [scannedItems, qtyMap]);
 
+  function highlightAndMoveToTop(itemId: string) {
+    setScannedIds((prev) => {
+      const next = [itemId, ...prev.filter((id) => id !== itemId)];
+      return next;
+    });
+    setHighlightScannedId(itemId);
+  }
+
   function setQty(itemId: string, v: string) {
     const cleaned = onlyDigits(v);
 
@@ -132,18 +248,28 @@ export default function InventoryClient() {
       const has = prev.includes(itemId);
 
       if (n > 0 && !has) return [itemId, ...prev];
+      if (n > 0 && has) return [itemId, ...prev.filter((id) => id !== itemId)];
+
       if (n <= 0 && has) return prev.filter((id) => id !== itemId);
 
       return prev;
     });
+
+    if (n > 0) setHighlightScannedId(itemId);
   }
 
-  function incrementQty(itemId: string, delta: number = 1) {
+  function addQty(itemId: string) {
+    const delta = Number(onlyDigits(addQtyMap[itemId] ?? "")) || 0;
+    if (delta <= 0) return;
+
     setQtyMap((prev) => {
       const current = Number(prev[itemId] || "0") || 0;
       const next = Math.max(0, current + delta);
       return { ...prev, [itemId]: String(next) };
     });
+
+    setAddQtyMap((prev) => ({ ...prev, [itemId]: "" }));
+    highlightAndMoveToTop(itemId);
   }
 
   function clearScannedList() {
@@ -155,6 +281,9 @@ export default function InventoryClient() {
       return next;
     });
     setScannedIds([]);
+    setShowAllScanned(false);
+    setAddQtyMap({});
+    setHighlightScannedId(null);
   }
 
   function handleScanEnter() {
@@ -188,12 +317,27 @@ export default function InventoryClient() {
     setError(null);
     setMsg(null);
 
-    setScannedIds((prev) => {
-      if (prev.includes(found!.id)) return prev;
-      return [found!.id, ...prev];
+    // ✅ in tabella sotto mostro SOLO questo articolo
+    setFocusItemId(found.id);
+
+    // ✅ UX: focus automatico sulla Quantità (tabella sotto)
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const el = qtyInputRefs.current[found!.id];
+        if (el) {
+          el.focus();
+          el.select();
+        }
+      });
     });
 
-    incrementQty(found.id, 1);
+    if (scannedIds.includes(found.id)) {
+      highlightAndMoveToTop(found.id);
+      return;
+    }
+
+    setScannedIds((prev) => [found!.id, ...prev]);
+    setHighlightScannedId(found.id);
   }
 
   async function loadPvs() {
@@ -221,6 +365,9 @@ export default function InventoryClient() {
     const json = await res.json().catch(() => null);
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore caricamento sottocategorie");
     setSubcategories(json.rows || []);
+
+    // ✅ cambio categoria => tolgo focus
+    setFocusItemId(null);
   }
 
   async function loadItems(nextCategoryId: string, nextSubcategoryId: string) {
@@ -228,6 +375,10 @@ export default function InventoryClient() {
     setQtyMap({});
     setSearch("");
     setScannedIds([]);
+    setShowAllScanned(false);
+    setAddQtyMap({});
+    setHighlightScannedId(null);
+    setFocusItemId(null);
 
     if (!nextCategoryId) return;
 
@@ -246,6 +397,8 @@ export default function InventoryClient() {
     const m: Record<string, string> = {};
     rows.forEach((it) => (m[it.id] = ""));
     setQtyMap(m);
+
+    loadDraftIfAny(rows);
   }
 
   useEffect(() => {
@@ -290,75 +443,88 @@ export default function InventoryClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subcategoryId]);
 
-  // ✅ FIX DEFINITIVO: in admin/amministrativo NON precompiliamo dal DB (altrimenti “sembra memoria”)
+  // ✅ FIX DEFINITIVO: non precompiliamo dal DB (rimane così)
   useEffect(() => {
     return;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pvId, categoryId, subcategoryId, inventoryDate, items.length]);
 
-  async function save(forceOverwrite: boolean = false, overrideDate?: string) {
-  if (!canSave) return;
+  function resetAfterClose() {
+    setOperatore("");
+    setSearch("");
+    setScannedIds([]);
+    setShowAllScanned(false);
+    setAddQtyMap({});
+    setHighlightScannedId(null);
+    setFocusItemId(null);
 
-  const dateToUse = (overrideDate ?? inventoryDate).trim();
-  if (!isIsoDate(dateToUse)) {
-    setError("Data inventario non valida (YYYY-MM-DD).");
-    return;
-  }
-
-  setSaving(true);
-  setMsg(null);
-  setError(null);
-
-  try {
-    const rows = items.map((it) => ({
-      item_id: it.id,
-      qty: qtyMap[it.id] === "" ? 0 : Number(qtyMap[it.id]),
-    }));
-
-    const res = await fetch("/api/inventories/save", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        pv_id: pvId,
-        category_id: categoryId,
-        subcategory_id: subcategoryId || null,
-        inventory_date: dateToUse,
-        operatore: operatore.trim(),
-        rows,
-        force_overwrite: forceOverwrite, // (compat) ignorato dal backend
-      }),
+    setQtyMap((prev) => {
+      const next: Record<string, string> = { ...prev };
+      items.forEach((it) => (next[it.id] = ""));
+      return next;
     });
 
-    const json = await res.json().catch(() => null);
+    clearDraft();
+  }
 
-    // ✅ se inventario già presente: azzera tutto e stop (anche per admin/ammin)
-    if (res.status === 409 || json?.code === "INVENTORY_ALREADY_EXISTS") {
-      setMsg(null);
-      setError(json?.error || "Esiste già un inventario: non è consentito sovrascrivere.");
+  async function save(mode: "close" | "continue") {
+    if (!canSave) return;
 
-      // reset “riparti da zero”
-      setOperatore("");
-      setSearch("");
-      setScannedIds([]);
-      setQtyMap((prev) => {
-        const next: Record<string, string> = { ...prev };
-        items.forEach((it) => (next[it.id] = ""));
-        return next;
-      });
-
+    const dateToUse = inventoryDate.trim();
+    if (!isIsoDate(dateToUse)) {
+      setError("Data inventario non valida (YYYY-MM-DD).");
       return;
     }
 
-    if (!res.ok || !json?.ok) throw new Error(json?.error || "Salvataggio fallito");
+    setSaving(true);
+    setMsg(null);
+    setError(null);
 
-    setMsg(`Salvataggio OK — righe: ${json.saved}`);
-  } catch (e: any) {
-    setError(e?.message || "Errore salvataggio");
-  } finally {
-    setSaving(false);
+    try {
+      const rows = items.map((it) => ({
+        item_id: it.id,
+        qty: qtyMap[it.id] === "" ? 0 : Number(qtyMap[it.id]),
+      }));
+
+      const res = await fetch("/api/inventories/save", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          pv_id: pvId,
+          category_id: categoryId,
+          subcategory_id: subcategoryId || null,
+          inventory_date: dateToUse,
+          operatore: operatore.trim(),
+          rows,
+          mode,
+        }),
+      });
+
+      const json = await res.json().catch(() => null);
+
+      if (res.status === 409 || json?.code === "INVENTORY_ALREADY_EXISTS") {
+        setMsg(null);
+        setError(json?.error || "Esiste già un inventario: non è consentito sovrascrivere.");
+        return;
+      }
+
+      if (!res.ok || !json?.ok) throw new Error(json?.error || "Salvataggio fallito");
+
+      setMsg(mode === "continue" ? `Salvato. Puoi continuare. — righe: ${json.saved}` : `Salvataggio OK — righe: ${json.saved}`);
+
+      if (mode === "close") {
+        resetAfterClose();
+      } else {
+        persistDraft();
+      }
+    } catch (e: any) {
+      setError(e?.message || "Errore salvataggio");
+    } finally {
+      setSaving(false);
+    }
   }
-}
 
+  const focusItem = focusItemId ? items.find((x) => x.id === focusItemId) : null;
 
   return (
     <div className="space-y-4">
@@ -421,18 +587,30 @@ export default function InventoryClient() {
           )}
         </div>
 
-        <button className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60" disabled={!canSave || saving} onClick={() => save()}>
-          {saving ? "Salvo..." : "Salva giacenze"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-60" disabled={!canSave || saving} onClick={() => save("continue")} type="button">
+            {saving ? "Salvo..." : "Salva e continua"}
+          </button>
+
+          <button className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60" disabled={!canSave || saving} onClick={() => save("close")} type="button">
+            {saving ? "Salvo..." : "Salva e chiudi"}
+          </button>
+        </div>
       </div>
 
       <div className="rounded-2xl border bg-white p-4">
         <label className="block text-sm font-medium mb-2">Cerca / Scansiona (Invio)</label>
         <input
+          ref={searchInputRef}
           className="w-full rounded-xl border p-3"
           placeholder="Cerca per codice, descrizione o barcode... (usa Enter dopo scan)"
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(e) => {
+            const v = e.target.value;
+            setSearch(v);
+            // ✅ se inizi a digitare, tolgo focus e torno alla lista normale
+            if (focusItemId) setFocusItemId(null);
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
@@ -440,9 +618,39 @@ export default function InventoryClient() {
             }
           }}
         />
-        <div className="mt-2 text-sm text-gray-600">
-          Visualizzati: <b>{filteredItems.length}</b> / {items.length}
+
+        <div className="mt-2 flex items-center justify-between gap-3">
+          <div className="text-sm text-gray-600">
+            Visualizzati: <b>{filteredItems.length}</b> / {items.length}
+          </div>
+
+          {focusItemId && (
+            <button
+              className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
+              type="button"
+              onClick={() => {
+                setFocusItemId(null);
+                setHighlightScannedId(null);
+                requestAnimationFrame(() => {
+                  const el = searchInputRef.current;
+                  if (el) {
+                    el.focus();
+                    el.select();
+                  }
+                });
+              }}
+              title="Torna alla lista completa"
+            >
+              Mostra tutti
+            </button>
+          )}
         </div>
+
+        {focusItem && (
+          <div className="mt-2 text-xs text-gray-600">
+            Stai vedendo solo: <b>{focusItem.code}</b> — {focusItem.description}
+          </div>
+        )}
       </div>
 
       <div className="rounded-2xl border bg-white p-4 space-y-3">
@@ -452,11 +660,19 @@ export default function InventoryClient() {
             <div className="text-sm text-gray-600">
               Tot. Scansionati: <b>{totScannedPieces}</b> pezzi (<b>{totScannedDistinct}</b> articoli) — Valore: <b>{formatEUR(totScannedValueEur)}</b>
             </div>
+            {scannedItems.length > 10 && <div className="text-xs text-gray-500 mt-1">Mostro {showAllScanned ? "tutti" : "gli ultimi 10"}.</div>}
           </div>
 
-          <button className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-60" disabled={scannedIds.length === 0} onClick={clearScannedList}>
-            Svuota lista
-          </button>
+          <div className="flex items-center gap-2">
+            {scannedItems.length > 10 && (
+              <button className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" onClick={() => setShowAllScanned((v) => !v)} type="button">
+                {showAllScanned ? "—" : "+"}
+              </button>
+            )}
+            <button className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-60" disabled={scannedIds.length === 0} onClick={clearScannedList} type="button">
+              Svuota lista
+            </button>
+          </div>
         </div>
 
         {scannedItems.length === 0 ? (
@@ -468,19 +684,43 @@ export default function InventoryClient() {
                 <tr>
                   <th className="text-left p-3 w-40">Codice</th>
                   <th className="text-left p-3">Descrizione</th>
-                  <th className="text-left p-3 w-40">Quantità</th>
+                  <th className="text-left p-3 w-40">Tot.</th>
+                  <th className="text-right p-3 w-48">Aggiungi</th>
                 </tr>
               </thead>
               <tbody>
-                {scannedItems.map((it) => (
-                  <tr key={it.id} className="border-t">
-                    <td className="p-3 font-medium">{it.code}</td>
-                    <td className="p-3">{it.description}</td>
-                    <td className="p-3">
-                      <input className="w-full rounded-xl border p-2" inputMode="numeric" placeholder="0" value={qtyMap[it.id] ?? ""} onChange={(e) => setQty(it.id, e.target.value)} />
-                    </td>
-                  </tr>
-                ))}
+                {scannedItemsVisible.map((it) => {
+                  const isHi = highlightScannedId === it.id;
+                  return (
+                    <tr key={it.id} className={`border-t ${isHi ? "bg-green-50" : ""}`}>
+                      <td className="p-3 font-medium">{it.code}</td>
+                      <td className="p-3">{it.description}</td>
+                      <td className="p-3">
+                        <input className="w-full rounded-xl border p-2" inputMode="numeric" placeholder="0" value={qtyMap[it.id] ?? ""} onChange={(e) => setQty(it.id, e.target.value)} />
+                      </td>
+                      <td className="p-3">
+                        <div className="flex justify-end gap-2">
+                          <input
+                            className="w-28 rounded-xl border p-2 text-right"
+                            inputMode="numeric"
+                            placeholder="+ qty"
+                            value={addQtyMap[it.id] ?? ""}
+                            onChange={(e) => setAddQtyMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                addQty(it.id);
+                              }
+                            }}
+                          />
+                          <button className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" type="button" onClick={() => addQty(it.id)}>
+                            Aggiungi
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -516,19 +756,40 @@ export default function InventoryClient() {
               </tr>
             )}
 
-            {filteredItems.map((it) => (
-              <tr key={it.id} className="border-t">
-                <td className="p-3 font-medium">{it.code}</td>
-                <td className="p-3">{it.description}</td>
-                <td className="p-3">
-                  <input className="w-full rounded-xl border p-2" inputMode="numeric" placeholder="0" value={qtyMap[it.id] ?? ""} onChange={(e) => setQty(it.id, e.target.value)} />
-                </td>
-              </tr>
-            ))}
+            {filteredItems.map((it) => {
+              const isHi = highlightScannedId === it.id;
+              return (
+                <tr key={it.id} className={`border-t ${isHi ? "bg-green-50" : ""}`}>
+                  <td className="p-3 font-medium">{it.code}</td>
+                  <td className="p-3">{it.description}</td>
+                  <td className="p-3">
+                    <input
+                      ref={(el) => {
+                        qtyInputRefs.current[it.id] = el;
+                      }}
+                      className="w-full rounded-xl border p-2"
+                      inputMode="numeric"
+                      placeholder="0"
+                      value={qtyMap[it.id] ?? ""}
+                      onChange={(e) => setQty(it.id, e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          const el = searchInputRef.current;
+                          if (el) {
+                            el.focus();
+                            el.select();
+                          }
+                        }
+                      }}
+                    />
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
     </div>
   );
 }
-
