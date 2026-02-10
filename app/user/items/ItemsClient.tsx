@@ -35,16 +35,6 @@ function formatPesoKg(v: any) {
   return s.replace(/\.?0+$/, "");
 }
 
-function formatEuroIT(v: any) {
-  if (v == null || v === "") return "—";
-  const n = Number(String(v).replace(",", "."));
-  if (!Number.isFinite(n) || n < 0) return "—";
-  const fixed = n.toFixed(2);
-  const [intPart, decPart] = fixed.split(".");
-  const intWithThousands = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
-  return `€ ${intWithThousands},${decPart}`;
-}
-
 function formatConfDa(v: any) {
   if (v == null || v === "") return "—";
   const n = Number(v);
@@ -58,6 +48,18 @@ function formatUm(v: any) {
   return s;
 }
 
+// ✅ Euro in formato IT: € 1,30 | € 132,50 | € 1.234,56
+function formatEuroIT(v: any) {
+  if (v == null || v === "") return "—";
+  const n = Number(String(v).replace(",", "."));
+  if (!Number.isFinite(n) || n < 0) return "—";
+
+  const fixed = n.toFixed(2);
+  const [intPart, decPart] = fixed.split(".");
+  const intWithThousands = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  return `€ ${intWithThousands},${decPart}`;
+}
+
 export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   const [categoryId, setCategoryId] = useState<string>("");
   const [subcategoryId, setSubcategoryId] = useState<string>("");
@@ -69,6 +71,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // MODAL EDIT
   const [editOpen, setEditOpen] = useState(false);
   const [editItem, setEditItem] = useState<Item | null>(null);
 
@@ -83,6 +86,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   const [editPrezzo, setEditPrezzo] = useState<string>("");
   const [savingEdit, setSavingEdit] = useState(false);
 
+  // IMPORT + PREVIEW
   const [file, setFile] = useState<File | null>(null);
   const [importing, setImporting] = useState(false);
 
@@ -90,9 +94,11 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
 
+  // CATEGORIE
   const [categories, setCategories] = useState<Category[]>([]);
   const [subcategories, setSubcategories] = useState<Subcategory[]>([]);
 
+  // CREATE CAT/SUB (admin)
   const [newCatName, setNewCatName] = useState("");
   const [newSubName, setNewSubName] = useState("");
   const [newSubCatId, setNewSubCatId] = useState("");
@@ -163,10 +169,10 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [qs]);
 
+  // PREVIEW IMPORT
   async function loadImportPreview(nextFile: File | null) {
     setPreviewError(null);
     setPreviewRows([]);
-
     if (!nextFile) return;
 
     setPreviewLoading(true);
@@ -188,6 +194,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     }
   }
 
+  // IMPORT
   async function doImport(e: React.FormEvent) {
     e.preventDefault();
     if (!file) return;
@@ -221,6 +228,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
       }
 
       setFile(null);
+      setPreviewRows([]);
       await loadItems();
     } catch (e: any) {
       setError(e.message || "Errore import");
@@ -316,7 +324,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     try {
       const payload: any = {
         id: editItem.id,
-        code: nextCode, // ✅ invio al backend
+        code: nextCode, // ✅ update codice
         description: nextDesc,
         barcode: normalizeNullableText(editBarcode),
         um: normalizeNullableText(editUm),
@@ -332,12 +340,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
       });
 
       const json = await res.json().catch(() => null);
-
-      if (!res.ok || !json?.ok) {
-        // ✅ messaggi più leggibili
-        const msg = json?.error || "Errore aggiornamento";
-        throw new Error(msg);
-      }
+      if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore aggiornamento");
 
       setMsg("Articolo aggiornato.");
       setEditOpen(false);
@@ -412,11 +415,10 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
             </div>
 
             <div className="mt-4 grid grid-cols-1 md:grid-cols-4 gap-3">
-              {/* ✅ CODICE MODIFICABILE */}
               <div className="md:col-span-2">
                 <label className="block text-sm font-medium mb-2">Codice</label>
                 <input className="w-full rounded-xl border p-3" value={editCode} onChange={(e) => setEditCode(e.target.value)} />
-                <div className="mt-1 text-xs text-gray-500">Attenzione: il codice deve restare unico nella categoria (e sottocategoria).</div>
+                <div className="mt-1 text-xs text-gray-500">Il codice deve restare unico nella categoria (e sottocategoria).</div>
               </div>
 
               <div className="md:col-span-2">
@@ -432,13 +434,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
 
               <div className="md:col-span-4">
                 <label className="block text-sm font-medium mb-2">Barcode</label>
-                <input
-                  className="w-full rounded-xl border p-3"
-                  inputMode="numeric"
-                  placeholder="Es. 8001234567890"
-                  value={editBarcode}
-                  onChange={(e) => setEditBarcode(e.target.value)}
-                />
+                <input className="w-full rounded-xl border p-3" inputMode="numeric" placeholder="Es. 8001234567890" value={editBarcode} onChange={(e) => setEditBarcode(e.target.value)} />
                 <div className="mt-1 text-xs text-gray-500">Lascia vuoto per NULL.</div>
               </div>
 
@@ -472,6 +468,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
         </div>
       )}
 
+      {/* CREATE CATEGORY / SUBCATEGORY (solo admin) */}
       {isAdmin && (
         <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
           <form onSubmit={createCategory} className="space-y-2">
@@ -496,6 +493,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
         </div>
       )}
 
+      {/* FILTRI */}
       <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-5 gap-3">
         <div className="md:col-span-2">
           <label className="block text-sm font-medium mb-2">Categoria</label>
@@ -536,9 +534,85 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
         </div>
       </div>
 
+      {/* ✅ IMPORT EXCEL (solo admin) — RIPRISTINATO */}
+      {isAdmin && (
+        <form onSubmit={doImport} className="rounded-2xl border bg-white p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="font-semibold">Carica file Excel</div>
+              <div className="text-sm text-gray-600">Seleziona categoria/sottocategoria e importa. (Preview: Codice, Descrizione, Barcode, UM, Prezzo)</div>
+            </div>
+            <button className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60" disabled={!file || importing}>
+              {importing ? "Importo..." : "Importa"}
+            </button>
+          </div>
+
+          <input
+            type="file"
+            accept=".xlsx"
+            onChange={(e) => {
+              const f = e.target.files?.[0] || null;
+              setFile(f);
+              loadImportPreview(f);
+            }}
+          />
+
+          {file && (
+            <div className="text-sm text-gray-600">
+              Selezionato: <b>{file.name}</b>
+            </div>
+          )}
+
+          {file && (
+            <div className="rounded-xl border bg-gray-50 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-sm font-medium">Anteprima import (prime righe)</div>
+                <button type="button" className="rounded-xl border bg-white px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-60" onClick={() => loadImportPreview(file)} disabled={previewLoading}>
+                  {previewLoading ? "Carico..." : "Ricarica"}
+                </button>
+              </div>
+
+              <div className="mt-2 text-xs text-gray-600">Mostro solo: Codice, Descrizione, Barcode, UM, Prezzo. (La Q.tà del file viene ignorata.)</div>
+
+              {previewError && <div className="mt-2 text-sm text-red-600">{previewError}</div>}
+
+              {!previewError && previewRows.length === 0 && !previewLoading && <div className="mt-2 text-sm text-gray-600">Nessuna riga da mostrare.</div>}
+
+              {previewRows.length > 0 && (
+                <div className="mt-3 overflow-auto rounded-xl border bg-white">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="text-left p-2">Codice</th>
+                        <th className="text-left p-2">Descrizione</th>
+                        <th className="text-left p-2">Barcode</th>
+                        <th className="text-left p-2">UM</th>
+                        <th className="text-left p-2">Prezzo</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {previewRows.map((r, idx) => (
+                        <tr key={idx} className="border-t">
+                          <td className="p-2 font-medium">{r.code || "—"}</td>
+                          <td className="p-2">{r.description || "—"}</td>
+                          <td className="p-2 font-mono text-xs">{r.barcode || "—"}</td>
+                          <td className="p-2">{r.um || "—"}</td>
+                          <td className="p-2">{r.prezzo || "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+        </form>
+      )}
+
       {msg && <p className="text-sm text-green-700">{msg}</p>}
       {error && <p className="text-sm text-red-600">{error}</p>}
 
+      {/* LISTA */}
       <div className="overflow-auto rounded-2xl border bg-white">
         <table className="w-full text-sm">
           <thead className="bg-gray-50">
@@ -547,13 +621,18 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
               <th className="text-left p-3">Descrizione</th>
               <th className="text-left p-3 w-48">Barcode</th>
               <th className="text-left p-3 w-20">UM</th>
+
+              {/* ✅ PREZZO SEMPRE VISIBILE */}
               <th className="text-right p-3 w-36">Prezzo</th>
+
               {showTabacchiCols && <th className="text-right p-3 w-32">Peso (kg)</th>}
               {showTabacchiCols && <th className="text-right p-3 w-28">Conf. da</th>}
+
               <th className="text-left p-3">Attivo</th>
               <th className="text-left p-3"></th>
             </tr>
           </thead>
+
           <tbody>
             {loading && (
               <tr className="border-t">
@@ -578,8 +657,10 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
                 <td className="p-3 font-mono text-xs">{r.barcode ? String(r.barcode) : "—"}</td>
                 <td className="p-3">{formatUm(r.um)}</td>
                 <td className="p-3 text-right">{formatEuroIT(r.prezzo_vendita_eur)}</td>
+
                 {showTabacchiCols && <td className="p-3 text-right">{formatPesoKg(r.peso_kg)}</td>}
                 {showTabacchiCols && <td className="p-3 text-right">{formatConfDa(r.conf_da)}</td>}
+
                 <td className="p-3">{r.is_active ? "Sì" : "No"}</td>
                 <td className="p-3 text-right">
                   {isAdmin && (
@@ -601,6 +682,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     </div>
   );
 }
+
 
 
 
