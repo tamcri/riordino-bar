@@ -10,13 +10,14 @@ type Item = {
   id: string;
   code: string;
   description: string;
-  barcode?: string | null; // ✅ NEW
+  barcode?: string | null;
+  um?: string | null;
   is_active: boolean;
   category_id: string | null;
   subcategory_id: string | null;
-  peso_kg?: number | null; // ✅
-  conf_da?: number | null; // ✅
-  prezzo_vendita_eur?: number | null; // ✅
+  peso_kg?: number | null;
+  conf_da?: number | null;
+  prezzo_vendita_eur?: number | null;
 };
 
 function isTabacchiCategory(cat: Category | null | undefined) {
@@ -34,11 +35,14 @@ function formatPesoKg(v: any) {
   return s.replace(/\.?0+$/, "");
 }
 
-function formatEuro(v: any) {
+function formatEuroIT(v: any) {
   if (v == null || v === "") return "—";
-  const n = Number(v);
+  const n = Number(String(v).replace(",", "."));
   if (!Number.isFinite(n) || n < 0) return "—";
-  return `€ ${n.toFixed(2)}`;
+  const fixed = n.toFixed(2);
+  const [intPart, decPart] = fixed.split(".");
+  const intWithThousands = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  return `€ ${intWithThousands},${decPart}`;
 }
 
 function formatConfDa(v: any) {
@@ -48,8 +52,13 @@ function formatConfDa(v: any) {
   return String(Math.trunc(n));
 }
 
+function formatUm(v: any) {
+  const s = String(v ?? "").trim();
+  if (!s) return "—";
+  return s;
+}
+
 export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
-  // filtri
   const [categoryId, setCategoryId] = useState<string>("");
   const [subcategoryId, setSubcategoryId] = useState<string>("");
   const [active, setActive] = useState<"1" | "0" | "all">("1");
@@ -60,25 +69,30 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // modal modifica articolo
   const [editOpen, setEditOpen] = useState(false);
   const [editItem, setEditItem] = useState<Item | null>(null);
+
+  // ✅ nuovo: codice editabile
+  const [editCode, setEditCode] = useState("");
+
   const [editDescription, setEditDescription] = useState("");
-  const [editBarcode, setEditBarcode] = useState<string>(""); // ✅ NEW
+  const [editBarcode, setEditBarcode] = useState<string>("");
+  const [editUm, setEditUm] = useState<string>("");
   const [editPesoKg, setEditPesoKg] = useState<string>("");
-  const [editConfDa, setEditConfDa] = useState<string>(""); // ✅
+  const [editConfDa, setEditConfDa] = useState<string>("");
   const [editPrezzo, setEditPrezzo] = useState<string>("");
   const [savingEdit, setSavingEdit] = useState(false);
 
-  // import
   const [file, setFile] = useState<File | null>(null);
   const [importing, setImporting] = useState(false);
 
-  // categorie
+  const [previewRows, setPreviewRows] = useState<any[]>([]);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+
   const [categories, setCategories] = useState<Category[]>([]);
   const [subcategories, setSubcategories] = useState<Subcategory[]>([]);
 
-  // admin: crea categoria/sottocategoria
   const [newCatName, setNewCatName] = useState("");
   const [newSubName, setNewSubName] = useState("");
   const [newSubCatId, setNewSubCatId] = useState("");
@@ -149,6 +163,31 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [qs]);
 
+  async function loadImportPreview(nextFile: File | null) {
+    setPreviewError(null);
+    setPreviewRows([]);
+
+    if (!nextFile) return;
+
+    setPreviewLoading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", nextFile);
+      fd.append("max_rows", "20");
+
+      const res = await fetch("/api/items/preview", { method: "POST", body: fd });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.ok) throw new Error(json?.error || "Preview non disponibile");
+
+      setPreviewRows(Array.isArray(json?.rows) ? json.rows : []);
+    } catch (e: any) {
+      setPreviewError(e?.message || "Errore preview");
+      setPreviewRows([]);
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
   async function doImport(e: React.FormEvent) {
     e.preventDefault();
     if (!file) return;
@@ -173,11 +212,9 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
 
       if (!res.ok || !json?.ok) throw new Error(json?.error || "Import fallito");
 
-      // ✅ supporto import barcode (mode=barcode) + import normale
       if (json.mode === "barcode") {
         setMsg(`Import BARCODE OK — Tot: ${json.total}, Aggiornati: ${json.updated}, Non trovati: ${json.not_found}`);
       } else {
-        // compat legacy/new
         const inserted = json.inserted ?? 0;
         const updated = json.updated ?? 0;
         setMsg(`Import OK — Tot: ${json.total}, Inseriti: ${inserted}, Aggiornati: ${updated}`);
@@ -217,11 +254,15 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     setMsg(null);
     setError(null);
     setEditItem(item);
+
+    setEditCode(item.code ?? "");
     setEditDescription(item.description ?? "");
-    setEditBarcode(item.barcode == null ? "" : String(item.barcode)); // ✅ NEW
+    setEditBarcode(item.barcode == null ? "" : String(item.barcode));
+    setEditUm(item.um == null ? "" : String(item.um));
     setEditPesoKg(item.peso_kg == null ? "" : String(item.peso_kg));
     setEditConfDa(item.conf_da == null ? "" : String(item.conf_da));
     setEditPrezzo(item.prezzo_vendita_eur == null ? "" : String(item.prezzo_vendita_eur));
+
     setEditOpen(true);
   }
 
@@ -256,6 +297,12 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   async function saveEdit() {
     if (!isAdmin || !editItem) return;
 
+    const nextCode = editCode.trim();
+    if (!nextCode) {
+      setError("Il codice non può essere vuoto.");
+      return;
+    }
+
     const nextDesc = editDescription.trim();
     if (!nextDesc) {
       setError("La descrizione non può essere vuota.");
@@ -269,8 +316,10 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     try {
       const payload: any = {
         id: editItem.id,
+        code: nextCode, // ✅ invio al backend
         description: nextDesc,
-        barcode: normalizeNullableText(editBarcode), // ✅ NEW
+        barcode: normalizeNullableText(editBarcode),
+        um: normalizeNullableText(editUm),
         peso_kg: editPesoKg.trim() === "" ? null : normalizeNullableNumber(editPesoKg),
         conf_da: editConfDa.trim() === "" ? null : normalizeNullableInt(editConfDa),
         prezzo_vendita_eur: editPrezzo.trim() === "" ? null : normalizeNullableNumber(editPrezzo),
@@ -283,7 +332,12 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
       });
 
       const json = await res.json().catch(() => null);
-      if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore aggiornamento");
+
+      if (!res.ok || !json?.ok) {
+        // ✅ messaggi più leggibili
+        const msg = json?.error || "Errore aggiornamento";
+        throw new Error(msg);
+      }
 
       setMsg("Articolo aggiornato.");
       setEditOpen(false);
@@ -349,7 +403,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
               <div>
                 <div className="text-lg font-semibold">Modifica articolo</div>
                 <div className="text-sm text-gray-600">
-                  Codice: <b>{editItem.code}</b>
+                  ID: <span className="font-mono text-xs">{editItem.id}</span>
                 </div>
               </div>
               <button className="rounded-xl border px-3 py-2 hover:bg-gray-50" onClick={closeEditModal} disabled={savingEdit}>
@@ -358,6 +412,19 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
             </div>
 
             <div className="mt-4 grid grid-cols-1 md:grid-cols-4 gap-3">
+              {/* ✅ CODICE MODIFICABILE */}
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium mb-2">Codice</label>
+                <input className="w-full rounded-xl border p-3" value={editCode} onChange={(e) => setEditCode(e.target.value)} />
+                <div className="mt-1 text-xs text-gray-500">Attenzione: il codice deve restare unico nella categoria (e sottocategoria).</div>
+              </div>
+
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium mb-2">UM (Unità di misura)</label>
+                <input className="w-full rounded-xl border p-3" placeholder="Es. PZ, KG, LT" value={editUm} onChange={(e) => setEditUm(e.target.value)} />
+                <div className="mt-1 text-xs text-gray-500">Lascia vuoto per NULL.</div>
+              </div>
+
               <div className="md:col-span-4">
                 <label className="block text-sm font-medium mb-2">Descrizione</label>
                 <input className="w-full rounded-xl border p-3" value={editDescription} onChange={(e) => setEditDescription(e.target.value)} />
@@ -377,37 +444,19 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
 
               <div>
                 <label className="block text-sm font-medium mb-2">Peso (kg)</label>
-                <input
-                  className="w-full rounded-xl border p-3"
-                  inputMode="decimal"
-                  placeholder="Es. 0,032"
-                  value={editPesoKg}
-                  onChange={(e) => setEditPesoKg(e.target.value)}
-                />
+                <input className="w-full rounded-xl border p-3" inputMode="decimal" placeholder="Es. 0,032" value={editPesoKg} onChange={(e) => setEditPesoKg(e.target.value)} />
                 <div className="mt-1 text-xs text-gray-500">Lascia vuoto per NULL.</div>
               </div>
 
               <div>
                 <label className="block text-sm font-medium mb-2">Conf. da</label>
-                <input
-                  className="w-full rounded-xl border p-3"
-                  inputMode="numeric"
-                  placeholder="Es. 10"
-                  value={editConfDa}
-                  onChange={(e) => setEditConfDa(e.target.value)}
-                />
+                <input className="w-full rounded-xl border p-3" inputMode="numeric" placeholder="Es. 10" value={editConfDa} onChange={(e) => setEditConfDa(e.target.value)} />
                 <div className="mt-1 text-xs text-gray-500">Lascia vuoto per NULL (default 10 nel riordino).</div>
               </div>
 
               <div>
                 <label className="block text-sm font-medium mb-2">Prezzo di Vendita</label>
-                <input
-                  className="w-full rounded-xl border p-3"
-                  inputMode="decimal"
-                  placeholder="Es. 6,50"
-                  value={editPrezzo}
-                  onChange={(e) => setEditPrezzo(e.target.value)}
-                />
+                <input className="w-full rounded-xl border p-3" inputMode="decimal" placeholder="Es. 6,50" value={editPrezzo} onChange={(e) => setEditPrezzo(e.target.value)} />
                 <div className="mt-1 text-xs text-gray-500">Lascia vuoto per NULL.</div>
               </div>
 
@@ -417,11 +466,12 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
                 </button>
               </div>
             </div>
+
+            {error && <div className="mt-3 text-sm text-red-600">{error}</div>}
           </div>
         </div>
       )}
 
-      {/* admin: crea categoria/sottocategoria */}
       {isAdmin && (
         <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
           <form onSubmit={createCategory} className="space-y-2">
@@ -446,7 +496,6 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
         </div>
       )}
 
-      {/* filtri */}
       <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-5 gap-3">
         <div className="md:col-span-2">
           <label className="block text-sm font-medium mb-2">Categoria</label>
@@ -462,12 +511,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
 
         <div className="md:col-span-2">
           <label className="block text-sm font-medium mb-2">Sottocategoria</label>
-          <select
-            className="w-full rounded-xl border p-3 bg-white"
-            value={subcategoryId}
-            onChange={(e) => setSubcategoryId(e.target.value)}
-            disabled={!categoryId}
-          >
+          <select className="w-full rounded-xl border p-3 bg-white" value={subcategoryId} onChange={(e) => setSubcategoryId(e.target.value)} disabled={!categoryId}>
             <option value="">— Nessuna —</option>
             {subcategories.map((s) => (
               <option key={s.id} value={s.id}>
@@ -492,32 +536,9 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
         </div>
       </div>
 
-      {/* import (solo admin) */}
-      {isAdmin && (
-        <form onSubmit={doImport} className="rounded-2xl border bg-white p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="font-semibold">Import articoli (Excel)</div>
-              <div className="text-sm text-gray-600">Seleziona categoria/sottocategoria e importa. (Excel: Codice/Descrizione oppure Codice/Barcode)</div>
-            </div>
-            <button className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60" disabled={!file || importing}>
-              {importing ? "Importo..." : "Importa"}
-            </button>
-          </div>
-
-          <input type="file" accept=".xlsx" onChange={(e) => setFile(e.target.files?.[0] || null)} />
-          {file && (
-            <div className="text-sm text-gray-600">
-              Selezionato: <b>{file.name}</b>
-            </div>
-          )}
-        </form>
-      )}
-
       {msg && <p className="text-sm text-green-700">{msg}</p>}
       {error && <p className="text-sm text-red-600">{error}</p>}
 
-      {/* tabella */}
       <div className="overflow-auto rounded-2xl border bg-white">
         <table className="w-full text-sm">
           <thead className="bg-gray-50">
@@ -525,12 +546,10 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
               <th className="text-left p-3">Codice</th>
               <th className="text-left p-3">Descrizione</th>
               <th className="text-left p-3 w-48">Barcode</th>
-
-              {/* ✅ SOLO TABACCHI */}
+              <th className="text-left p-3 w-20">UM</th>
+              <th className="text-right p-3 w-36">Prezzo</th>
               {showTabacchiCols && <th className="text-right p-3 w-32">Peso (kg)</th>}
               {showTabacchiCols && <th className="text-right p-3 w-28">Conf. da</th>}
-              {showTabacchiCols && <th className="text-right p-3 w-40">Prezzo di Vendita</th>}
-
               <th className="text-left p-3">Attivo</th>
               <th className="text-left p-3"></th>
             </tr>
@@ -538,7 +557,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
           <tbody>
             {loading && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={showTabacchiCols ? 8 : 5}>
+                <td className="p-3 text-gray-500" colSpan={showTabacchiCols ? 9 : 7}>
                   Caricamento...
                 </td>
               </tr>
@@ -546,7 +565,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
 
             {!loading && rows.length === 0 && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={showTabacchiCols ? 8 : 5}>
+                <td className="p-3 text-gray-500" colSpan={showTabacchiCols ? 9 : 7}>
                   Nessun articolo trovato.
                 </td>
               </tr>
@@ -556,17 +575,15 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
               <tr key={r.id} className="border-t">
                 <td className="p-3 font-medium">{r.code}</td>
                 <td className="p-3">{r.description}</td>
-                <td className="p-3 font-mono text-xs">{r.barcode || "—"}</td>
-
-                {/* ✅ SOLO TABACCHI */}
-                {showTabacchiCols && <td className="p-3 text-right font-medium">{formatPesoKg(r.peso_kg)}</td>}
-                {showTabacchiCols && <td className="p-3 text-right font-medium">{formatConfDa(r.conf_da)}</td>}
-                {showTabacchiCols && <td className="p-3 text-right font-medium">{formatEuro(r.prezzo_vendita_eur)}</td>}
-
-                <td className="p-3">{r.is_active ? "SI" : "NO"}</td>
-                <td className="p-3">
-                  {isAdmin ? (
-                    <div className="flex gap-2">
+                <td className="p-3 font-mono text-xs">{r.barcode ? String(r.barcode) : "—"}</td>
+                <td className="p-3">{formatUm(r.um)}</td>
+                <td className="p-3 text-right">{formatEuroIT(r.prezzo_vendita_eur)}</td>
+                {showTabacchiCols && <td className="p-3 text-right">{formatPesoKg(r.peso_kg)}</td>}
+                {showTabacchiCols && <td className="p-3 text-right">{formatConfDa(r.conf_da)}</td>}
+                <td className="p-3">{r.is_active ? "Sì" : "No"}</td>
+                <td className="p-3 text-right">
+                  {isAdmin && (
+                    <div className="flex items-center justify-end gap-2">
                       <button className="rounded-xl border px-3 py-2 hover:bg-gray-50" onClick={() => openEditModal(r)}>
                         Modifica
                       </button>
@@ -574,8 +591,6 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
                         {r.is_active ? "Disattiva" : "Attiva"}
                       </button>
                     </div>
-                  ) : (
-                    <span className="text-gray-400">Solo admin</span>
                   )}
                 </td>
               </tr>
@@ -586,6 +601,10 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     </div>
   );
 }
+
+
+
+
 
 
 

@@ -6,6 +6,11 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 export const runtime = "nodejs";
 
+function isUuid(v: string | null) {
+  if (!v) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v.trim());
+}
+
 export async function PATCH(req: Request) {
   const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
   if (!session || session.role !== "admin") {
@@ -13,19 +18,22 @@ export async function PATCH(req: Request) {
   }
 
   const body = await req.json().catch(() => null);
+
   const id = String(body?.id ?? "").trim();
+  const code = body?.code; // ✅ nuovo
   const description = body?.description;
   const is_active = body?.is_active;
   const peso_kg = body?.peso_kg;
   const prezzo_vendita_eur = body?.prezzo_vendita_eur;
-  const conf_da = body?.conf_da; // ✅ NEW (già c’era)
-  const barcode = body?.barcode; // ✅ NEW
+  const conf_da = body?.conf_da;
+  const barcode = body?.barcode;
+  const um = body?.um;
 
   if (!id) return NextResponse.json({ ok: false, error: "ID mancante" }, { status: 400 });
 
   function toNullableNumber(v: any): number | null | undefined {
-    if (v === undefined) return undefined; // non aggiornare
-    if (v === null || v === "") return null; // set NULL
+    if (v === undefined) return undefined;
+    if (v === null || v === "") return null;
     const n = typeof v === "number" ? v : Number(String(v).replace(",", "."));
     if (!Number.isFinite(n)) return null;
     return n;
@@ -40,14 +48,68 @@ export async function PATCH(req: Request) {
   }
 
   function toNullableText(v: any): string | null | undefined {
-    if (v === undefined) return undefined; // non aggiornare
-    if (v === null) return null; // set NULL
+    if (v === undefined) return undefined;
+    if (v === null) return null;
     const s = String(v).trim();
-    if (!s) return null; // vuoto => NULL
+    if (!s) return null;
     return s;
   }
 
+  // ✅ Leggo lo scope dell'articolo, per controllare duplicati su code
+  const { data: current, error: curErr } = await supabaseAdmin
+    .from("items")
+    .select("id, code, category, category_id, subcategory_id")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (curErr) {
+    console.error("[items/update] read current error:", curErr);
+    return NextResponse.json({ ok: false, error: curErr.message }, { status: 500 });
+  }
+  if (!current) {
+    return NextResponse.json({ ok: false, error: "Articolo non trovato" }, { status: 404 });
+  }
+
   const patch: any = { updated_at: new Date().toISOString() };
+
+  // ✅ CODE: se fornito, controllo duplicati nello stesso scope
+  if (code !== undefined) {
+    const nextCode = String(code ?? "").trim();
+    if (!nextCode) {
+      return NextResponse.json({ ok: false, error: "Il codice non può essere vuoto" }, { status: 400 });
+    }
+
+    if (nextCode !== String(current.code)) {
+      let dupQuery = supabaseAdmin.from("items").select("id").eq("code", nextCode).neq("id", id).limit(1);
+
+      // Nuovo schema: scope su category_id (+ subcategory_id se presente)
+      if (current.category_id && isUuid(String(current.category_id))) {
+        dupQuery = dupQuery.eq("category_id", current.category_id);
+        // se vuoi scope più stretto anche per subcategory_id, lo lasciamo così:
+        if (current.subcategory_id && isUuid(String(current.subcategory_id))) {
+          dupQuery = dupQuery.eq("subcategory_id", current.subcategory_id);
+        }
+      } else {
+        // Legacy: scope su category (TAB/GV)
+        if (current.category) dupQuery = dupQuery.eq("category", current.category);
+      }
+
+      const { data: dup, error: dupErr } = await dupQuery;
+      if (dupErr) {
+        console.error("[items/update] dup check error:", dupErr);
+        return NextResponse.json({ ok: false, error: dupErr.message }, { status: 500 });
+      }
+
+      if (Array.isArray(dup) && dup.length > 0) {
+        return NextResponse.json(
+          { ok: false, error: `Esiste già un articolo con codice "${nextCode}" in questa categoria (o sottocategoria).` },
+          { status: 409 }
+        );
+      }
+
+      patch.code = nextCode;
+    }
+  }
 
   if (typeof description === "string") patch.description = description.trim();
   if (typeof is_active === "boolean") patch.is_active = is_active;
@@ -64,6 +126,9 @@ export async function PATCH(req: Request) {
   const nextBarcode = toNullableText(barcode);
   if (nextBarcode !== undefined) patch.barcode = nextBarcode;
 
+  const nextUm = toNullableText(um);
+  if (nextUm !== undefined) patch.um = nextUm;
+
   const { error } = await supabaseAdmin.from("items").update(patch).eq("id", id);
   if (error) {
     console.error("[items/update] error:", error);
@@ -72,6 +137,8 @@ export async function PATCH(req: Request) {
 
   return NextResponse.json({ ok: true });
 }
+
+
 
 
 

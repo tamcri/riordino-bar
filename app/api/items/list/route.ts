@@ -63,7 +63,7 @@ export async function GET(req: Request) {
   let query = supabaseAdmin
     .from("items")
     .select(
-      "id, category, category_id, subcategory_id, code, description, barcode, peso_kg, conf_da, prezzo_vendita_eur, is_active, created_at, updated_at"
+      "id, category, category_id, subcategory_id, code, description, barcode, um, peso_kg, conf_da, prezzo_vendita_eur, is_active, created_at, updated_at"
     )
     .order("code", { ascending: true })
     .limit(limit);
@@ -97,11 +97,7 @@ export async function GET(req: Request) {
 
       query = query.or(orExpr);
     } else {
-      const orExpr = [
-        `code.ilike.%${safeText}%`,
-        `description.ilike.%${safeText}%`,
-        `barcode.ilike.%${safeText}%`,
-      ].join(",");
+      const orExpr = [`code.ilike.%${safeText}%`, `description.ilike.%${safeText}%`, `barcode.ilike.%${safeText}%`].join(",");
 
       query = query.or(orExpr);
     }
@@ -116,6 +112,7 @@ export async function GET(req: Request) {
 
   return NextResponse.json({ ok: true, rows: data || [] });
 }
+
 
 
 

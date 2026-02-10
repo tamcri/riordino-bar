@@ -57,11 +57,18 @@ function readCellString(cell: ExcelJS.Cell): string {
 type ExtractedRow = {
   code: string;
   description: string;
+  um?: string | null;
   peso_kg: number | null;
   prezzo_vendita_eur: number | null;
   conf_da: number | null;
   barcode?: string | null;
 };
+
+function normUm(v: any): string | null {
+  const s = String(v ?? "").trim();
+  if (!s) return null;
+  return s;
+}
 
 function parsePesoKg(cellText: string, headerHint: string | null): number | null {
   const t0 = String(cellText ?? "").trim();
@@ -193,41 +200,26 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Solo admin può importare articoli" }, { status: 401 });
     }
 
-    const formData = await req.formData();
-    const file = formData.get("file") as File | null;
-
-    // NEW
-    const category_id = String(formData.get("category_id") ?? "").trim() || null;
-    const subcategory_id = String(formData.get("subcategory_id") ?? "").trim() || null;
-
-    // LEGACY
-    const legacyCategoryRaw = String(formData.get("category") ?? "").toUpperCase().trim(); // TAB | GV
-
+    const form = await req.formData();
+    const file = form.get("file") as File | null;
     if (!file) return NextResponse.json({ ok: false, error: "File mancante" }, { status: 400 });
 
-    const useNew = isUuid(category_id);
+    // ✅ Nuovo schema: category_id obbligatorio (uuid). subcategory_id opzionale
+    const category_id = String(form.get("category_id") ?? "").trim();
+    const subcategory_id = String(form.get("subcategory_id") ?? "").trim() || null;
 
-    if (!useNew) {
-      if (!["TAB", "GV"].includes(legacyCategoryRaw)) {
-        return NextResponse.json(
-          { ok: false, error: "Categoria non valida. Usa category_id (nuovo) oppure category=TAB|GV (legacy)." },
-          { status: 400 }
-        );
-      }
-    } else {
-      if (subcategory_id && !isUuid(subcategory_id)) {
-        return NextResponse.json({ ok: false, error: "subcategory_id non valido" }, { status: 400 });
-      }
+    // ✅ Vecchio schema legacy: category=TAB/GV
+    const legacyCategory = String(form.get("category") ?? "").trim().toUpperCase() as "TAB" | "GV" | "";
 
-      const { data: catRow, error: catErr } = await supabaseAdmin
-        .from("categories")
-        .select("id")
-        .eq("id", category_id as string)
-        .maybeSingle();
-      if (catErr) return NextResponse.json({ ok: false, error: catErr.message }, { status: 500 });
-      if (!catRow) return NextResponse.json({ ok: false, error: "Categoria non trovata" }, { status: 400 });
+    const usingNewSchema = !!category_id;
+
+    if (usingNewSchema) {
+      if (!isUuid(category_id)) return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
 
       if (subcategory_id) {
+        if (!isUuid(subcategory_id)) return NextResponse.json({ ok: false, error: "subcategory_id non valido" }, { status: 400 });
+
+        // verifica appartenenza sottocategoria
         const { data: subRow, error: subErr } = await supabaseAdmin
           .from("subcategories")
           .select("id, category_id")
@@ -238,6 +230,10 @@ export async function POST(req: Request) {
         if (subRow.category_id !== category_id) {
           return NextResponse.json({ ok: false, error: "La sottocategoria non appartiene alla categoria selezionata" }, { status: 400 });
         }
+      }
+    } else {
+      if (!legacyCategory || !["TAB", "GV"].includes(legacyCategory)) {
+        return NextResponse.json({ ok: false, error: "Categoria legacy non valida (TAB/GV)" }, { status: 400 });
       }
     }
 
@@ -266,6 +262,7 @@ export async function POST(req: Request) {
     let prezzoVenditaCol = -1;
     let confDaCol = -1;
     let barcodeCol = -1;
+    let umCol = -1;
 
     let pesoHeaderHint: string | null = null;
 
@@ -275,6 +272,7 @@ export async function POST(req: Request) {
 
       let tmpCode = -1;
       let tmpDesc = -1;
+      let tmpUm = -1;
       let tmpPeso = -1;
       let tmpPrezzoVendita = -1;
       let tmpConfDa = -1;
@@ -296,6 +294,16 @@ export async function POST(req: Request) {
 
         if (tmpDesc === -1 && ["descrizione", "descr", "description", "articolo descrizione"].some((k) => t.includes(k))) {
           tmpDesc = c;
+        }
+
+        if (tmpUm === -1) {
+          const isUm =
+            t === "um" ||
+            t === "u.m" ||
+            t === "u.m." ||
+            (t.includes("unit") && t.includes("mis")) ||
+            (t.includes("unita") && t.includes("mis"));
+          if (isUm) tmpUm = c;
         }
 
         if (
@@ -346,6 +354,7 @@ export async function POST(req: Request) {
         prezzoVenditaCol = tmpPrezzoVendita;
         confDaCol = tmpConfDa;
         barcodeCol = tmpBarcode;
+        umCol = tmpUm;
         pesoHeaderHint = tmpPesoHint;
         break;
       }
@@ -404,9 +413,15 @@ export async function POST(req: Request) {
         barcode = bText ? bText : null;
       }
 
+      let um: string | null = null;
+      if (umCol !== -1) {
+        um = normUm(readCellString(row.getCell(umCol)));
+      }
+
       extracted.push({
         code,
         description: desc || code,
+        um,
         peso_kg,
         prezzo_vendita_eur,
         conf_da,
@@ -430,192 +445,198 @@ export async function POST(req: Request) {
       const confNorm =
         typeof r.conf_da === "number" && Number.isFinite(r.conf_da) && r.conf_da >= 2 ? Math.trunc(r.conf_da) : null;
 
-      const barcodeNorm =
-        r.barcode === undefined ? undefined : r.barcode && String(r.barcode).trim() ? String(r.barcode).trim() : null;
+      const barcodeNorm = r.barcode == null ? null : String(r.barcode).trim() || null;
 
       map.set(code, {
         code,
-        description: normDesc(r.description) || code,
+        description: (r.description || code).trim(),
+        um: r.um == null ? null : String(r.um).trim() || null,
         peso_kg: pesoNorm,
         prezzo_vendita_eur: prezzoNorm,
         conf_da: confNorm,
-        barcode: barcodeNorm ?? null,
+        barcode: barcodeNorm,
       });
     }
 
-    const rows = Array.from(map.values()).filter((r) => r && r.code && String(r.code).trim() !== "");
-    if (rows.length === 0) {
-      return NextResponse.json({ ok: false, error: "Nessun codice valido trovato (dopo dedup)." }, { status: 400 });
-    }
+    const deduped = Array.from(map.values());
+    const codes = deduped.map((r) => r.code);
 
-    const codes = rows.map((r) => r.code);
-    const now = new Date().toISOString();
-
-    // ==========================
-    // BARCODE IMPORT MODE (UPDATE ONLY, NO INSERT)
-    // ==========================
+    // ===== import barcode-only: aggiorna barcode su esistenti (per categoria) =====
     if (barcodeImportMode) {
-      if (useNew) {
-        const existing = await getExistingItemsByCodeNew(category_id as string, codes);
+      let updated = 0;
+      let not_found = 0;
 
-        // ✅ FIX: includo SEMPRE code (e description) per evitare insert con code=null in casi limite
-        const payload = rows
-          .map((r) => {
-            const id = existing.get(r.code);
-            if (!id) return null;
-            return {
-              id,
-              code: r.code,
-              description: r.description,
-              barcode: r.barcode ?? null,
-              updated_at: now,
-            };
-          })
-          .filter(Boolean) as any[];
+      if (usingNewSchema) {
+        const existingMap = await getExistingItemsByCodeNew(category_id, codes);
 
-        const updated = payload.length;
-        const not_found = rows.length - updated;
+        // update per chunk
+        const chunkSize = 200;
+        for (let i = 0; i < deduped.length; i += chunkSize) {
+          const chunk = deduped.slice(i, i + chunkSize);
 
-        if (payload.length > 0) {
-          const { error: upErr } = await supabaseAdmin.from("items").upsert(payload, { onConflict: "id" });
-          if (upErr) {
-            console.error("[items/import][barcode][new] upsert error:", upErr);
-            return NextResponse.json({ ok: false, error: upErr.message || "Errore import barcode" }, { status: 500 });
+          const updates = [];
+          for (const r of chunk) {
+            const id = existingMap.get(r.code);
+            if (!id) {
+              not_found++;
+              continue;
+            }
+            if (!r.barcode) continue;
+
+            updates.push({ id, barcode: r.barcode, updated_at: new Date().toISOString() });
+          }
+
+          for (const u of updates) {
+            const { error } = await supabaseAdmin.from("items").update(u).eq("id", u.id);
+            if (error) throw error;
+            updated++;
           }
         }
 
-        return NextResponse.json({
-          ok: true,
-          mode: "barcode",
-          schema: "new",
-          category_id,
-          subcategory_id: subcategory_id || null,
-          total: rows.length,
-          updated,
-          not_found,
-          skipped_no_code,
-        });
+        return NextResponse.json({ ok: true, mode: "barcode", total: deduped.length, updated, not_found });
       } else {
-        const legacyCategory = legacyCategoryRaw as "TAB" | "GV";
-        const existing = await getExistingItemsByCodeLegacy(legacyCategory, codes);
+        const existingMap = await getExistingItemsByCodeLegacy(legacyCategory as "TAB" | "GV", codes);
 
-        // ✅ FIX: includo SEMPRE code (e description)
-        const payload = rows
-          .map((r) => {
-            const id = existing.get(r.code);
-            if (!id) return null;
-            return {
-              id,
-              code: r.code,
-              description: r.description,
-              barcode: r.barcode ?? null,
-              updated_at: now,
-            };
-          })
-          .filter(Boolean) as any[];
+        const chunkSize = 200;
+        for (let i = 0; i < deduped.length; i += chunkSize) {
+          const chunk = deduped.slice(i, i + chunkSize);
 
-        const updated = payload.length;
-        const not_found = rows.length - updated;
+          const updates = [];
+          for (const r of chunk) {
+            const id = existingMap.get(r.code);
+            if (!id) {
+              not_found++;
+              continue;
+            }
+            if (!r.barcode) continue;
 
-        if (payload.length > 0) {
-          const { error: upErr } = await supabaseAdmin.from("items").upsert(payload, { onConflict: "id" });
-          if (upErr) {
-            console.error("[items/import][barcode][legacy] upsert error:", upErr);
-            return NextResponse.json({ ok: false, error: upErr.message || "Errore import barcode" }, { status: 500 });
+            updates.push({ id, barcode: r.barcode, updated_at: new Date().toISOString() });
+          }
+
+          for (const u of updates) {
+            const { error } = await supabaseAdmin.from("items").update(u).eq("id", u.id);
+            if (error) throw error;
+            updated++;
           }
         }
 
-        return NextResponse.json({
-          ok: true,
-          mode: "barcode",
-          schema: "legacy",
-          category: legacyCategory,
-          total: rows.length,
-          updated,
-          not_found,
-          skipped_no_code,
-        });
+        return NextResponse.json({ ok: true, mode: "barcode", total: deduped.length, updated, not_found });
       }
     }
 
-    // ==========================
-    // NORMAL IMPORT MODE (UPSERT ANAGRAFICA)
-    // ==========================
-    if (useNew) {
-      const payload = rows.map((r) => ({
-        category_id,
-        subcategory_id: subcategory_id || null,
-        code: r.code,
-        description: r.description,
-        barcode: r.barcode ?? null,
-        peso_kg: r.peso_kg,
-        prezzo_vendita_eur: r.prezzo_vendita_eur,
-        conf_da: r.conf_da,
-        is_active: true,
-        updated_at: now,
-      }));
+    // ===== import completo: upsert logico (insert se non esiste, update se esiste) =====
+    let inserted = 0;
+    let updated = 0;
 
-      const { error: upErr } = await supabaseAdmin.from("items").upsert(payload, { onConflict: "category_id,code" });
-      if (upErr) {
-        console.error("[items/import][new] upsert error:", upErr);
-        return NextResponse.json({ ok: false, error: upErr.message || "Errore import" }, { status: 500 });
+    if (usingNewSchema) {
+      const existingMap = await getExistingItemsByCodeNew(category_id, codes);
+
+      const toInsert: any[] = [];
+      const toUpdate: any[] = [];
+
+      for (const r of deduped) {
+        const existingId = existingMap.get(r.code);
+        if (!existingId) {
+          toInsert.push({
+            category_id,
+            subcategory_id,
+            code: r.code,
+            description: r.description,
+            barcode: r.barcode == null ? null : r.barcode,
+            um: r.um == null ? null : r.um,
+            peso_kg: r.peso_kg,
+            conf_da: r.conf_da,
+            prezzo_vendita_eur: r.prezzo_vendita_eur,
+            is_active: true,
+          });
+        } else {
+          toUpdate.push({
+            id: existingId,
+            description: r.description,
+            barcode: r.barcode == null ? null : r.barcode,
+            um: r.um == null ? null : r.um,
+            peso_kg: r.peso_kg,
+            conf_da: r.conf_da,
+            prezzo_vendita_eur: r.prezzo_vendita_eur,
+            updated_at: new Date().toISOString(),
+          });
+        }
       }
 
-      return NextResponse.json({
-        ok: true,
-        mode: "new",
-        category_id,
-        subcategory_id: subcategory_id || null,
-        total: rows.length,
-        skipped_no_code,
-      });
+      // insert in chunk
+      const chunkSize = 500;
+      for (let i = 0; i < toInsert.length; i += chunkSize) {
+        const chunk = toInsert.slice(i, i + chunkSize);
+        const { error } = await supabaseAdmin.from("items").insert(chunk);
+        if (error) throw error;
+        inserted += chunk.length;
+      }
+
+      // update one by one (safe)
+      for (const u of toUpdate) {
+        const { error } = await supabaseAdmin.from("items").update(u).eq("id", u.id);
+        if (error) throw error;
+        updated++;
+      }
+
+      return NextResponse.json({ ok: true, total: deduped.length, inserted, updated, skipped_no_code });
+    } else {
+      const existing = await getExistingCodesLegacy(legacyCategory as "TAB" | "GV", codes);
+
+      const toInsert: any[] = [];
+      const toUpdate: any[] = [];
+
+      for (const r of deduped) {
+        if (!existing.has(r.code)) {
+          toInsert.push({
+            category: legacyCategory,
+            code: r.code,
+            description: r.description,
+            barcode: r.barcode == null ? null : r.barcode,
+            um: r.um == null ? null : r.um,
+            peso_kg: r.peso_kg,
+            conf_da: r.conf_da,
+            prezzo_vendita_eur: r.prezzo_vendita_eur,
+            is_active: true,
+          });
+        } else {
+          toUpdate.push({
+            code: r.code,
+            description: r.description,
+            barcode: r.barcode == null ? null : r.barcode,
+            um: r.um == null ? null : r.um,
+            peso_kg: r.peso_kg,
+            conf_da: r.conf_da,
+            prezzo_vendita_eur: r.prezzo_vendita_eur,
+            updated_at: new Date().toISOString(),
+          });
+        }
+      }
+
+      // insert in chunk
+      const chunkSize = 500;
+      for (let i = 0; i < toInsert.length; i += chunkSize) {
+        const chunk = toInsert.slice(i, i + chunkSize);
+        const { error } = await supabaseAdmin.from("items").insert(chunk);
+        if (error) throw error;
+        inserted += chunk.length;
+      }
+
+      // update one by one (safe)
+      for (const u of toUpdate) {
+        const { error } = await supabaseAdmin.from("items").update(u).eq("category", legacyCategory).eq("code", u.code);
+        if (error) throw error;
+        updated++;
+      }
+
+      return NextResponse.json({ ok: true, total: deduped.length, inserted, updated, skipped_no_code });
     }
-
-    const legacyCategory = legacyCategoryRaw as "TAB" | "GV";
-
-    let existingSet: Set<string>;
-    try {
-      existingSet = await getExistingCodesLegacy(legacyCategory, codes);
-    } catch (e: any) {
-      console.error("[items/import][legacy] existing fetch error:", e);
-      return NextResponse.json({ ok: false, error: "Errore lettura DB" }, { status: 500 });
-    }
-
-    const inserted = rows.filter((r) => !existingSet.has(r.code)).length;
-    const updated = rows.filter((r) => existingSet.has(r.code)).length;
-
-    const payload = rows.map((r) => ({
-      category: legacyCategory,
-      code: r.code,
-      description: r.description,
-      barcode: r.barcode ?? null,
-      peso_kg: r.peso_kg,
-      prezzo_vendita_eur: r.prezzo_vendita_eur,
-      conf_da: r.conf_da,
-      is_active: true,
-      updated_at: now,
-    }));
-
-    const { error: upErr } = await supabaseAdmin.from("items").upsert(payload, { onConflict: "category,code" });
-    if (upErr) {
-      console.error("[items/import][legacy] upsert error:", upErr);
-      return NextResponse.json({ ok: false, error: upErr.message || "Errore import" }, { status: 500 });
-    }
-
-    return NextResponse.json({
-      ok: true,
-      mode: "legacy",
-      category: legacyCategory,
-      total: rows.length,
-      inserted,
-      updated,
-      skipped_no_code,
-    });
   } catch (e: any) {
-    console.error("[items/import] FATAL:", e);
-    return NextResponse.json({ ok: false, error: e?.message || String(e) || "Errore interno" }, { status: 500 });
+    console.error("[items/import] error:", e);
+    return NextResponse.json({ ok: false, error: e?.message || "Errore import" }, { status: 500 });
   }
 }
+
 
 
 
