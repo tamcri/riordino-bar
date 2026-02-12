@@ -1,4 +1,3 @@
-// app/api/items/import/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
@@ -138,12 +137,7 @@ async function getExistingCodesLegacy(category: "TAB" | "GV", codes: string[]) {
 
   for (let i = 0; i < codes.length; i += chunkSize) {
     const chunk = codes.slice(i, i + chunkSize);
-    const { data, error } = await supabaseAdmin
-      .from("items")
-      .select("code")
-      .eq("category", category)
-      .in("code", chunk);
-
+    const { data, error } = await supabaseAdmin.from("items").select("code").eq("category", category).in("code", chunk);
     if (error) throw error;
     (data || []).forEach((r: any) => existing.add(r.code));
   }
@@ -157,15 +151,35 @@ async function getExistingItemsByCodeNew(category_id: string, codes: string[]) {
 
   for (let i = 0; i < codes.length; i += chunkSize) {
     const chunk = codes.slice(i, i + chunkSize);
-    const { data, error } = await supabaseAdmin
-      .from("items")
-      .select("id, code")
-      .eq("category_id", category_id)
-      .in("code", chunk);
+    const { data, error } = await supabaseAdmin.from("items").select("id, code").eq("category_id", category_id).in("code", chunk);
 
     if (error) throw error;
     (data || []).forEach((r: any) => {
       if (r?.code && r?.id) map.set(String(r.code), String(r.id));
+    });
+  }
+
+  return map;
+}
+
+// ✅ NUOVO: lookup globale per code (serve per barcode-map quando l’Excel è multi-categoria)
+type ItemGlobalLite = { id: string; code: string; barcode: string | null };
+async function getExistingItemsByCodeGlobal(codes: string[]) {
+  const map = new Map<string, ItemGlobalLite>(); // code -> item
+  const chunkSize = 500;
+
+  for (let i = 0; i < codes.length; i += chunkSize) {
+    const chunk = codes.slice(i, i + chunkSize);
+    const { data, error } = await supabaseAdmin.from("items").select("id, code, barcode").in("code", chunk);
+    if (error) throw error;
+
+    (data || []).forEach((r: any) => {
+      const code = String(r?.code ?? "").trim();
+      const id = String(r?.id ?? "").trim();
+      if (!code || !id) return;
+
+      const bc = r?.barcode == null ? null : String(r.barcode);
+      map.set(code, { id, code, barcode: bc });
     });
   }
 
@@ -178,11 +192,7 @@ async function getExistingItemsByCodeLegacy(category: "TAB" | "GV", codes: strin
 
   for (let i = 0; i < codes.length; i += chunkSize) {
     const chunk = codes.slice(i, i + chunkSize);
-    const { data, error } = await supabaseAdmin
-      .from("items")
-      .select("id, code")
-      .eq("category", category)
-      .in("code", chunk);
+    const { data, error } = await supabaseAdmin.from("items").select("id, code").eq("category", category).in("code", chunk);
 
     if (error) throw error;
     (data || []).forEach((r: any) => {
@@ -191,6 +201,24 @@ async function getExistingItemsByCodeLegacy(category: "TAB" | "GV", codes: strin
   }
 
   return map;
+}
+
+function splitBarcodes(cellVal: string): string[] {
+  const raw = String(cellVal ?? "").trim();
+  if (!raw) return [];
+
+  // split su ; , | oppure spazi (anche multipli)
+  const parts = raw
+    .split(/[;,|\s]+/g)
+    .map((x) => String(x || "").trim())
+    .filter(Boolean);
+
+  // pulizia minima (tolgo spazi interni)
+  const cleaned = parts
+    .map((x) => x.replace(/\s+/g, ""))
+    .filter(Boolean);
+
+  return Array.from(new Set(cleaned));
 }
 
 export async function POST(req: Request) {
@@ -213,6 +241,9 @@ export async function POST(req: Request) {
 
     const usingNewSchema = !!category_id;
 
+    // ✅ modalità: standard | barcode-map
+    const mode = String(form.get("mode") ?? "").trim().toLowerCase(); // "barcode-map"
+
     if (usingNewSchema) {
       if (!isUuid(category_id)) return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
 
@@ -220,11 +251,7 @@ export async function POST(req: Request) {
         if (!isUuid(subcategory_id)) return NextResponse.json({ ok: false, error: "subcategory_id non valido" }, { status: 400 });
 
         // verifica appartenenza sottocategoria
-        const { data: subRow, error: subErr } = await supabaseAdmin
-          .from("subcategories")
-          .select("id, category_id")
-          .eq("id", subcategory_id)
-          .maybeSingle();
+        const { data: subRow, error: subErr } = await supabaseAdmin.from("subcategories").select("id, category_id").eq("id", subcategory_id).maybeSingle();
         if (subErr) return NextResponse.json({ ok: false, error: subErr.message }, { status: 500 });
         if (!subRow) return NextResponse.json({ ok: false, error: "Sottocategoria non trovata" }, { status: 400 });
         if (subRow.category_id !== category_id) {
@@ -235,6 +262,10 @@ export async function POST(req: Request) {
       if (!legacyCategory || !["TAB", "GV"].includes(legacyCategory)) {
         return NextResponse.json({ ok: false, error: "Categoria legacy non valida (TAB/GV)" }, { status: 400 });
       }
+    }
+
+    if (mode === "barcode-map" && !usingNewSchema) {
+      return NextResponse.json({ ok: false, error: "modalità barcode-map supportata solo con category_id/subcategory_id (nuovo schema)" }, { status: 400 });
     }
 
     const input = await file.arrayBuffer();
@@ -297,19 +328,11 @@ export async function POST(req: Request) {
         }
 
         if (tmpUm === -1) {
-          const isUm =
-            t === "um" ||
-            t === "u.m" ||
-            t === "u.m." ||
-            (t.includes("unit") && t.includes("mis")) ||
-            (t.includes("unita") && t.includes("mis"));
+          const isUm = t === "um" || t === "u.m" || t === "u.m." || (t.includes("unit") && t.includes("mis")) || (t.includes("unita") && t.includes("mis"));
           if (isUm) tmpUm = c;
         }
 
-        if (
-          tmpPeso === -1 &&
-          ["peso", "peso articolo", "peso (kg)", "peso kg", "peso_kg", "kg", "grammi", "gr", "g"].some((k) => t.includes(k))
-        ) {
+        if (tmpPeso === -1 && ["peso", "peso articolo", "peso (kg)", "peso kg", "peso_kg", "kg", "grammi", "gr", "g"].some((k) => t.includes(k))) {
           tmpPeso = c;
           tmpPesoHint = t;
         }
@@ -318,8 +341,7 @@ export async function POST(req: Request) {
           const hasPrezzo = t.includes("prezzo");
           const hasVendita = t.includes("vendita");
           const isCosto = t.includes("costo") || t.includes("acquisto") || t.includes("carico");
-          const looksLikeVendita =
-            ["prezzo di vendita", "prezzo vendita", "prezzo vend", "vendita", "prezzo"].some((k) => t.includes(k)) && !isCosto;
+          const looksLikeVendita = ["prezzo di vendita", "prezzo vendita", "prezzo vend", "vendita", "prezzo"].some((k) => t.includes(k)) && !isCosto;
 
           if ((hasPrezzo || hasVendita) && looksLikeVendita) {
             tmpPrezzoVendita = c;
@@ -433,17 +455,15 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Nessuna riga valida trovata (dopo intestazioni)." }, { status: 400 });
     }
 
-    // dedup by code (ultima vince)
+    // dedup by code (ultima vince) - legacy comportamento
     const map = new Map<string, ExtractedRow>();
     for (const r of extracted) {
       const code = normCode(r.code);
       if (!code) continue;
 
       const pesoNorm = typeof r.peso_kg === "number" && Number.isFinite(r.peso_kg) ? r.peso_kg : null;
-      const prezzoNorm =
-        typeof r.prezzo_vendita_eur === "number" && Number.isFinite(r.prezzo_vendita_eur) ? r.prezzo_vendita_eur : null;
-      const confNorm =
-        typeof r.conf_da === "number" && Number.isFinite(r.conf_da) && r.conf_da >= 2 ? Math.trunc(r.conf_da) : null;
+      const prezzoNorm = typeof r.prezzo_vendita_eur === "number" && Number.isFinite(r.prezzo_vendita_eur) ? r.prezzo_vendita_eur : null;
+      const confNorm = typeof r.conf_da === "number" && Number.isFinite(r.conf_da) && r.conf_da >= 2 ? Math.trunc(r.conf_da) : null;
 
       const barcodeNorm = r.barcode == null ? null : String(r.barcode).trim() || null;
 
@@ -461,7 +481,184 @@ export async function POST(req: Request) {
     const deduped = Array.from(map.values());
     const codes = deduped.map((r) => r.code);
 
+    // ===== ✅ import barcode-map (item_barcodes, senza sovrascrivere) =====
+    if (mode === "barcode-map") {
+      if (barcodeCol === -1) {
+        return NextResponse.json({ ok: false, error: "Modalità barcode-map: colonna 'Barcode' non trovata." }, { status: 400 });
+      }
+      if (!usingNewSchema) {
+        return NextResponse.json({ ok: false, error: "Modalità barcode-map richiede category_id (nuovo schema)." }, { status: 400 });
+      }
+
+      // NON deduppo per code: devo supportare barcode multipli per lo stesso item anche su righe diverse
+      const codeSet = Array.from(new Set(extracted.map((r) => normCode(r.code)).filter(Boolean)));
+
+      // ✅ lookup globale per code (Excel può contenere più categorie, ma code è univoco globale)
+      const globalMap = await getExistingItemsByCodeGlobal(codeSet);
+
+      type Op = { item_id: string; barcode: string };
+      const ops: Op[] = [];
+
+      let not_found = 0;
+      let rows_with_no_barcode = 0;
+
+      // retro-compat: se items.barcode è vuoto -> primo barcode che tocchiamo per item
+      const firstBarcodeForItem = new Map<string, string>();
+
+      for (const r of extracted) {
+        const code = normCode(r.code);
+        if (!code) continue;
+
+        const item = globalMap.get(code);
+        if (!item?.id) {
+          not_found++;
+          continue;
+        }
+
+        const bRaw = String(r.barcode ?? "").trim();
+        const list = splitBarcodes(bRaw);
+
+        if (list.length === 0) {
+          rows_with_no_barcode++;
+          continue;
+        }
+
+        for (const b of list) {
+          ops.push({ item_id: item.id, barcode: b });
+          if (!firstBarcodeForItem.has(item.id)) firstBarcodeForItem.set(item.id, b);
+        }
+      }
+
+      const total_rows = extracted.length;
+
+      if (ops.length === 0) {
+        return NextResponse.json({
+          ok: true,
+          mode: "barcode-map",
+          total_rows,
+          inserted: 0,
+          skipped_existing: 0,
+          conflicts: 0,
+          not_found,
+          rows_with_no_barcode,
+          skipped_no_code,
+        });
+      }
+
+      // dedup operazioni identiche (item_id+barcode)
+      const uniqKey = (o: Op) => `${o.item_id}__${o.barcode}`;
+      const uniqOpsMap = new Map<string, Op>();
+      for (const o of ops) uniqOpsMap.set(uniqKey(o), o);
+      const uniqOps = Array.from(uniqOpsMap.values());
+
+      // lookup barcodes già esistenti (anti-duplicato forte)
+      const allBarcodes = Array.from(new Set(uniqOps.map((o) => o.barcode)));
+
+      const existingBarcodeToItem = new Map<string, string>(); // barcode -> item_id
+      const chunkSizeLookup = 800;
+
+      for (let i = 0; i < allBarcodes.length; i += chunkSizeLookup) {
+        const chunk = allBarcodes.slice(i, i + chunkSizeLookup);
+        const { data, error } = await supabaseAdmin.from("item_barcodes").select("barcode,item_id").in("barcode", chunk);
+        if (error) throw error;
+
+        (data || []).forEach((r: any) => {
+          const b = String(r?.barcode ?? "").trim();
+          const it = String(r?.item_id ?? "").trim();
+          if (b && it) existingBarcodeToItem.set(b, it);
+        });
+      }
+
+      let inserted = 0;
+      let skipped_existing = 0;
+      let conflicts = 0;
+
+      const toInsert: Op[] = [];
+      for (const o of uniqOps) {
+        const already = existingBarcodeToItem.get(o.barcode);
+        if (already) {
+          if (already === o.item_id) skipped_existing++;
+          else conflicts++;
+          continue;
+        }
+        toInsert.push(o);
+      }
+
+      // inserimento bulk + fallback per-riga (se serve)
+      const insertChunkSize = 500;
+      for (let i = 0; i < toInsert.length; i += insertChunkSize) {
+        const chunk = toInsert.slice(i, i + insertChunkSize);
+
+        const payload = chunk.map((x) => ({ item_id: x.item_id, barcode: x.barcode }));
+        const { error } = await supabaseAdmin.from("item_barcodes").insert(payload);
+
+        if (!error) {
+          inserted += chunk.length;
+          continue;
+        }
+
+        // fallback: prova 1 per volta e classifica skip/conflict
+        for (const one of chunk) {
+          const { error: e1 } = await supabaseAdmin.from("item_barcodes").insert({ item_id: one.item_id, barcode: one.barcode });
+
+          if (!e1) {
+            inserted++;
+            continue;
+          }
+
+          const { data: ex, error: exErr } = await supabaseAdmin.from("item_barcodes").select("barcode,item_id").eq("barcode", one.barcode).maybeSingle();
+          if (exErr) throw exErr;
+
+          if (ex?.item_id) {
+            if (String(ex.item_id) === one.item_id) skipped_existing++;
+            else conflicts++;
+          } else {
+            throw e1;
+          }
+        }
+      }
+
+      // retro-compat: aggiorna items.barcode solo se vuoto
+      // qui uso il dato già letto da items (globalMap), senza query strani
+      const touchedItemIds = Array.from(new Set(toInsert.map((x) => x.item_id)));
+
+      for (const itemId of touchedItemIds) {
+        const first = firstBarcodeForItem.get(itemId);
+        if (!first) continue;
+
+        // trovo l'item in globalMap (id->non ho map diretta, quindi faccio lookup inverso leggero)
+        let current: string = "";
+        for (const it of globalMap.values()) {
+          if (it.id === itemId) {
+            current = String(it.barcode ?? "").trim();
+            break;
+          }
+        }
+        if (current) continue;
+
+        const { error } = await supabaseAdmin
+          .from("items")
+          .update({ barcode: first, updated_at: new Date().toISOString() })
+          .eq("id", itemId);
+
+        if (error) throw error;
+      }
+
+      return NextResponse.json({
+        ok: true,
+        mode: "barcode-map",
+        total_rows,
+        inserted,
+        skipped_existing,
+        conflicts,
+        not_found,
+        rows_with_no_barcode,
+        skipped_no_code,
+      });
+    }
+
     // ===== import barcode-only: aggiorna barcode su esistenti (per categoria) =====
+    // (legacy comportamento esistente - NON toccato)
     if (barcodeImportMode) {
       let updated = 0;
       let not_found = 0;
@@ -636,6 +833,8 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: e?.message || "Errore import" }, { status: 500 });
   }
 }
+
+
 
 
 

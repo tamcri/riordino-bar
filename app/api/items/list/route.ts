@@ -25,6 +25,73 @@ function looksLikeBarcode(digits: string) {
   return digits.length >= 8;
 }
 
+async function findItemIdsByBarcodeLike(barcodeDigits: string): Promise<string[]> {
+  const b = String(barcodeDigits || "").trim();
+  if (!b) return [];
+
+  try {
+    // Cerco sia match esatto sia "contiene" (utile quando incolli con spazi, o barcode “spezzato”)
+    const { data, error } = await supabaseAdmin
+      .from("item_barcodes")
+      .select("item_id")
+      .or(`barcode.eq.${b},barcode.ilike.%${b}%`)
+      .limit(1000);
+
+    if (error) {
+      // Se la tabella non esiste ancora o errore schema, NON rompo la lista: fallback sul vecchio schema
+      console.warn("[items/list] item_barcodes lookup error (fallback):", error.message);
+      return [];
+    }
+
+    const ids = Array.isArray(data)
+      ? data.map((r: any) => String(r.item_id || "").trim()).filter(Boolean)
+      : [];
+    return Array.from(new Set(ids));
+  } catch (e: any) {
+    console.warn("[items/list] item_barcodes lookup exception (fallback):", e?.message || e);
+    return [];
+  }
+}
+
+async function loadBarcodesForItems(itemIds: string[]): Promise<Map<string, string[]>> {
+  const map = new Map<string, string[]>();
+  const ids = Array.from(new Set((itemIds || []).map((x) => String(x || "").trim()).filter(Boolean)));
+  if (ids.length === 0) return map;
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("item_barcodes")
+      .select("item_id, barcode")
+      .in("item_id", ids)
+      .limit(20000);
+
+    if (error) {
+      console.warn("[items/list] item_barcodes load error (fallback):", error.message);
+      return map;
+    }
+
+    for (const r of Array.isArray(data) ? data : []) {
+      const itemId = String((r as any).item_id || "").trim();
+      const bc = String((r as any).barcode || "").trim();
+      if (!itemId || !bc) continue;
+
+      const prev = map.get(itemId) || [];
+      prev.push(bc);
+      map.set(itemId, prev);
+    }
+
+    // dedup per item
+    for (const [k, arr] of map.entries()) {
+      map.set(k, Array.from(new Set(arr)));
+    }
+
+    return map;
+  } catch (e: any) {
+    console.warn("[items/list] item_barcodes load exception (fallback):", e?.message || e);
+    return map;
+  }
+}
+
 export async function GET(req: Request) {
   const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
 
@@ -59,7 +126,7 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: "Categoria non valida" }, { status: 400 });
   }
 
-  // ✅ Base select: includo anche barcode + tabacchi fields
+  // ✅ Base select: includo anche barcode + tabacchi fields (barcode resta per retrocompatibilità UI)
   let query = supabaseAdmin
     .from("items")
     .select(
@@ -82,22 +149,38 @@ export async function GET(req: Request) {
     query = query.eq("category", cat);
   }
 
-  // ✅ Ricerca: code/description sempre, barcode con logica intelligente
+  // ✅ Ricerca: code/description sempre, barcode multi-valore via item_barcodes quando sembra barcode
   if (qRaw) {
     const safeText = normSearchText(qRaw);
     const digits = extractDigits(qRaw);
 
     if (looksLikeBarcode(digits)) {
-      const orExpr = [
+      const ids = await findItemIdsByBarcodeLike(digits);
+
+      // PostgREST: id.in.(uuid1,uuid2,...)
+      const idInExpr = ids.length > 0 ? `id.in.(${ids.join(",")})` : "";
+
+      const orParts = [
+        // ✅ match via tabella nuova (se presente)
+        idInExpr,
+
+        // ✅ retrocompatibilità: vecchio barcode su items
         `barcode.eq.${digits}`,
+        `barcode.ilike.%${digits}%`,
+
+        // ✅ ricerca classica
         `code.ilike.%${safeText}%`,
         `description.ilike.%${safeText}%`,
-        `barcode.ilike.%${digits}%`,
-      ].join(",");
+      ].filter(Boolean);
 
-      query = query.or(orExpr);
+      query = query.or(orParts.join(","));
     } else {
-      const orExpr = [`code.ilike.%${safeText}%`, `description.ilike.%${safeText}%`, `barcode.ilike.%${safeText}%`].join(",");
+      // ricerca testuale standard (mantengo anche barcode su items)
+      const orExpr = [
+        `code.ilike.%${safeText}%`,
+        `description.ilike.%${safeText}%`,
+        `barcode.ilike.%${safeText}%`,
+      ].join(",");
 
       query = query.or(orExpr);
     }
@@ -110,8 +193,28 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
 
-  return NextResponse.json({ ok: true, rows: data || [] });
+  const rows = Array.isArray(data) ? data : [];
+
+  // ✅ arricchisco con lista barcode (se tabella esiste)
+  const ids = rows.map((r: any) => String(r?.id || "").trim()).filter(Boolean);
+  const barcodeMap = await loadBarcodesForItems(ids);
+
+  const enriched = rows.map((r: any) => {
+    const id = String(r?.id || "").trim();
+    const barcodes = barcodeMap.get(id) || [];
+    const legacyBarcode = String(r?.barcode || "").trim();
+    return {
+      ...r,
+      barcodes,
+      // retrocompat: se barcode legacy è vuoto, uso il primo associato
+      barcode: legacyBarcode || barcodes[0] || null,
+    };
+  });
+
+  return NextResponse.json({ ok: true, rows: enriched });
 }
+
+
 
 
 

@@ -1,4 +1,3 @@
-// app/user/items/ItemsClient.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -103,7 +102,6 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
 
   // ✅ nuovo: codice editabile
   const [editCode, setEditCode] = useState("");
-
   const [editDescription, setEditDescription] = useState("");
   const [editBarcode, setEditBarcode] = useState<string>("");
   const [editUm, setEditUm] = useState<string>("");
@@ -112,6 +110,13 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   const [editPrezzo, setEditPrezzo] = useState<string>("");
   const [savingEdit, setSavingEdit] = useState(false);
 
+  // ✅ MULTI-BARCODE (item_barcodes)
+  const [editBarcodes, setEditBarcodes] = useState<string[]>([]);
+  const [barcodesLoading, setBarcodesLoading] = useState(false);
+  const [barcodesError, setBarcodesError] = useState<string | null>(null);
+  const [newExtraBarcode, setNewExtraBarcode] = useState("");
+  const [barcodesSaving, setBarcodesSaving] = useState(false);
+
   // IMPORT + PREVIEW
   const [file, setFile] = useState<File | null>(null);
   const [importing, setImporting] = useState(false);
@@ -119,6 +124,9 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   const [previewRows, setPreviewRows] = useState<any[]>([]);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+
+  // ✅ MODALITÀ IMPORT (standard | barcode-map)
+  const [importMode, setImportMode] = useState<"standard" | "barcode-map">("standard");
 
   // CATEGORIE
   const [categories, setCategories] = useState<Category[]>([]);
@@ -144,10 +152,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   const [assignPreviewItem, setAssignPreviewItem] = useState<Item | null>(null);
 
   const selectedCategory = useMemo(() => categories.find((c) => c.id === categoryId) || null, [categories, categoryId]);
-  const selectedSubcategory = useMemo(
-    () => subcategories.find((s) => s.id === subcategoryId) || null,
-    [subcategories, subcategoryId]
-  );
+  const selectedSubcategory = useMemo(() => subcategories.find((s) => s.id === subcategoryId) || null, [subcategories, subcategoryId]);
 
   const showTabacchiCols = useMemo(() => isTabacchiCategory(selectedCategory), [selectedCategory]);
 
@@ -177,7 +182,9 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
       setSubcategories([]);
       return;
     }
-    const res = await fetch(`/api/subcategories/list?category_id=${encodeURIComponent(catId)}`, { cache: "no-store" });
+    const res = await fetch(`/api/subcategories/list?category_id=${encodeURIComponent(catId)}`, {
+      cache: "no-store",
+    });
     const json = await res.json().catch(() => null);
     if (res.ok && json?.ok && Array.isArray(json?.rows)) setSubcategories(json.rows);
   }
@@ -226,7 +233,6 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   }, [isAdmin, categoryId, loading, qTrim, rows.length]);
 
   useEffect(() => {
-    // apre/chiude automaticamente il box quando cambiano le condizioni
     if (showAssignBox) {
       setAssignOpen(true);
     } else {
@@ -235,7 +241,6 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
       setAssignError(null);
       setAssigning(false);
 
-      // ✅ reset preview
       setAssignPreviewLoading(false);
       setAssignPreviewError(null);
       setAssignPreviewItem(null);
@@ -262,7 +267,6 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
       setAssignPreviewItem(null);
 
       try {
-        // uso l'endpoint già esistente per cercare il codice nella categoria selezionata
         const p = new URLSearchParams();
         p.set("category_id", categoryId);
         p.set("active", "all");
@@ -274,8 +278,6 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
         if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore preview articolo");
 
         const list: Item[] = Array.isArray(json?.rows) ? json.rows : [];
-
-        // preferisco match esatto sul codice (case-insensitive), altrimenti primo risultato
         const exact = list.find((r) => String(r.code).trim().toLowerCase() === code.toLowerCase()) || null;
         const picked = exact || list[0] || null;
 
@@ -298,7 +300,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
       }
     }
 
-    const t = setTimeout(fetchPreview, 250); // piccolo debounce
+    const t = setTimeout(fetchPreview, 250);
     return () => {
       alive = false;
       clearTimeout(t);
@@ -350,12 +352,30 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
       fd.append("subcategory_id", subcategoryId || "");
       fd.append("file", file);
 
+      if (importMode === "barcode-map") {
+        fd.append("mode", "barcode-map");
+      }
+
       const res = await fetch("/api/items/import", { method: "POST", body: fd });
       const json = await res.json().catch(() => null);
 
       if (!res.ok || !json?.ok) throw new Error(json?.error || "Import fallito");
 
-      if (json.mode === "barcode") {
+      if (json.mode === "barcode-map") {
+        const extraInfo: string[] = [];
+        if (typeof json.rows_with_no_barcode === "number" && json.rows_with_no_barcode > 0) {
+          extraInfo.push(`Righe senza barcode: ${json.rows_with_no_barcode}`);
+        }
+        if (typeof json.skipped_no_code === "number" && json.skipped_no_code > 0) {
+          extraInfo.push(`Righe senza codice: ${json.skipped_no_code}`);
+        }
+
+        setMsg(
+          `Import BARCODE-MAP OK — Righe: ${json.total_rows}, Inseriti: ${json.inserted}, Già presenti: ${json.skipped_existing}, ` +
+            `Conflict: ${json.conflicts}, Articoli non trovati: ${json.not_found}` +
+            (extraInfo.length ? ` — ${extraInfo.join(", ")}` : "")
+        );
+      } else if (json.mode === "barcode") {
         setMsg(`Import BARCODE OK — Tot: ${json.total}, Aggiornati: ${json.updated}, Non trovati: ${json.not_found}`);
       } else {
         const inserted = json.inserted ?? 0;
@@ -387,9 +407,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     setError(null);
 
     try {
-      // export rispecchia filtri correnti (categoria/sottocategoria + stato + ricerca)
       const url = `/api/items/export${qs}`;
-
       const res = await fetch(url, { method: "GET" });
 
       if (!res.ok) {
@@ -457,11 +475,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
       setMsg(`Barcode ${barcode} assegnato a ${code}.`);
       setAssignCode("");
       setAssignError(null);
-
-      // ✅ richiesto: dopo l'assegnazione, azzero il campo Cerca
       setQ("");
-
-      // ricarico: ora cercando quel barcode dovrei vedere la riga (se l’utente lo riscrive)
       await loadItems();
     } catch (e: any) {
       setAssignError(e?.message || "Errore assegnazione barcode");
@@ -490,6 +504,101 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     loadItems();
   }
 
+  async function loadBarcodesForItem(itemId: string, legacyBarcode: string) {
+    setBarcodesLoading(true);
+    setBarcodesError(null);
+
+    try {
+      const res = await fetch(`/api/items/barcodes?item_id=${encodeURIComponent(itemId)}`, { cache: "no-store" });
+      const json = await res.json().catch(() => null);
+
+      if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore caricamento barcode associati");
+
+      const list: string[] = Array.isArray(json?.barcodes) ? json.barcodes : [];
+      const uniq = Array.from(new Set(list.map((x) => String(x).trim()).filter(Boolean)));
+
+      // Se per qualche motivo la lista non contiene il legacy barcode, lo aggiungo in vista (senza scrivere DB)
+      const legacy = String(legacyBarcode || "").trim();
+      const merged = legacy ? Array.from(new Set([legacy, ...uniq])) : uniq;
+
+      setEditBarcodes(merged);
+    } catch (e: any) {
+      setEditBarcodes([]);
+      setBarcodesError(e?.message || "Errore caricamento barcode associati");
+    } finally {
+      setBarcodesLoading(false);
+    }
+  }
+
+  async function addExtraBarcode() {
+    if (!isAdmin || !editItem) return;
+
+    const b = String(newExtraBarcode || "").trim();
+    if (!isBarcodeLike(b)) {
+      setBarcodesError("Barcode non valido (8–14 cifre consigliate, accetto 6–14).");
+      return;
+    }
+
+    setBarcodesSaving(true);
+    setBarcodesError(null);
+
+    try {
+      const res = await fetch("/api/items/barcodes", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ item_id: editItem.id, barcode: b }),
+      });
+
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore aggiunta barcode");
+
+      setNewExtraBarcode("");
+      await loadBarcodesForItem(editItem.id, editBarcode);
+      await loadItems();
+    } catch (e: any) {
+      setBarcodesError(e?.message || "Errore aggiunta barcode");
+    } finally {
+      setBarcodesSaving(false);
+    }
+  }
+
+  async function removeExtraBarcode(b: string) {
+    if (!isAdmin || !editItem) return;
+
+    const barcode = String(b || "").trim();
+    if (!barcode) return;
+
+    // non rimuovo dal mapping il barcode principale se coincide
+    if (barcode === String(editBarcode || "").trim()) {
+      alert("Questo è il barcode principale nel campo 'Barcode'. Se vuoi rimuoverlo, svuota il campo e salva.");
+      return;
+    }
+
+    const ok = confirm(`Rimuovere il barcode ${barcode} da questo articolo?`);
+    if (!ok) return;
+
+    setBarcodesSaving(true);
+    setBarcodesError(null);
+
+    try {
+      const res = await fetch("/api/items/barcodes", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ item_id: editItem.id, barcode }),
+      });
+
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore rimozione barcode");
+
+      await loadBarcodesForItem(editItem.id, editBarcode);
+      await loadItems();
+    } catch (e: any) {
+      setBarcodesError(e?.message || "Errore rimozione barcode");
+    } finally {
+      setBarcodesSaving(false);
+    }
+  }
+
   function openEditModal(item: Item) {
     if (!isAdmin) return;
     setMsg(null);
@@ -504,13 +613,22 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     setEditConfDa(item.conf_da == null ? "" : String(item.conf_da));
     setEditPrezzo(item.prezzo_vendita_eur == null ? "" : String(item.prezzo_vendita_eur));
 
+    // ✅ carico i barcode aggiuntivi
+    setEditBarcodes([]);
+    setNewExtraBarcode("");
+    setBarcodesError(null);
+    loadBarcodesForItem(item.id, item.barcode == null ? "" : String(item.barcode));
+
     setEditOpen(true);
   }
 
   function closeEditModal() {
-    if (savingEdit) return;
+    if (savingEdit || barcodesSaving) return;
     setEditOpen(false);
     setEditItem(null);
+    setEditBarcodes([]);
+    setNewExtraBarcode("");
+    setBarcodesError(null);
   }
 
   function normalizeNullableNumber(v: string): number | null {
@@ -557,9 +675,9 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     try {
       const payload: any = {
         id: editItem.id,
-        code: nextCode, // ✅ update codice
+        code: nextCode,
         description: nextDesc,
-        barcode: normalizeNullableText(editBarcode),
+        barcode: normalizeNullableText(editBarcode), // barcode principale (retro-compat)
         um: normalizeNullableText(editUm),
         peso_kg: editPesoKg.trim() === "" ? null : normalizeNullableNumber(editPesoKg),
         conf_da: editConfDa.trim() === "" ? null : normalizeNullableInt(editConfDa),
@@ -574,6 +692,16 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
 
       const json = await res.json().catch(() => null);
       if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore aggiornamento");
+
+      // ✅ se hai un barcode principale, lo assicuro anche in item_barcodes
+      const mainB = String(editBarcode || "").trim();
+      if (mainB) {
+        await fetch("/api/items/barcodes", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ item_id: editItem.id, barcode: mainB }),
+        }).catch(() => null);
+      }
 
       setMsg("Articolo aggiornato.");
       setEditOpen(false);
@@ -642,7 +770,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
                   ID: <span className="font-mono text-xs">{editItem.id}</span>
                 </div>
               </div>
-              <button className="rounded-xl border px-3 py-2 hover:bg-gray-50" onClick={closeEditModal} disabled={savingEdit}>
+              <button className="rounded-xl border px-3 py-2 hover:bg-gray-50" onClick={closeEditModal} disabled={savingEdit || barcodesSaving}>
                 Chiudi
               </button>
             </div>
@@ -651,12 +779,17 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
               <div className="md:col-span-2">
                 <label className="block text-sm font-medium mb-2">Codice</label>
                 <input className="w-full rounded-xl border p-3" value={editCode} onChange={(e) => setEditCode(e.target.value)} />
-                <div className="mt-1 text-xs text-gray-500">Il codice deve restare unico nella categoria (e sottocategoria).</div>
+                <div className="mt-1 text-xs text-gray-500">Il codice deve essere univoco (globale).</div>
               </div>
 
               <div className="md:col-span-2">
                 <label className="block text-sm font-medium mb-2">UM (Unità di misura)</label>
-                <input className="w-full rounded-xl border p-3" placeholder="Es. PZ, KG, LT" value={editUm} onChange={(e) => setEditUm(e.target.value)} />
+                <input
+                  className="w-full rounded-xl border p-3"
+                  placeholder="Es. PZ, KG, LT"
+                  value={editUm}
+                  onChange={(e) => setEditUm(e.target.value)}
+                />
                 <div className="mt-1 text-xs text-gray-500">Lascia vuoto per NULL.</div>
               </div>
 
@@ -666,7 +799,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
               </div>
 
               <div className="md:col-span-4">
-                <label className="block text-sm font-medium mb-2">Barcode</label>
+                <label className="block text-sm font-medium mb-2">Barcode (principale)</label>
                 <input
                   className="w-full rounded-xl border p-3"
                   inputMode="numeric"
@@ -674,29 +807,103 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
                   value={editBarcode}
                   onChange={(e) => setEditBarcode(e.target.value)}
                 />
-                <div className="mt-1 text-xs text-gray-500">Lascia vuoto per NULL.</div>
+                <div className="mt-1 text-xs text-gray-500">Questo resta il barcode “principale” per compatibilità. Sotto trovi la lista completa.</div>
+              </div>
+
+              {/* ✅ LISTA BARCODE ASSOCIATI */}
+              <div className="md:col-span-4 rounded-xl border bg-gray-50 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="font-semibold">Barcode associati (tutti)</div>
+                  {barcodesLoading && <div className="text-xs text-gray-600">Carico...</div>}
+                </div>
+
+                {barcodesError && <div className="mt-2 text-sm text-red-600">{barcodesError}</div>}
+
+                {!barcodesLoading && editBarcodes.length === 0 && <div className="mt-2 text-sm text-gray-600">Nessun barcode associato.</div>}
+
+                {editBarcodes.length > 0 && (
+                  <div className="mt-2 space-y-2">
+                    {editBarcodes.map((b) => (
+                      <div key={b} className="flex items-center justify-between gap-2 rounded-lg border bg-white px-3 py-2">
+                        <div className="font-mono text-xs">{b}</div>
+                        <button
+                          type="button"
+                          className="rounded-lg border px-3 py-1.5 text-xs hover:bg-gray-50 disabled:opacity-60"
+                          onClick={() => removeExtraBarcode(b)}
+                          disabled={barcodesSaving}
+                          title={b === String(editBarcode || "").trim() ? "È il barcode principale" : "Rimuovi"}
+                        >
+                          Rimuovi
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="mt-3 flex items-center gap-2">
+                  <input
+                    className="w-full rounded-xl border p-3"
+                    inputMode="numeric"
+                    placeholder="Aggiungi barcode extra..."
+                    value={newExtraBarcode}
+                    onChange={(e) => setNewExtraBarcode(e.target.value)}
+                    disabled={barcodesSaving}
+                  />
+                  <button
+                    type="button"
+                    className="rounded-xl bg-slate-900 text-white px-4 py-3 disabled:opacity-60"
+                    onClick={addExtraBarcode}
+                    disabled={barcodesSaving}
+                  >
+                    {barcodesSaving ? "..." : "Aggiungi"}
+                  </button>
+                </div>
+
+                <div className="mt-1 text-xs text-gray-500">Se provi ad aggiungere un barcode già assegnato a un altro articolo, ti blocca.</div>
               </div>
 
               <div>
                 <label className="block text-sm font-medium mb-2">Peso (kg)</label>
-                <input className="w-full rounded-xl border p-3" inputMode="decimal" placeholder="Es. 0,032" value={editPesoKg} onChange={(e) => setEditPesoKg(e.target.value)} />
+                <input
+                  className="w-full rounded-xl border p-3"
+                  inputMode="decimal"
+                  placeholder="Es. 0,032"
+                  value={editPesoKg}
+                  onChange={(e) => setEditPesoKg(e.target.value)}
+                />
                 <div className="mt-1 text-xs text-gray-500">Lascia vuoto per NULL.</div>
               </div>
 
               <div>
                 <label className="block text-sm font-medium mb-2">Conf. da</label>
-                <input className="w-full rounded-xl border p-3" inputMode="numeric" placeholder="Es. 10" value={editConfDa} onChange={(e) => setEditConfDa(e.target.value)} />
+                <input
+                  className="w-full rounded-xl border p-3"
+                  inputMode="numeric"
+                  placeholder="Es. 10"
+                  value={editConfDa}
+                  onChange={(e) => setEditConfDa(e.target.value)}
+                />
                 <div className="mt-1 text-xs text-gray-500">Lascia vuoto per NULL (default 10 nel riordino).</div>
               </div>
 
               <div>
                 <label className="block text-sm font-medium mb-2">Prezzo di Vendita</label>
-                <input className="w-full rounded-xl border p-3" inputMode="decimal" placeholder="Es. 6,50" value={editPrezzo} onChange={(e) => setEditPrezzo(e.target.value)} />
+                <input
+                  className="w-full rounded-xl border p-3"
+                  inputMode="decimal"
+                  placeholder="Es. 6,50"
+                  value={editPrezzo}
+                  onChange={(e) => setEditPrezzo(e.target.value)}
+                />
                 <div className="mt-1 text-xs text-gray-500">Lascia vuoto per NULL.</div>
               </div>
 
               <div className="flex items-end">
-                <button className="w-full rounded-xl bg-slate-900 text-white px-4 py-3 disabled:opacity-60" onClick={saveEdit} disabled={savingEdit}>
+                <button
+                  className="w-full rounded-xl bg-slate-900 text-white px-4 py-3 disabled:opacity-60"
+                  onClick={saveEdit}
+                  disabled={savingEdit || barcodesSaving}
+                >
                   {savingEdit ? "Salvo..." : "Salva"}
                 </button>
               </div>
@@ -748,7 +955,12 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
 
         <div className="md:col-span-2">
           <label className="block text-sm font-medium mb-2">Sottocategoria</label>
-          <select className="w-full rounded-xl border p-3 bg-white" value={subcategoryId} onChange={(e) => setSubcategoryId(e.target.value)} disabled={!categoryId}>
+          <select
+            className="w-full rounded-xl border p-3 bg-white"
+            value={subcategoryId}
+            onChange={(e) => setSubcategoryId(e.target.value)}
+            disabled={!categoryId}
+          >
             <option value="">— Nessuna —</option>
             {subcategories.map((s) => (
               <option key={s.id} value={s.id}>
@@ -801,19 +1013,8 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
             </div>
 
             <div className="flex gap-2 items-center">
-              <input
-                className="w-44 rounded-xl border p-3"
-                placeholder="Codice articolo"
-                value={assignCode}
-                onChange={(e) => setAssignCode(e.target.value)}
-                disabled={assigning}
-              />
-              <button
-                type="button"
-                className="rounded-xl bg-slate-900 text-white px-4 py-3 disabled:opacity-60"
-                onClick={assignBarcodeToCode}
-                disabled={assigning}
-              >
+              <input className="w-44 rounded-xl border p-3" placeholder="Codice articolo" value={assignCode} onChange={(e) => setAssignCode(e.target.value)} disabled={assigning} />
+              <button type="button" className="rounded-xl bg-slate-900 text-white px-4 py-3 disabled:opacity-60" onClick={assignBarcodeToCode} disabled={assigning}>
                 {assigning ? "Assegno..." : "Assegna barcode"}
               </button>
             </div>
@@ -852,25 +1053,50 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
               </div>
             )}
 
-            {!assignPreviewLoading && assignCode.trim() !== "" && !assignPreviewItem && assignPreviewError && (
-              <div className="text-sm text-red-700">{assignPreviewError}</div>
-            )}
+            {!assignPreviewLoading && assignCode.trim() !== "" && !assignPreviewItem && assignPreviewError && <div className="text-sm text-red-700">{assignPreviewError}</div>}
           </div>
 
           {assignError && <div className="mt-2 text-sm text-red-700">{assignError}</div>}
         </div>
       )}
 
-      {/* ✅ IMPORT EXCEL (solo admin) — RIPRISTINATO */}
+      {/* ✅ IMPORT EXCEL (solo admin) */}
       {isAdmin && (
         <form onSubmit={doImport} className="rounded-2xl border bg-white p-4 space-y-3">
-          <div className="flex items-center justify-between">
+          <div className="flex items-start justify-between gap-3">
             <div>
               <div className="font-semibold">Carica file Excel</div>
-              <div className="text-sm text-gray-600">Seleziona categoria/sottocategoria e importa. (Preview: Codice, Descrizione, Barcode, UM, Prezzo)</div>
+              <div className="text-sm text-gray-600">
+                {importMode === "barcode-map"
+                  ? "Modalità BARCODE-MAP: assegna più barcode allo stesso articolo (senza sovrascrivere). Supporta separatori ; , | spazio. Il codice è cercato globalmente (l’Excel può contenere più categorie)."
+                  : "Modalità STANDARD: importa/aggiorna anagrafica (preview: Codice, Descrizione, Barcode, UM, Prezzo)."}
+              </div>
             </div>
+
             <button className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60" disabled={!file || importing}>
               {importing ? "Importo..." : "Importa"}
+            </button>
+          </div>
+
+          {/* ✅ toggle modalità */}
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="text-sm font-medium">Modalità import:</div>
+            <button
+              type="button"
+              className={`rounded-xl border px-3 py-2 text-sm ${importMode === "standard" ? "bg-slate-900 text-white border-slate-900" : "bg-white hover:bg-gray-50"}`}
+              onClick={() => setImportMode("standard")}
+              disabled={importing}
+            >
+              Standard
+            </button>
+            <button
+              type="button"
+              className={`rounded-xl border px-3 py-2 text-sm ${importMode === "barcode-map" ? "bg-slate-900 text-white border-slate-900" : "bg-white hover:bg-gray-50"}`}
+              onClick={() => setImportMode("barcode-map")}
+              disabled={importing}
+              title="Importa mappature su item_barcodes senza sovrascrivere items"
+            >
+              Import barcode
             </button>
           </div>
 
@@ -894,12 +1120,19 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
             <div className="rounded-xl border bg-gray-50 p-3">
               <div className="flex items-center justify-between gap-3">
                 <div className="text-sm font-medium">Anteprima import (prime righe)</div>
-                <button type="button" className="rounded-xl border bg-white px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-60" onClick={() => loadImportPreview(file)} disabled={previewLoading}>
+                <button
+                  type="button"
+                  className="rounded-xl border bg-white px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-60"
+                  onClick={() => loadImportPreview(file)}
+                  disabled={previewLoading}
+                >
                   {previewLoading ? "Carico..." : "Ricarica"}
                 </button>
               </div>
 
-              <div className="mt-2 text-xs text-gray-600">Mostro solo: Codice, Descrizione, Barcode, UM, Prezzo. (La Q.tà del file viene ignorata.)</div>
+              <div className="mt-2 text-xs text-gray-600">
+                Mostro solo: Codice, Descrizione, Barcode, UM, Prezzo. (La Q.tà del file viene ignorata.)
+              </div>
 
               {previewError && <div className="mt-2 text-sm text-red-600">{previewError}</div>}
 
@@ -946,11 +1179,8 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
             <tr>
               <th className="text-left p-3">Codice</th>
               <th className="text-left p-3 w-[30%]">Descrizione</th>
-
               <th className="text-left p-3 w-48">Barcode</th>
               <th className="text-left p-3 w-20">UM</th>
-
-              {/* ✅ PREZZO SEMPRE VISIBILE */}
               <th className="text-right p-3 w-36">Prezzo</th>
 
               {showTabacchiCols && <th className="text-right p-3 w-32">Peso (kg)</th>}
@@ -1010,6 +1240,9 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     </div>
   );
 }
+
+
+
 
 
 
