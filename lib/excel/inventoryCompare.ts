@@ -379,6 +379,17 @@ export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines:
   // Tengo comunque fuori roba completamente vuota (inv=0 e ges=0)
   const mergedView = (lines || []).filter((l) => Number(l.qtyInventory || 0) > 0 || Number(l.qtyGestionale || 0) > 0);
 
+  // ✅ MODIFICA RICHIESTA: ordine alfabetico per descrizione (A→Z), tie-break su codice
+  mergedView.sort((a, b) => {
+    const da = String(a.description || "").trim();
+    const db = String(b.description || "").trim();
+
+    const cmpDesc = da.localeCompare(db, "it", { sensitivity: "base" });
+    if (cmpDesc !== 0) return cmpDesc;
+
+    return String(a.code || "").localeCompare(String(b.code || ""), "it", { sensitivity: "base" });
+  });
+
   // ✅ totali SOLO negativi (diff < 0) richiesti:
   // mostro come positivi per leggibilità
   let totNegPieces = 0; // somma di -diff dove diff<0
@@ -524,6 +535,7 @@ export function buildCompareLines(
   out.sort((a, b) => String(a.code || "").localeCompare(String(b.code || "")));
   return out;
 }
+
 
 
 
