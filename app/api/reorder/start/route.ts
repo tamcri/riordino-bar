@@ -90,27 +90,35 @@ async function findTabacchiCategoryId(): Promise<string | null> {
 
 async function loadItemMetaByCodes(
   codes: string[]
-): Promise<{ pesoMap: Map<string, number>; confMap: Map<string, number> }> {
+): Promise<{
+  pesoMap: Map<string, number>;
+  confMap: Map<string, number>;
+  priceMap: Map<string, number>;
+}> {
   const pesoMap = new Map<string, number>();
   const confMap = new Map<string, number>();
+  const priceMap = new Map<string, number>();
 
   const uniq = Array.from(new Set(codes.map((c) => normCode(c)).filter(Boolean)));
-  if (uniq.length === 0) return { pesoMap, confMap };
+  if (uniq.length === 0) return { pesoMap, confMap, priceMap };
 
   const chunkSize = 500;
-
   const tabacchiCategoryId = await findTabacchiCategoryId();
 
   // helper: applica righe a mappe
   const apply = (rows: any[]) => {
     (rows || []).forEach((r: any) => {
       const code = normCode(r.code);
+      if (!code) return;
 
       const pk = Number(r.peso_kg);
-      if (code && Number.isFinite(pk) && pk > 0) pesoMap.set(code, pk);
+      if (Number.isFinite(pk) && pk > 0) pesoMap.set(code, pk);
 
       const cd = Number(r.conf_da);
-      if (code && Number.isFinite(cd) && cd > 0) confMap.set(code, Math.trunc(cd));
+      if (Number.isFinite(cd) && cd > 0) confMap.set(code, Math.trunc(cd));
+
+      const pr = Number(r.prezzo_vendita_eur);
+      if (Number.isFinite(pr) && pr > 0) priceMap.set(code, pr);
     });
   };
 
@@ -121,7 +129,7 @@ async function loadItemMetaByCodes(
 
       const { data, error } = await supabaseAdmin
         .from("items")
-        .select("code, peso_kg, conf_da")
+        .select("code, peso_kg, conf_da, prezzo_vendita_eur")
         .eq("category_id", tabacchiCategoryId)
         .in("code", chunk);
 
@@ -129,7 +137,9 @@ async function loadItemMetaByCodes(
       apply(data || []);
     }
 
-    if (pesoMap.size > 0 || confMap.size > 0) return { pesoMap, confMap };
+    if (pesoMap.size > 0 || confMap.size > 0 || priceMap.size > 0) {
+      return { pesoMap, confMap, priceMap };
+    }
   }
 
   // 2) LEGACY: category="TAB"
@@ -138,7 +148,7 @@ async function loadItemMetaByCodes(
 
     const { data, error } = await supabaseAdmin
       .from("items")
-      .select("code, peso_kg, conf_da")
+      .select("code, peso_kg, conf_da, prezzo_vendita_eur")
       .eq("category", "TAB")
       .in("code", chunk);
 
@@ -146,7 +156,7 @@ async function loadItemMetaByCodes(
     apply(data || []);
   }
 
-  return { pesoMap, confMap };
+  return { pesoMap, confMap, priceMap };
 }
 
 type TotByItem = {
@@ -200,9 +210,9 @@ export async function POST(req: Request) {
     // 1) parse gestionale (qui confDa=10 è solo placeholder)
     const parsed = await parseReorderExcel(input, weeks, days);
 
-    // 2) meta da anagrafica (peso + conf_da)
+    // 2) meta da anagrafica (peso + conf_da + prezzo_vendita_eur)
     const codes = parsed.rows.map((r) => normCode((r as any).codArticolo));
-    const { pesoMap, confMap } = await loadItemMetaByCodes(codes);
+    const { pesoMap, confMap, priceMap } = await loadItemMetaByCodes(codes);
 
     const fallbackPesoUnitKg = 0.02;
     const fallbackConfDa = 10;
@@ -227,15 +237,21 @@ export async function POST(req: Request) {
       const qtaTeorica = Math.trunc(n0(r?.qtaTeorica));
       const qtaOrdine = roundUpToMultiple(qtaTeorica, confDa);
 
-      // ricalcolo valoreDaOrdinare con qtaOrdine aggiornata (prezzo unit = valoreVenduto/qtaVenduta)
+      // ✅ PREZZO UNITARIO: prima provo anagrafica, fallback al prezzo “implicito” dal gestionale
+      const prezzoAnagrafica = priceMap.get(code);
       const qtaVenduta = n0(r?.qtaVenduta);
       const valoreVenduto = n0(r?.valoreVenduto);
-      const unitValue = qtaVenduta > 0 ? valoreVenduto / qtaVenduta : 0;
-      const valoreDaOrdinare = qtaOrdine > 0 && unitValue > 0 ? round2(unitValue * qtaOrdine) : 0;
+      const unitValueFromFile = qtaVenduta > 0 ? valoreVenduto / qtaVenduta : 0;
+
+      const unitPrice =
+        typeof prezzoAnagrafica === "number" && Number.isFinite(prezzoAnagrafica) && prezzoAnagrafica > 0
+          ? prezzoAnagrafica
+          : unitValueFromFile;
+
+      const valoreDaOrdinare = qtaOrdine > 0 && unitPrice > 0 ? round2(unitPrice * qtaOrdine) : 0;
 
       // pesoKg = qtaOrdine arrotondata * pesoUnit
       const pesoKg = round3(qtaOrdine * pesoUnitKg);
-
 
       // IMPORTANTE:
       // - buildReorderXlsx usa `confDa` (non `conf_da`)
@@ -358,6 +374,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: err?.message || "Errore interno" }, { status: 500 });
   }
 }
+
 
 
 

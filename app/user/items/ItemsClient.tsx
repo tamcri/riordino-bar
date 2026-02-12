@@ -60,6 +60,32 @@ function formatEuroIT(v: any) {
   return `€ ${intWithThousands},${decPart}`;
 }
 
+// ✅ filename safe
+function slugifyFilename(v: string) {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (!s) return "export";
+  return s
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+}
+
+function todayISO() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+// ✅ barcode-like (8–14 cifre)
+function isBarcodeLike(v: string) {
+  const s = String(v ?? "").trim();
+  return /^\d{8,14}$/.test(s);
+}
+
 export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   const [categoryId, setCategoryId] = useState<string>("");
   const [subcategoryId, setSubcategoryId] = useState<string>("");
@@ -103,7 +129,26 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   const [newSubName, setNewSubName] = useState("");
   const [newSubCatId, setNewSubCatId] = useState("");
 
+  // ✅ EXPORT EXCEL (admin)
+  const [exporting, setExporting] = useState(false);
+
+  // ✅ ASSEGNA BARCODE (admin)
+  const [assignOpen, setAssignOpen] = useState(false);
+  const [assignCode, setAssignCode] = useState("");
+  const [assigning, setAssigning] = useState(false);
+  const [assignError, setAssignError] = useState<string | null>(null);
+
+  // ✅ PREVIEW articolo per assegnazione barcode
+  const [assignPreviewLoading, setAssignPreviewLoading] = useState(false);
+  const [assignPreviewError, setAssignPreviewError] = useState<string | null>(null);
+  const [assignPreviewItem, setAssignPreviewItem] = useState<Item | null>(null);
+
   const selectedCategory = useMemo(() => categories.find((c) => c.id === categoryId) || null, [categories, categoryId]);
+  const selectedSubcategory = useMemo(
+    () => subcategories.find((s) => s.id === subcategoryId) || null,
+    [subcategories, subcategoryId]
+  );
+
   const showTabacchiCols = useMemo(() => isTabacchiCategory(selectedCategory), [selectedCategory]);
 
   const qs = useMemo(() => {
@@ -168,6 +213,97 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     loadItems();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [qs]);
+
+  // ✅ Mostra box assegnazione: solo admin, barcode-like, nessun risultato
+  const qTrim = q.trim();
+  const showAssignBox = useMemo(() => {
+    if (!isAdmin) return false;
+    if (!categoryId) return false;
+    if (loading) return false;
+    if (!qTrim) return false;
+    if (!isBarcodeLike(qTrim)) return false;
+    return rows.length === 0;
+  }, [isAdmin, categoryId, loading, qTrim, rows.length]);
+
+  useEffect(() => {
+    // apre/chiude automaticamente il box quando cambiano le condizioni
+    if (showAssignBox) {
+      setAssignOpen(true);
+    } else {
+      setAssignOpen(false);
+      setAssignCode("");
+      setAssignError(null);
+      setAssigning(false);
+
+      // ✅ reset preview
+      setAssignPreviewLoading(false);
+      setAssignPreviewError(null);
+      setAssignPreviewItem(null);
+    }
+  }, [showAssignBox]);
+
+  // ✅ Carica preview articolo quando scrivo il codice (mostra descrizione ecc)
+  useEffect(() => {
+    let alive = true;
+
+    async function fetchPreview() {
+      if (!assignOpen || !showAssignBox) return;
+
+      const code = assignCode.trim();
+      if (!code) {
+        setAssignPreviewError(null);
+        setAssignPreviewItem(null);
+        setAssignPreviewLoading(false);
+        return;
+      }
+
+      setAssignPreviewLoading(true);
+      setAssignPreviewError(null);
+      setAssignPreviewItem(null);
+
+      try {
+        // uso l'endpoint già esistente per cercare il codice nella categoria selezionata
+        const p = new URLSearchParams();
+        p.set("category_id", categoryId);
+        p.set("active", "all");
+        p.set("q", code);
+
+        const res = await fetch(`/api/items/list?${p.toString()}`);
+        const json = await res.json().catch(() => null);
+
+        if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore preview articolo");
+
+        const list: Item[] = Array.isArray(json?.rows) ? json.rows : [];
+
+        // preferisco match esatto sul codice (case-insensitive), altrimenti primo risultato
+        const exact = list.find((r) => String(r.code).trim().toLowerCase() === code.toLowerCase()) || null;
+        const picked = exact || list[0] || null;
+
+        if (!alive) return;
+
+        if (!picked) {
+          setAssignPreviewItem(null);
+          setAssignPreviewError("Nessun articolo trovato per questo codice nella categoria selezionata.");
+        } else {
+          setAssignPreviewItem(picked);
+          setAssignPreviewError(null);
+        }
+      } catch (e: any) {
+        if (!alive) return;
+        setAssignPreviewItem(null);
+        setAssignPreviewError(e?.message || "Errore preview articolo");
+      } finally {
+        if (!alive) return;
+        setAssignPreviewLoading(false);
+      }
+    }
+
+    const t = setTimeout(fetchPreview, 250); // piccolo debounce
+    return () => {
+      alive = false;
+      clearTimeout(t);
+    };
+  }, [assignCode, assignOpen, showAssignBox, categoryId]);
 
   // PREVIEW IMPORT
   async function loadImportPreview(nextFile: File | null) {
@@ -234,6 +370,103 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
       setError(e.message || "Errore import");
     } finally {
       setImporting(false);
+    }
+  }
+
+  // ✅ EXPORT EXCEL
+  async function exportExcel() {
+    if (!isAdmin) return;
+
+    if (!categoryId) {
+      setError("Seleziona una categoria prima di esportare.");
+      return;
+    }
+
+    setExporting(true);
+    setMsg(null);
+    setError(null);
+
+    try {
+      // export rispecchia filtri correnti (categoria/sottocategoria + stato + ricerca)
+      const url = `/api/items/export${qs}`;
+
+      const res = await fetch(url, { method: "GET" });
+
+      if (!res.ok) {
+        const json = await res.json().catch(() => null);
+        throw new Error(json?.error || "Export fallito");
+      }
+
+      const blob = await res.blob();
+
+      const catPart = slugifyFilename(selectedCategory?.slug || selectedCategory?.name || "categoria");
+      const subPart = subcategoryId ? slugifyFilename(selectedSubcategory?.slug || selectedSubcategory?.name || "sottocategoria") : "";
+      const datePart = todayISO();
+      const fname = `anagrafica-articoli_${catPart}${subPart ? `_${subPart}` : ""}_${datePart}.xlsx`;
+
+      const blobUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = blobUrl;
+      a.download = fname;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(blobUrl);
+
+      setMsg("Export Excel avviato.");
+    } catch (e: any) {
+      setError(e?.message || "Errore export");
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  // ✅ ASSEGNA BARCODE -> CODICE (solo admin)
+  async function assignBarcodeToCode() {
+    if (!isAdmin) return;
+    if (!categoryId) return;
+
+    const barcode = qTrim;
+    const code = assignCode.trim();
+
+    setAssignError(null);
+
+    if (!isBarcodeLike(barcode)) {
+      setAssignError("Barcode non valido.");
+      return;
+    }
+    if (!code) {
+      setAssignError("Inserisci il codice articolo.");
+      return;
+    }
+
+    setAssigning(true);
+    setMsg(null);
+    setError(null);
+
+    try {
+      const res = await fetch("/api/items/assign-barcode", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ category_id: categoryId, code, barcode }),
+      });
+
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.ok) throw new Error(json?.error || "Assegnazione fallita");
+
+      setMsg(`Barcode ${barcode} assegnato a ${code}.`);
+      setAssignCode("");
+      setAssignError(null);
+
+      // ✅ richiesto: dopo l'assegnazione, azzero il campo Cerca
+      setQ("");
+
+      // ricarico: ora cercando quel barcode dovrei vedere la riga (se l’utente lo riscrive)
+      await loadItems();
+    } catch (e: any) {
+      setAssignError(e?.message || "Errore assegnazione barcode");
+    } finally {
+      setAssigning(false);
     }
   }
 
@@ -434,7 +667,13 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
 
               <div className="md:col-span-4">
                 <label className="block text-sm font-medium mb-2">Barcode</label>
-                <input className="w-full rounded-xl border p-3" inputMode="numeric" placeholder="Es. 8001234567890" value={editBarcode} onChange={(e) => setEditBarcode(e.target.value)} />
+                <input
+                  className="w-full rounded-xl border p-3"
+                  inputMode="numeric"
+                  placeholder="Es. 8001234567890"
+                  value={editBarcode}
+                  onChange={(e) => setEditBarcode(e.target.value)}
+                />
                 <div className="mt-1 text-xs text-gray-500">Lascia vuoto per NULL.</div>
               </div>
 
@@ -532,7 +771,95 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
           <label className="block text-sm font-medium mb-2">Cerca</label>
           <input className="w-full rounded-xl border p-3" placeholder="Codice o descrizione..." value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
+
+        {/* ✅ EXPORT EXCEL (solo admin) */}
+        {isAdmin && (
+          <div className="md:col-span-5 flex items-center justify-end">
+            <button
+              type="button"
+              className="rounded-xl border bg-white px-4 py-2 hover:bg-gray-50 disabled:opacity-60"
+              onClick={exportExcel}
+              disabled={exporting || !categoryId}
+              title={!categoryId ? "Seleziona una categoria" : "Esporta gli articoli filtrati in Excel"}
+            >
+              {exporting ? "Esporto..." : "Esporta Excel"}
+            </button>
+          </div>
+        )}
       </div>
+
+      {/* ✅ BOX ASSEGNA BARCODE (solo admin) */}
+      {assignOpen && showAssignBox && (
+        <div className="rounded-2xl border bg-amber-50 p-4">
+          <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+            <div>
+              <div className="font-semibold">Barcode non trovato</div>
+              <div className="text-sm text-gray-700">
+                Barcode: <span className="font-mono">{qTrim}</span> — vuoi assegnarlo a un articolo esistente?
+              </div>
+              <div className="text-xs text-gray-600 mt-1">Inserisci il CODICE articolo (nella categoria selezionata) e conferma.</div>
+            </div>
+
+            <div className="flex gap-2 items-center">
+              <input
+                className="w-44 rounded-xl border p-3"
+                placeholder="Codice articolo"
+                value={assignCode}
+                onChange={(e) => setAssignCode(e.target.value)}
+                disabled={assigning}
+              />
+              <button
+                type="button"
+                className="rounded-xl bg-slate-900 text-white px-4 py-3 disabled:opacity-60"
+                onClick={assignBarcodeToCode}
+                disabled={assigning}
+              >
+                {assigning ? "Assegno..." : "Assegna barcode"}
+              </button>
+            </div>
+          </div>
+
+          {/* ✅ PREVIEW ARTICOLO */}
+          <div className="mt-3">
+            {assignPreviewLoading && <div className="text-sm text-gray-700">Cerco articolo...</div>}
+
+            {!assignPreviewLoading && assignCode.trim() !== "" && assignPreviewItem && (
+              <div className="rounded-xl border bg-white p-3 text-sm">
+                <div className="font-semibold mb-1">Articolo selezionato</div>
+                <div>
+                  <b>Codice:</b> {assignPreviewItem.code}
+                </div>
+                <div>
+                  <b>Descrizione:</b> {assignPreviewItem.description}
+                </div>
+                <div>
+                  <b>UM:</b> {formatUm(assignPreviewItem.um)}
+                </div>
+                <div>
+                  <b>Prezzo:</b> {formatEuroIT(assignPreviewItem.prezzo_vendita_eur)}
+                </div>
+
+                {showTabacchiCols && (
+                  <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div>
+                      <b>Peso (kg):</b> {formatPesoKg(assignPreviewItem.peso_kg)}
+                    </div>
+                    <div>
+                      <b>Conf. da:</b> {formatConfDa(assignPreviewItem.conf_da)}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {!assignPreviewLoading && assignCode.trim() !== "" && !assignPreviewItem && assignPreviewError && (
+              <div className="text-sm text-red-700">{assignPreviewError}</div>
+            )}
+          </div>
+
+          {assignError && <div className="mt-2 text-sm text-red-700">{assignError}</div>}
+        </div>
+      )}
 
       {/* ✅ IMPORT EXCEL (solo admin) — RIPRISTINATO */}
       {isAdmin && (
@@ -682,6 +1009,9 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     </div>
   );
 }
+
+
+
 
 
 
