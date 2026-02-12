@@ -945,7 +945,8 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
           <thead className="bg-gray-50">
             <tr>
               <th className="text-left p-3">Codice</th>
-              <th className="text-left p-3">Descrizione</th>
+              <th className="text-left p-3 w-[30%]">Descrizione</th>
+
               <th className="text-left p-3 w-48">Barcode</th>
               <th className="text-left p-3 w-20">UM</th>
 
