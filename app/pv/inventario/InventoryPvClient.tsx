@@ -13,11 +13,6 @@ type Item = {
   prezzo_vendita_eur?: number | null;
 };
 
-type InventoryLine = {
-  item_id: string;
-  qty: number;
-};
-
 type MeResponse = {
   ok: boolean;
   role?: string;
@@ -56,6 +51,31 @@ type DraftPv = {
   showAllScanned: boolean;
   addQtyMap: Record<string, string>;
 };
+
+// ✅ multi-barcode: splitta tutto ciò che non è cifra e produce lista barcode
+function splitBarcodes(raw: any): string[] {
+  const s = String(raw ?? "").trim();
+  if (!s) return [];
+  const parts = s
+    .split(/[^0-9]+/g) // split su qualsiasi non-cifra ( ; , spazio / | ecc )
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  // tolgo duplicati
+  return Array.from(new Set(parts));
+}
+
+function itemHasBarcode(it: Item, digits: string): boolean {
+  if (!digits) return false;
+  const list = splitBarcodes(it.barcode);
+  return list.some((b) => b === digits);
+}
+
+function itemHasBarcodeLike(it: Item, digits: string): boolean {
+  if (!digits) return false;
+  const list = splitBarcodes(it.barcode);
+  return list.some((b) => b.includes(digits));
+}
 
 export default function InventoryPvClient() {
   const [pvId, setPvId] = useState<string>("");
@@ -191,7 +211,7 @@ export default function InventoryPvClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pvId, categoryId, subcategoryId, inventoryDate, items.length, operatore, scannedIds, showAllScanned, addQtyMap, qtyMap]);
 
-  // ✅ ricerca “furba” per barcode:
+  // ✅ ricerca “furba” per barcode (multi-barcode)
   const filteredItems = useMemo(() => {
     // NEW: se ho un focus, mostro SOLO quello
     if (focusItemId) {
@@ -207,22 +227,23 @@ export default function InventoryPvClient() {
     const isLikelyBarcode = digits.length >= 8;
 
     if (isLikelyBarcode) {
+      // ✅ match ESATTO su uno qualsiasi dei barcode dell’articolo (o sul code numerico)
       const exact = items.filter((it) => {
-        const bcDigits = onlyDigits(String(it.barcode ?? ""));
         const codeDigits = onlyDigits(String(it.code ?? ""));
-        return (bcDigits && bcDigits === digits) || (codeDigits && codeDigits === digits);
+        return itemHasBarcode(it, digits) || (codeDigits && codeDigits === digits);
       });
       if (exact.length > 0) return exact;
 
+      // fallback: match parziale su barcode multipli o su stringhe
       return items.filter((it) => {
         const code = String(it.code || "").toLowerCase();
         const desc = String(it.description || "").toLowerCase();
-        const bc = String(it.barcode || "").toLowerCase();
-        const bcDigits = onlyDigits(String(it.barcode ?? ""));
-        return code.includes(t) || desc.includes(t) || bc.includes(t) || (digits && bcDigits.includes(digits));
+        const bcRaw = String(it.barcode || "").toLowerCase();
+        return code.includes(t) || desc.includes(t) || bcRaw.includes(t) || itemHasBarcodeLike(it, digits);
       });
     }
 
+    // non barcode: classico
     return items.filter((it) => {
       const code = String(it.code || "").toLowerCase();
       const desc = String(it.description || "").toLowerCase();
@@ -237,7 +258,7 @@ export default function InventoryPvClient() {
     return scannedIds.map((id) => byId.get(id)).filter(Boolean) as Item[];
   }, [items, scannedIds]);
 
-  // ✅ default: mostra solo 10 (ultimi, perché scannedIds ha l’ultimo in cima)
+  // ✅ default: mostra solo 10
   const scannedItemsVisible = useMemo(() => {
     if (showAllScanned) return scannedItems;
     return scannedItems.slice(0, 10);
@@ -263,7 +284,6 @@ export default function InventoryPvClient() {
       const next = [itemId, ...prev.filter((id) => id !== itemId)];
       return next;
     });
-    // ✅ resta verde finché non evidenzi un altro
     setHighlightScannedId(itemId);
   }
 
@@ -272,7 +292,6 @@ export default function InventoryPvClient() {
 
     setQtyMap((prev) => ({ ...prev, [itemId]: cleaned }));
 
-    // ✅ Se metto qty manuale (>0) lo considero "scansionato" e va in cima
     const n = Number(cleaned || "0") || 0;
 
     setScannedIds((prev) => {
@@ -285,10 +304,7 @@ export default function InventoryPvClient() {
       return prev;
     });
 
-    if (n > 0) {
-      // ✅ resta verde finché non evidenzi un altro
-      setHighlightScannedId(itemId);
-    }
+    if (n > 0) setHighlightScannedId(itemId);
   }
 
   // ✅ “Aggiungi quantità” (somma)
@@ -306,7 +322,6 @@ export default function InventoryPvClient() {
     highlightAndMoveToTop(itemId);
   }
 
-  // ✅ svuota lista + azzera qty SOLO degli scansionati
   function clearScannedList() {
     setQtyMap((prev) => {
       const next = { ...prev };
@@ -332,9 +347,8 @@ export default function InventoryPvClient() {
 
     if (isLikelyBarcode) {
       found = items.find((it) => {
-        const bcDigits = onlyDigits(String(it.barcode ?? ""));
         const codeDigits = onlyDigits(String(it.code ?? ""));
-        return (bcDigits && bcDigits === digits) || (codeDigits && codeDigits === digits);
+        return itemHasBarcode(it, digits) || (codeDigits && codeDigits === digits);
       });
     } else {
       const t = raw.toLowerCase();
@@ -355,7 +369,7 @@ export default function InventoryPvClient() {
     // ✅ in lista sotto mostro SOLO questo articolo
     setFocusItemId(found.id);
 
-    // ✅ (1) Dopo scan/Invio → focus automatico sull’input Quantità della tabella sotto
+    // ✅ (1) focus su quantità
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         const el = qtyInputRefs.current[found!.id];
@@ -366,15 +380,12 @@ export default function InventoryPvClient() {
       });
     });
 
-    // ✅ se già scansionato: evidenzia verde + porta in cima, NON fare +1 automatico
     if (scannedIds.includes(found.id)) {
       highlightAndMoveToTop(found.id);
       return;
     }
 
-    // ✅ nuovo: entra negli scansionati e va in cima (qty resta quella manuale)
     setScannedIds((prev) => [found!.id, ...prev]);
-    // ✅ resta verde finché non evidenzi un altro
     setHighlightScannedId(found.id);
   }
 
@@ -439,7 +450,6 @@ export default function InventoryPvClient() {
     rows.forEach((it) => (m[it.id] = "0"));
     setQtyMap(m);
 
-    // ✅ ripristina bozza DOPO aver creato qtyMap base
     loadDraftIfAny(rows);
   }
 
@@ -502,14 +512,12 @@ export default function InventoryPvClient() {
     setHighlightScannedId(null);
     setFocusItemId(null);
 
-    // reset qtyMap (PV usa "0" come default)
     setQtyMap((prev) => {
       const next: Record<string, string> = { ...prev };
       items.forEach((it) => (next[it.id] = "0"));
       return next;
     });
 
-    // ✅ chiusura: cancello bozza
     clearDraft();
   }
 
@@ -547,13 +555,12 @@ export default function InventoryPvClient() {
           inventory_date: inventoryDate,
           operatore: operatore.trim(),
           rows,
-          mode, // ✅ "close" | "continue"
+          mode,
         }),
       });
 
       const json = await res.json().catch(() => null);
 
-      // ✅ inventario già presente (altro utente): stop
       if (res.status === 409 || json?.code === "INVENTORY_ALREADY_EXISTS") {
         setMsg(null);
         setError(json?.error || "Esiste già un inventario: non è consentito sovrascrivere.");
@@ -564,11 +571,9 @@ export default function InventoryPvClient() {
 
       setMsg(mode === "continue" ? "Salvato. Puoi continuare." : "Inventario salvato correttamente");
 
-      // ✅ “Salva e chiudi” resetta; “Salva e continua” NO
       if (mode === "close") {
         resetAfterClose();
       } else {
-        // continua: salvo bozza aggiornata
         persistDraft();
       }
     } catch (e: any) {
@@ -649,7 +654,6 @@ export default function InventoryPvClient() {
           onChange={(e) => {
             const v = e.target.value;
             setSearch(v);
-            // se sto digitando, torno alla lista normale (niente focus)
             if (focusItemId) setFocusItemId(null);
           }}
           onKeyDown={(e) => {
@@ -708,7 +712,17 @@ export default function InventoryPvClient() {
                 {showAllScanned ? "—" : "+"}
               </button>
             )}
-            <button className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-60" disabled={scannedIds.length === 0} onClick={clearScannedList} type="button">
+            <button className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-60" disabled={scannedIds.length === 0} onClick={() => {
+              setQtyMap((prev) => {
+                const next = { ...prev };
+                scannedIds.forEach((id) => { next[id] = "0"; });
+                return next;
+              });
+              setScannedIds([]);
+              setShowAllScanned(false);
+              setAddQtyMap({});
+              setHighlightScannedId(null);
+            }} type="button">
               Svuota lista
             </button>
           </div>
@@ -735,7 +749,10 @@ export default function InventoryPvClient() {
                       <td className="p-3 font-medium">{it.code}</td>
                       <td className="p-3">{it.description}</td>
                       <td className="p-3 text-right">
-                        <input className="w-24 rounded-xl border p-2 text-right" inputMode="numeric" placeholder="0" value={qtyMap[it.id] ?? ""} onChange={(e) => setQty(it.id, e.target.value)} />
+                        <input className="w-24 rounded-xl border p-2 text-right" inputMode="numeric" placeholder="0" value={qtyMap[it.id] ?? ""} onChange={(e) => {
+                          const cleaned = onlyDigits(e.target.value);
+                          setQtyMap((prev) => ({ ...prev, [it.id]: cleaned }));
+                        }} />
                       </td>
                       <td className="p-3">
                         <div className="flex justify-end gap-2">
@@ -748,7 +765,14 @@ export default function InventoryPvClient() {
                             onKeyDown={(e) => {
                               if (e.key === "Enter") {
                                 e.preventDefault();
-                                addQty(it.id);
+                                const delta = Number(onlyDigits(addQtyMap[it.id] ?? "")) || 0;
+                                if (delta <= 0) return;
+                                setQtyMap((prev) => {
+                                  const current = Number(prev[it.id] || "0") || 0;
+                                  return { ...prev, [it.id]: String(Math.max(0, current + delta)) };
+                                });
+                                setAddQtyMap((prev) => ({ ...prev, [it.id]: "" }));
+                                highlightAndMoveToTop(it.id);
                               }
                             }}
                           />
@@ -794,9 +818,22 @@ export default function InventoryPvClient() {
                       inputMode="numeric"
                       placeholder="(vuoto)"
                       value={qtyMap[it.id] ?? ""}
-                      onChange={(e) => setQty(it.id, e.target.value)}
+                      onChange={(e) => {
+                        const cleaned = onlyDigits(e.target.value);
+                        setQtyMap((prev) => ({ ...prev, [it.id]: cleaned }));
+                        const n = Number(cleaned || "0") || 0;
+
+                        setScannedIds((prev) => {
+                          const has = prev.includes(it.id);
+                          if (n > 0 && !has) return [it.id, ...prev];
+                          if (n > 0 && has) return [it.id, ...prev.filter((id) => id !== it.id)];
+                          if (n <= 0 && has) return prev.filter((id) => id !== it.id);
+                          return prev;
+                        });
+
+                        if (n > 0) setHighlightScannedId(it.id);
+                      }}
                       onKeyDown={(e) => {
-                        // ✅ (2) Enter su Quantità → ritorna a Cerca/Scansiona (select per sovrascrivere)
                         if (e.key === "Enter") {
                           e.preventDefault();
                           const el = searchInputRef.current;
@@ -824,6 +861,7 @@ export default function InventoryPvClient() {
     </div>
   );
 }
+
 
 
 

@@ -51,23 +51,20 @@ export default function AdminPage() {
   async function loadPvsAndUsers() {
     setDataMsg(null);
     try {
-      // Lista PV (nel tuo progetto esiste /api/pvs/list e ritorna { ok:true, rows:[...] })
-      // ma gestiamo anche il caso futuro { ok:true, pvs:[...] }
+      // Lista PV
       const resPvs = await fetch("/api/pvs/list", { cache: "no-store" });
       const jsonPvs = await resPvs.json().catch(() => null);
 
       const pvList = (jsonPvs?.pvs ?? jsonPvs?.rows) ?? [];
       setPvs(Array.isArray(pvList) ? pvList : []);
 
-
-      // Lista utenti PV (route nuova)
+      // Lista utenti PV
       const resUsers = await fetch("/api/users/list?role=punto_vendita", { cache: "no-store" });
       const jsonUsers = await resUsers.json().catch(() => null);
       if (resUsers.ok && jsonUsers?.users) setPvUsers(jsonUsers.users);
 
       if (!resPvs.ok || !resUsers.ok) {
         setDataMsg("Nota: non riesco a caricare PV o utenti PV (controlla le route /api/pvs/list e /api/users/list).");
-
       }
     } catch {
       setDataMsg("Errore caricamento dati (PV/utenti).");
@@ -91,7 +88,6 @@ export default function AdminPage() {
     try {
       const body: any = { username, password, role };
 
-      // se sto creando un punto vendita, posso assegnare pv_id già ora
       if (role === "punto_vendita") {
         body.pv_id = pvIdForNewUser || null;
       }
@@ -110,11 +106,8 @@ export default function AdminPage() {
 
       setUsername("");
       setPassword("");
-      setMsg(
-        `Utente creato con successo (${role === "amministrativo" ? "Amministrativo" : "Punto Vendita"})`
-      );
+      setMsg(`Utente creato con successo (${role === "amministrativo" ? "Amministrativo" : "Punto Vendita"})`);
 
-      // refresh lista utenti PV dopo creazione
       await loadPvsAndUsers();
     } finally {
       setLoading(false);
@@ -143,7 +136,6 @@ export default function AdminPage() {
       setPvName("");
       setPvMsg(`PV creato: ${json.pv.code} - ${json.pv.name}`);
 
-      // refresh PV dropdown dopo creazione PV
       await loadPvsAndUsers();
     } finally {
       setPvLoading(false);
@@ -166,7 +158,7 @@ export default function AdminPage() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           user_id: assignUserId,
-          pv_id: assignPvId || null, // null = rimuovi assegnazione
+          pv_id: assignPvId || null,
         }),
       });
 
@@ -227,13 +219,17 @@ export default function AdminPage() {
               </Link>
 
               <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/user/inventories">
-               Inventario (Inserimento)
+                Inventario (Inserimento)
               </Link>
 
               <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/user/inventories/history">
-               Storico Inventari
+                Storico Inventari
               </Link>
 
+              {/* ✅ NUOVO */}
+              <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/admin/deposits">
+                Depositi (Magazzini)
+              </Link>
 
               <div className="pt-3 border-t mt-2">
                 <p className="text-xs text-gray-500">
@@ -244,175 +240,175 @@ export default function AdminPage() {
           </section>
 
           {/* colonna destra: forms */}
-<div className="lg:col-span-2 space-y-6">
-  {/* crea utente */}
-  <section className="rounded-2xl border bg-white p-4">
-    <h2 className="text-lg font-semibold">Crea nuovo utente</h2>
+          <div className="lg:col-span-2 space-y-6">
+            {/* crea utente */}
+            <section className="rounded-2xl border bg-white p-4">
+              <h2 className="text-lg font-semibold">Crea nuovo utente</h2>
 
-    <form onSubmit={createUser} className="mt-4 space-y-3">
-      <input
-        className="w-full rounded-xl border p-3"
-        placeholder="Username"
-        value={username}
-        onChange={(e) => setUsername(e.target.value)}
-      />
+              <form onSubmit={createUser} className="mt-4 space-y-3">
+                <input
+                  className="w-full rounded-xl border p-3"
+                  placeholder="Username"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                />
 
-      <input
-        className="w-full rounded-xl border p-3"
-        placeholder="Password"
-        type="password"
-        value={password}
-        onChange={(e) => setPassword(e.target.value)}
-      />
+                <input
+                  className="w-full rounded-xl border p-3"
+                  placeholder="Password"
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                />
 
-      <div>
-        <label className="block text-sm font-medium mb-2">Ruolo</label>
-        <select
-          className="w-full rounded-xl border p-3 bg-white"
-          value={role}
-          onChange={(e) => setRole(e.target.value as CreateRole)}
-        >
-          <option value="amministrativo">Amministrativo</option>
-          <option value="punto_vendita">Punto Vendita</option>
-        </select>
-        <p className="text-xs text-gray-500 mt-1">
-          Amministrativo: riordino e funzioni ufficio. Punto Vendita: giacenze/inventario.
-        </p>
-      </div>
+                <div>
+                  <label className="block text-sm font-medium mb-2">Ruolo</label>
+                  <select
+                    className="w-full rounded-xl border p-3 bg-white"
+                    value={role}
+                    onChange={(e) => setRole(e.target.value as CreateRole)}
+                  >
+                    <option value="amministrativo">Amministrativo</option>
+                    <option value="punto_vendita">Punto Vendita</option>
+                  </select>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Amministrativo: riordino e funzioni ufficio. Punto Vendita: giacenze/inventario.
+                  </p>
+                </div>
 
-      {/* Assegna PV SOLO se ruolo = punto_vendita */}
-      {role === "punto_vendita" && (
-        <div>
-          <label className="block text-sm font-medium mb-2">Assegna PV (opzionale)</label>
-          <select
-            className="w-full rounded-xl border p-3 bg-white"
-            value={pvIdForNewUser}
-            onChange={(e) => setPvIdForNewUser(e.target.value)}
-          >
-            <option value="">— Nessuno —</option>
-            {pvs.map((pv) => (
-              <option key={pv.id} value={pv.id}>
-                {pv.code} — {pv.name}
-              </option>
-            ))}
-          </select>
-          <p className="text-xs text-gray-500 mt-1">
-            Se non lo assegni ora, lo puoi fare sotto in “Assegna utente a PV”.
-          </p>
-        </div>
-      )}
+                {/* Assegna PV SOLO se ruolo = punto_vendita */}
+                {role === "punto_vendita" && (
+                  <div>
+                    <label className="block text-sm font-medium mb-2">Assegna PV (opzionale)</label>
+                    <select
+                      className="w-full rounded-xl border p-3 bg-white"
+                      value={pvIdForNewUser}
+                      onChange={(e) => setPvIdForNewUser(e.target.value)}
+                    >
+                      <option value="">— Nessuno —</option>
+                      {pvs.map((pv) => (
+                        <option key={pv.id} value={pv.id}>
+                          {pv.code} — {pv.name}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-gray-500 mt-1">
+                      Se non lo assegni ora, lo puoi fare sotto in “Assegna utente a PV”.
+                    </p>
+                  </div>
+                )}
 
-      <button className="w-full rounded-xl bg-black text-white p-3 disabled:opacity-60" disabled={loading}>
-        {loading ? "Creazione..." : "Crea utente"}
-      </button>
+                <button className="w-full rounded-xl bg-black text-white p-3 disabled:opacity-60" disabled={loading}>
+                  {loading ? "Creazione..." : "Crea utente"}
+                </button>
 
-      {msg && <p className="text-sm">{msg}</p>}
-    </form>
-  </section>
+                {msg && <p className="text-sm">{msg}</p>}
+              </form>
+            </section>
 
-  {/* crea PV */}
-  <section className="rounded-2xl border bg-white p-4">
-    <h2 className="text-lg font-semibold">Crea PV</h2>
-    <p className="text-sm text-gray-600 mt-1">Inserisci un codice (es. A1) e un nome (es. Diversivo).</p>
+            {/* crea PV */}
+            <section className="rounded-2xl border bg-white p-4">
+              <h2 className="text-lg font-semibold">Crea PV</h2>
+              <p className="text-sm text-gray-600 mt-1">Inserisci un codice (es. A1) e un nome (es. Diversivo).</p>
 
-    <form onSubmit={createPV} className="mt-4 space-y-3">
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-        <input
-          className="w-full rounded-xl border p-3 md:col-span-1"
-          placeholder="Codice (es. A1)"
-          value={pvCode}
-          onChange={(e) => setPvCode(e.target.value)}
-        />
+              <form onSubmit={createPV} className="mt-4 space-y-3">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <input
+                    className="w-full rounded-xl border p-3 md:col-span-1"
+                    placeholder="Codice (es. A1)"
+                    value={pvCode}
+                    onChange={(e) => setPvCode(e.target.value)}
+                  />
 
-        <input
-          className="w-full rounded-xl border p-3 md:col-span-2"
-          placeholder="Nome (es. Diversivo)"
-          value={pvName}
-          onChange={(e) => setPvName(e.target.value)}
-        />
-      </div>
+                  <input
+                    className="w-full rounded-xl border p-3 md:col-span-2"
+                    placeholder="Nome (es. Diversivo)"
+                    value={pvName}
+                    onChange={(e) => setPvName(e.target.value)}
+                  />
+                </div>
 
-      <button
-        className="w-full rounded-xl bg-slate-900 text-white p-3 disabled:opacity-60"
-        disabled={pvLoading || !pvCode.trim() || !pvName.trim()}
-      >
-        {pvLoading ? "Creazione..." : "Crea PV"}
-      </button>
+                <button
+                  className="w-full rounded-xl bg-slate-900 text-white p-3 disabled:opacity-60"
+                  disabled={pvLoading || !pvCode.trim() || !pvName.trim()}
+                >
+                  {pvLoading ? "Creazione..." : "Crea PV"}
+                </button>
 
-      {pvMsg && <p className="text-sm">{pvMsg}</p>}
-    </form>
-  </section>
+                {pvMsg && <p className="text-sm">{pvMsg}</p>}
+              </form>
+            </section>
 
-  {/* assegna utente a PV (anche successivamente) */}
-  <section className="rounded-2xl border bg-white p-4">
-    <h2 className="text-lg font-semibold">Assegna utente a PV</h2>
-    <p className="text-sm text-gray-600 mt-1">
-      Serve per assegnare/cambiare PV agli utenti <b>punto_vendita</b> anche dopo la creazione.
-    </p>
+            {/* assegna utente a PV */}
+            <section className="rounded-2xl border bg-white p-4">
+              <h2 className="text-lg font-semibold">Assegna utente a PV</h2>
+              <p className="text-sm text-gray-600 mt-1">
+                Serve per assegnare/cambiare PV agli utenti <b>punto_vendita</b> anche dopo la creazione.
+              </p>
 
-    <form onSubmit={assignPvToUser} className="mt-4 space-y-3">
-      <div>
-        <label className="block text-sm font-medium mb-2">Utente (solo Punto Vendita)</label>
-        <select
-          className="w-full rounded-xl border p-3 bg-white"
-          value={assignUserId}
-          onChange={(e) => {
-            const id = e.target.value;
-            setAssignUserId(id);
-            const u = pvUsers.find((x) => x.id === id);
-            setAssignPvId(u?.pv_id ?? "");
-          }}
-        >
-          <option value="">— Seleziona utente —</option>
-          {pvUsers.map((u) => (
-            <option key={u.id} value={u.id}>
-              {u.username}
-              {u.pv_id ? " (PV assegnato)" : " (nessun PV)"}
-            </option>
-          ))}
-        </select>
-      </div>
+              <form onSubmit={assignPvToUser} className="mt-4 space-y-3">
+                <div>
+                  <label className="block text-sm font-medium mb-2">Utente (solo Punto Vendita)</label>
+                  <select
+                    className="w-full rounded-xl border p-3 bg-white"
+                    value={assignUserId}
+                    onChange={(e) => {
+                      const id = e.target.value;
+                      setAssignUserId(id);
+                      const u = pvUsers.find((x) => x.id === id);
+                      setAssignPvId(u?.pv_id ?? "");
+                    }}
+                  >
+                    <option value="">— Seleziona utente —</option>
+                    {pvUsers.map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.username}
+                        {u.pv_id ? " (PV assegnato)" : " (nessun PV)"}
+                      </option>
+                    ))}
+                  </select>
+                </div>
 
-      <div>
-        <label className="block text-sm font-medium mb-2">PV</label>
-        <select
-          className="w-full rounded-xl border p-3 bg-white"
-          value={assignPvId}
-          onChange={(e) => setAssignPvId(e.target.value)}
-          disabled={!assignUserId}
-        >
-          <option value="">— Nessuno (rimuovi assegnazione) —</option>
-          {pvs.map((pv) => (
-            <option key={pv.id} value={pv.id}>
-              {pv.code} — {pv.name}
-            </option>
-          ))}
-        </select>
+                <div>
+                  <label className="block text-sm font-medium mb-2">PV</label>
+                  <select
+                    className="w-full rounded-xl border p-3 bg-white"
+                    value={assignPvId}
+                    onChange={(e) => setAssignPvId(e.target.value)}
+                    disabled={!assignUserId}
+                  >
+                    <option value="">— Nessuno (rimuovi assegnazione) —</option>
+                    {pvs.map((pv) => (
+                      <option key={pv.id} value={pv.id}>
+                        {pv.code} — {pv.name}
+                      </option>
+                    ))}
+                  </select>
 
-        {selectedUser && (
-          <p className="text-xs text-gray-500 mt-1">
-            Utente selezionato: <b>{selectedUser.username}</b>
-          </p>
-        )}
-      </div>
+                  {selectedUser && (
+                    <p className="text-xs text-gray-500 mt-1">
+                      Utente selezionato: <b>{selectedUser.username}</b>
+                    </p>
+                  )}
+                </div>
 
-      <button
-        className="w-full rounded-xl bg-slate-900 text-white p-3 disabled:opacity-60"
-        disabled={assignLoading || !assignUserId}
-      >
-        {assignLoading ? "Salvataggio..." : "Salva assegnazione"}
-      </button>
+                <button
+                  className="w-full rounded-xl bg-slate-900 text-white p-3 disabled:opacity-60"
+                  disabled={assignLoading || !assignUserId}
+                >
+                  {assignLoading ? "Salvataggio..." : "Salva assegnazione"}
+                </button>
 
-      {assignMsg && <p className="text-sm">{assignMsg}</p>}
-    </form>
-  </section>
-</div>
-
+                {assignMsg && <p className="text-sm">{assignMsg}</p>}
+              </form>
+            </section>
+          </div>
         </div>
       </div>
     </main>
   );
 }
+
 
 
 
