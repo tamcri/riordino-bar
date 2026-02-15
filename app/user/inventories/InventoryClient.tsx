@@ -13,6 +13,9 @@ type Item = {
   barcode?: string | null;
   prezzo_vendita_eur?: number | null;
   is_active: boolean;
+
+  // ✅ NEW: se valorizzato => inventario in ML
+  volume_ml_per_unit?: number | null;
 };
 
 function todayISO() {
@@ -35,12 +38,23 @@ function formatEUR(n: number) {
   return new Intl.NumberFormat("it-IT", { style: "currency", currency: "EUR" }).format(n);
 }
 
+function isMlItem(it: Item) {
+  const v = Number(it.volume_ml_per_unit ?? 0);
+  return Number.isFinite(v) && v > 0;
+}
+
+function mlToLitriLabel(ml: number) {
+  const l = ml / 1000;
+  // 1 decimale per leggibilità
+  return `${l.toFixed(1)} L`;
+}
+
 type DraftAdmin = {
   operatore: string;
-  qtyMap: Record<string, string>;
+  qtyMap: Record<string, string>; // ✅ per ML item contiene ML, per altri contiene pezzi
   scannedIds: string[];
   showAllScanned: boolean;
-  addQtyMap: Record<string, string>;
+  addQtyMap: Record<string, string>; // ✅ per ML item contiene ML da aggiungere
 };
 
 export default function InventoryClient() {
@@ -61,6 +75,7 @@ export default function InventoryClient() {
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // ✅ qtyMap: per item ML = tot ML, per item normali = pezzi
   const [qtyMap, setQtyMap] = useState<Record<string, string>>({});
 
   const [search, setSearch] = useState("");
@@ -68,13 +83,13 @@ export default function InventoryClient() {
   // ✅ lista “Scansionati” in ordine cronologico: ultimo in cima
   const [scannedIds, setScannedIds] = useState<string[]>([]);
 
-  // ✅ evidenza verde “ultimo toccato” (resta finché ne tocchi un altro)
+  // ✅ evidenza verde “ultimo toccato”
   const [highlightScannedId, setHighlightScannedId] = useState<string | null>(null);
 
   // ✅ mostra solo ultimi 10 di default
   const [showAllScanned, setShowAllScanned] = useState(false);
 
-  // ✅ qty “da aggiungere” (solo in sezione Scansionati)
+  // ✅ qty/ML “da aggiungere” (solo in sezione Scansionati)
   const [addQtyMap, setAddQtyMap] = useState<Record<string, string>>({});
 
   // ✅ dopo scan/Invio, nella tabella sotto mostro SOLO l’articolo trovato
@@ -84,7 +99,10 @@ export default function InventoryClient() {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const qtyInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
-  const canSave = useMemo(() => !!operatore.trim() && !!pvId && !!categoryId && items.length > 0, [operatore, pvId, categoryId, items.length]);
+  const canSave = useMemo(
+    () => !!operatore.trim() && !!pvId && !!categoryId && items.length > 0,
+    [operatore, pvId, categoryId, items.length]
+  );
 
   const draftKey = useMemo(() => {
     const sub = subcategoryId || "null";
@@ -167,7 +185,6 @@ export default function InventoryClient() {
   }, [pvId, categoryId, subcategoryId, inventoryDate, items.length, operatore, scannedIds, showAllScanned, addQtyMap, qtyMap]);
 
   const filteredItems = useMemo(() => {
-    // ✅ focus attivo => mostro SOLO l’articolo trovato
     if (focusItemId) {
       const it = items.find((x) => x.id === focusItemId);
       return it ? [it] : [];
@@ -215,16 +232,36 @@ export default function InventoryClient() {
     return scannedItems.slice(0, 10);
   }, [scannedItems, showAllScanned]);
 
+  // ✅ Totali separati (per non mischiare unità)
   const totScannedPieces = useMemo(() => {
-    return scannedItems.reduce((sum, it) => sum + (Number(qtyMap[it.id]) || 0), 0);
+    return scannedItems.reduce((sum, it) => {
+      if (isMlItem(it)) return sum;
+      return sum + (Number(qtyMap[it.id]) || 0);
+    }, 0);
+  }, [scannedItems, qtyMap]);
+
+  const totScannedMl = useMemo(() => {
+    return scannedItems.reduce((sum, it) => {
+      if (!isMlItem(it)) return sum;
+      return sum + (Number(qtyMap[it.id]) || 0);
+    }, 0);
   }, [scannedItems, qtyMap]);
 
   const totScannedDistinct = scannedItems.length;
 
   const totScannedValueEur = useMemo(() => {
     return scannedItems.reduce((sum, it) => {
-      const q = Number(qtyMap[it.id]) || 0;
       const p = Number(it.prezzo_vendita_eur) || 0;
+
+      if (isMlItem(it)) {
+        const ml = Number(qtyMap[it.id]) || 0;
+        const perUnit = Number(it.volume_ml_per_unit) || 0;
+        if (perUnit <= 0) return sum;
+        const unitsEq = ml / perUnit; // bottiglie equivalenti
+        return sum + unitsEq * p;
+      }
+
+      const q = Number(qtyMap[it.id]) || 0;
       return sum + q * p;
     }, 0);
   }, [scannedItems, qtyMap]);
@@ -239,7 +276,6 @@ export default function InventoryClient() {
 
   function setQty(itemId: string, v: string) {
     const cleaned = onlyDigits(v);
-
     setQtyMap((prev) => ({ ...prev, [itemId]: cleaned }));
 
     const n = Number(cleaned || "0") || 0;
@@ -317,10 +353,8 @@ export default function InventoryClient() {
     setError(null);
     setMsg(null);
 
-    // ✅ in tabella sotto mostro SOLO questo articolo
     setFocusItemId(found.id);
 
-    // ✅ UX: focus automatico sulla Quantità (tabella sotto)
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         const el = qtyInputRefs.current[found!.id];
@@ -366,7 +400,6 @@ export default function InventoryClient() {
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore caricamento sottocategorie");
     setSubcategories(json.rows || []);
 
-    // ✅ cambio categoria => tolgo focus
     setFocusItemId(null);
   }
 
@@ -391,7 +424,11 @@ export default function InventoryClient() {
     const json = await res.json().catch(() => null);
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore caricamento articoli");
 
-    const rows: Item[] = json.rows || [];
+    const rows: Item[] = (json.rows || []).map((r: any) => ({
+      ...r,
+      volume_ml_per_unit: r?.volume_ml_per_unit ?? null,
+    }));
+
     setItems(rows);
 
     const m: Record<string, string> = {};
@@ -443,12 +480,6 @@ export default function InventoryClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subcategoryId]);
 
-  // ✅ FIX DEFINITIVO: non precompiliamo dal DB (rimane così)
-  useEffect(() => {
-    return;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pvId, categoryId, subcategoryId, inventoryDate, items.length]);
-
   function resetAfterClose() {
     setOperatore("");
     setSearch("");
@@ -481,10 +512,20 @@ export default function InventoryClient() {
     setError(null);
 
     try {
-      const rows = items.map((it) => ({
-        item_id: it.id,
-        qty: qtyMap[it.id] === "" ? 0 : Number(qtyMap[it.id]),
-      }));
+      const rows = items.map((it) => {
+        const raw = qtyMap[it.id];
+        const n = raw === "" ? 0 : Number(raw);
+
+        if (isMlItem(it)) {
+          const perUnit = Number(it.volume_ml_per_unit) || 0;
+          const qty_ml = Math.max(0, Math.trunc(Number.isFinite(n) ? n : 0));
+          const qty = perUnit > 0 ? Math.floor(qty_ml / perUnit) : 0;
+
+          return { item_id: it.id, qty, qty_ml };
+        }
+
+        return { item_id: it.id, qty: raw === "" ? 0 : Number(raw), qty_ml: 0 };
+      });
 
       const res = await fetch("/api/inventories/save", {
         method: "POST",
@@ -608,7 +649,6 @@ export default function InventoryClient() {
           onChange={(e) => {
             const v = e.target.value;
             setSearch(v);
-            // ✅ se inizi a digitare, tolgo focus e torno alla lista normale
             if (focusItemId) setFocusItemId(null);
           }}
           onKeyDown={(e) => {
@@ -658,7 +698,8 @@ export default function InventoryClient() {
           <div>
             <div className="text-sm font-medium">Scansionati</div>
             <div className="text-sm text-gray-600">
-              Tot. Scansionati: <b>{totScannedPieces}</b> pezzi (<b>{totScannedDistinct}</b> articoli) — Valore: <b>{formatEUR(totScannedValueEur)}</b>
+              Articoli: <b>{totScannedDistinct}</b> — Pezzi: <b>{totScannedPieces}</b> — Totale ML: <b>{totScannedMl}</b> ({mlToLitriLabel(totScannedMl)}) — Valore:{" "}
+              <b>{formatEUR(totScannedValueEur)}</b>
             </div>
             {scannedItems.length > 10 && <div className="text-xs text-gray-500 mt-1">Mostro {showAllScanned ? "tutti" : "gli ultimi 10"}.</div>}
           </div>
@@ -684,26 +725,44 @@ export default function InventoryClient() {
                 <tr>
                   <th className="text-left p-3 w-40">Codice</th>
                   <th className="text-left p-3">Descrizione</th>
-                  <th className="text-left p-3 w-40">Tot.</th>
-                  <th className="text-right p-3 w-48">Aggiungi</th>
+                  <th className="text-left p-3 w-48">Totale (PZ / ML)</th>
+                  <th className="text-right p-3 w-56">Aggiungi (PZ / ML)</th>
                 </tr>
               </thead>
               <tbody>
                 {scannedItemsVisible.map((it) => {
                   const isHi = highlightScannedId === it.id;
+                  const mlMode = isMlItem(it);
+                  const ml = Number(qtyMap[it.id]) || 0;
+                  const perUnit = Number(it.volume_ml_per_unit) || 0;
+                  const eq = mlMode && perUnit > 0 ? (ml / perUnit).toFixed(2) : null;
+
                   return (
                     <tr key={it.id} className={`border-t ${isHi ? "bg-green-50" : ""}`}>
                       <td className="p-3 font-medium">{it.code}</td>
-                      <td className="p-3">{it.description}</td>
                       <td className="p-3">
-                        <input className="w-full rounded-xl border p-2" inputMode="numeric" placeholder="0" value={qtyMap[it.id] ?? ""} onChange={(e) => setQty(it.id, e.target.value)} />
+                        {it.description}
+                        {mlMode && eq != null && (
+                          <div className="text-xs text-gray-500 mt-1">
+                            Bottiglie equivalenti: <b>{eq}</b>
+                          </div>
+                        )}
+                      </td>
+                      <td className="p-3">
+                        <input
+                          className="w-full rounded-xl border p-2"
+                          inputMode="numeric"
+                          placeholder={mlMode ? "0 (ML)" : "0 (PZ)"}
+                          value={qtyMap[it.id] ?? ""}
+                          onChange={(e) => setQty(it.id, e.target.value)}
+                        />
                       </td>
                       <td className="p-3">
                         <div className="flex justify-end gap-2">
                           <input
                             className="w-28 rounded-xl border p-2 text-right"
                             inputMode="numeric"
-                            placeholder="+ qty"
+                            placeholder={mlMode ? "+ ml" : "+ pz"}
                             value={addQtyMap[it.id] ?? ""}
                             onChange={(e) => setAddQtyMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
                             onKeyDown={(e) => {
@@ -736,7 +795,7 @@ export default function InventoryClient() {
             <tr>
               <th className="text-left p-3 w-40">Codice</th>
               <th className="text-left p-3">Descrizione</th>
-              <th className="text-left p-3 w-40">Quantità</th>
+              <th className="text-left p-3 w-56">Totale (PZ / ML)</th>
             </tr>
           </thead>
           <tbody>
@@ -758,10 +817,22 @@ export default function InventoryClient() {
 
             {filteredItems.map((it) => {
               const isHi = highlightScannedId === it.id;
+              const mlMode = isMlItem(it);
+              const ml = Number(qtyMap[it.id]) || 0;
+              const perUnit = Number(it.volume_ml_per_unit) || 0;
+              const eq = mlMode && perUnit > 0 ? (ml / perUnit).toFixed(2) : null;
+
               return (
                 <tr key={it.id} className={`border-t ${isHi ? "bg-green-50" : ""}`}>
                   <td className="p-3 font-medium">{it.code}</td>
-                  <td className="p-3">{it.description}</td>
+                  <td className="p-3">
+                    {it.description}
+                    {mlMode && eq != null && (
+                      <div className="text-xs text-gray-500 mt-1">
+                        Bottiglie equivalenti: <b>{eq}</b>
+                      </div>
+                    )}
+                  </td>
                   <td className="p-3">
                     <input
                       ref={(el) => {
@@ -769,7 +840,7 @@ export default function InventoryClient() {
                       }}
                       className="w-full rounded-xl border p-2"
                       inputMode="numeric"
-                      placeholder="0"
+                      placeholder={mlMode ? "0 (ML)" : "0 (PZ)"}
                       value={qtyMap[it.id] ?? ""}
                       onChange={(e) => setQty(it.id, e.target.value)}
                       onKeyDown={(e) => {
@@ -793,3 +864,4 @@ export default function InventoryClient() {
     </div>
   );
 }
+

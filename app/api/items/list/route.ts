@@ -11,12 +11,10 @@ function isUuid(v: string | null) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v.trim());
 }
 
-// Normalizza testo per ricerca (no virgole che rompono .or, no spazi multipli)
 function normSearchText(q: string) {
   return q.replace(/,/g, " ").replace(/\s+/g, " ").trim();
 }
 
-// Normalizza possibili barcode: tieni solo cifre
 function extractDigits(q: string) {
   return q.replace(/[^\d]/g, "");
 }
@@ -30,7 +28,6 @@ async function findItemIdsByBarcodeLike(barcodeDigits: string): Promise<string[]
   if (!b) return [];
 
   try {
-    // Cerco sia match esatto sia "contiene" (utile quando incolli con spazi, o barcode “spezzato”)
     const { data, error } = await supabaseAdmin
       .from("item_barcodes")
       .select("item_id")
@@ -38,7 +35,6 @@ async function findItemIdsByBarcodeLike(barcodeDigits: string): Promise<string[]
       .limit(1000);
 
     if (error) {
-      // Se la tabella non esiste ancora o errore schema, NON rompo la lista: fallback sul vecchio schema
       console.warn("[items/list] item_barcodes lookup error (fallback):", error.message);
       return [];
     }
@@ -80,7 +76,6 @@ async function loadBarcodesForItems(itemIds: string[]): Promise<Map<string, stri
       map.set(itemId, prev);
     }
 
-    // dedup per item
     for (const [k, arr] of map.entries()) {
       map.set(k, Array.from(new Set(arr)));
     }
@@ -95,27 +90,22 @@ async function loadBarcodesForItems(itemIds: string[]): Promise<Map<string, stri
 export async function GET(req: Request) {
   const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
 
-  // ✅ lettura consentita anche a punto_vendita (serve per Inventario PV)
   if (!session || !["admin", "amministrativo", "punto_vendita"].includes(session.role)) {
     return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
   }
 
   const url = new URL(req.url);
 
-  // ✅ nuovo schema
-  const category_id = url.searchParams.get("category_id"); // uuid
-  const subcategory_id = url.searchParams.get("subcategory_id"); // uuid
+  const category_id = url.searchParams.get("category_id");
+  const subcategory_id = url.searchParams.get("subcategory_id");
 
-  // ✅ vecchio schema (retro-compat)
   const legacyCategory = (url.searchParams.get("category") || "").trim().toUpperCase(); // TAB | GV
 
   const qRaw = (url.searchParams.get("q") || "").trim();
   const active = (url.searchParams.get("active") || "1").toLowerCase(); // 1 | 0 | all
 
-  // ✅ CAP 1000
   const limit = Math.min(Number(url.searchParams.get("limit") || 200), 1000);
 
-  // validazioni leggere
   if (category_id && !isUuid(category_id)) {
     return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
   }
@@ -126,56 +116,43 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: "Categoria non valida" }, { status: 400 });
   }
 
-  // ✅ Base select: includo anche barcode + tabacchi fields (barcode resta per retrocompatibilità UI)
   let query = supabaseAdmin
     .from("items")
     .select(
-      "id, category, category_id, subcategory_id, code, description, barcode, um, peso_kg, conf_da, prezzo_vendita_eur, is_active, created_at, updated_at"
+      "id, category, category_id, subcategory_id, code, description, barcode, um, peso_kg, conf_da, prezzo_vendita_eur, volume_ml_per_unit, is_active, created_at, updated_at"
     )
     .order("code", { ascending: true })
     .limit(limit);
 
-  // Filtri stato
   if (active === "1") query = query.eq("is_active", true);
   else if (active === "0") query = query.eq("is_active", false);
 
-  // ✅ Priorità: nuovo schema
   if (category_id) {
     query = query.eq("category_id", category_id);
     if (subcategory_id) query = query.eq("subcategory_id", subcategory_id);
   } else {
-    // ✅ fallback vecchio schema
     const cat = legacyCategory || "TAB";
     query = query.eq("category", cat);
   }
 
-  // ✅ Ricerca: code/description sempre, barcode multi-valore via item_barcodes quando sembra barcode
   if (qRaw) {
     const safeText = normSearchText(qRaw);
     const digits = extractDigits(qRaw);
 
     if (looksLikeBarcode(digits)) {
       const ids = await findItemIdsByBarcodeLike(digits);
-
-      // PostgREST: id.in.(uuid1,uuid2,...)
       const idInExpr = ids.length > 0 ? `id.in.(${ids.join(",")})` : "";
 
       const orParts = [
-        // ✅ match via tabella nuova (se presente)
         idInExpr,
-
-        // ✅ retrocompatibilità: vecchio barcode su items
         `barcode.eq.${digits}`,
         `barcode.ilike.%${digits}%`,
-
-        // ✅ ricerca classica
         `code.ilike.%${safeText}%`,
         `description.ilike.%${safeText}%`,
       ].filter(Boolean);
 
       query = query.or(orParts.join(","));
     } else {
-      // ricerca testuale standard (mantengo anche barcode su items)
       const orExpr = [
         `code.ilike.%${safeText}%`,
         `description.ilike.%${safeText}%`,
@@ -195,7 +172,6 @@ export async function GET(req: Request) {
 
   const rows = Array.isArray(data) ? data : [];
 
-  // ✅ arricchisco con lista barcode (se tabella esiste)
   const ids = rows.map((r: any) => String(r?.id || "").trim()).filter(Boolean);
   const barcodeMap = await loadBarcodesForItems(ids);
 
@@ -206,13 +182,13 @@ export async function GET(req: Request) {
     return {
       ...r,
       barcodes,
-      // retrocompat: se barcode legacy è vuoto, uso il primo associato
       barcode: legacyBarcode || barcodes[0] || null,
     };
   });
 
   return NextResponse.json({ ok: true, rows: enriched });
 }
+
 
 
 

@@ -61,6 +61,12 @@ async function requirePvIdForPuntoVendita(username: string): Promise<string> {
   throw new Error("Utente punto vendita senza PV assegnato (pv_id mancante).");
 }
 
+function clampInt(n: any) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.max(0, Math.trunc(x));
+}
+
 export async function GET(req: Request) {
   const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
 
@@ -82,7 +88,10 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: "subcategory_id non valido" }, { status: 400 });
   }
   if (!isIsoDate(inventory_date)) {
-    return NextResponse.json({ ok: false, error: "inventory_date non valida (YYYY-MM-DD)" }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: "inventory_date non valida (YYYY-MM-DD)" },
+      { status: 400 }
+    );
   }
 
   // PV enforcement
@@ -92,10 +101,7 @@ export async function GET(req: Request) {
     try {
       effectivePvId = await requirePvIdForPuntoVendita(session.username);
     } catch (e: any) {
-      return NextResponse.json(
-        { ok: false, error: e?.message || "Non autorizzato" },
-        { status: 401 }
-      );
+      return NextResponse.json({ ok: false, error: e?.message || "Non autorizzato" }, { status: 401 });
     }
   } else {
     if (!isUuid(effectivePvId)) {
@@ -106,15 +112,16 @@ export async function GET(req: Request) {
   try {
     let q = supabaseAdmin
       .from("inventories")
-      // ✅ aggiungo prezzo_vendita_eur dagli items
-      .select("id, item_id, qty, created_by_username, items:items(code, description, prezzo_vendita_eur)")
+      .select(
+        "id, item_id, qty, qty_ml, created_by_username, items:items(code, description, prezzo_vendita_eur, volume_ml_per_unit)"
+      )
       .eq("pv_id", effectivePvId)
       .eq("category_id", category_id)
       .eq("inventory_date", inventory_date);
 
-    if (session.role === "punto_vendita") {
-      q = q.eq("created_by_username", session.username);
-    }
+    // ✅ IMPORTANTISSIMO:
+    // il PV deve vedere TUTTI gli inventari del suo punto vendita,
+    // quindi NON filtriamo per created_by_username.
 
     if (subcategory_id) q = q.eq("subcategory_id", subcategory_id);
     else q = q.is("subcategory_id", null);
@@ -128,26 +135,47 @@ export async function GET(req: Request) {
 
     const rows = (data || []) as any[];
 
-    // ✅ SOLO QTY > 0
     const out = rows
-      .map((r: any) => ({
-        id: r.id,
-        item_id: r.item_id,
-        code: r?.items?.code ?? "",
-        description: r?.items?.description ?? "",
-        qty: Number(r?.qty ?? 0),
-        // ✅ esposto per calcolo "Valore" nello storico
-        prezzo_vendita_eur: r?.items?.prezzo_vendita_eur ?? null,
-      }))
-      .filter((x) => Number.isFinite(x.qty) && x.qty > 0)
+      .map((r: any) => {
+        const qty = clampInt(r?.qty ?? 0);
+        const qty_ml = clampInt(r?.qty_ml ?? 0);
+
+        const volume = Number(r?.items?.volume_ml_per_unit ?? 0);
+        const volume_ml_per_unit =
+          Number.isFinite(volume) && volume > 0 ? Math.trunc(volume) : null;
+
+        let ml_open: number | null = null;
+        if (volume_ml_per_unit && volume_ml_per_unit > 0) {
+          const calc = qty_ml - qty * volume_ml_per_unit;
+          ml_open = Math.max(0, Math.trunc(calc));
+        }
+
+        return {
+          id: r.id,
+          item_id: r.item_id,
+          code: r?.items?.code ?? "",
+          description: r?.items?.description ?? "",
+          qty,
+          qty_ml,
+          volume_ml_per_unit,
+          ml_open,
+          prezzo_vendita_eur: r?.items?.prezzo_vendita_eur ?? null,
+        };
+      })
+      .filter((x) => (Number.isFinite(x.qty) && x.qty > 0) || (Number.isFinite(x.qty_ml) && x.qty_ml > 0))
       .sort((a, b) => (a.code || "").localeCompare(b.code || ""));
 
     return NextResponse.json({ ok: true, rows: out });
   } catch (e: any) {
     console.error("[inventories/rows] UNHANDLED ERROR:", e);
-    return NextResponse.json({ ok: false, error: e?.message || "TypeError: fetch failed" }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: e?.message || "TypeError: fetch failed" },
+      { status: 500 }
+    );
   }
 }
+
+
 
 
 

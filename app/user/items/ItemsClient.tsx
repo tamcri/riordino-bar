@@ -17,6 +17,25 @@ type Item = {
   peso_kg?: number | null;
   conf_da?: number | null;
   prezzo_vendita_eur?: number | null;
+
+  // ✅ NEW: per liquidi -> ml per pezzo (es. 700, 750, 1000)
+  volume_ml_per_unit?: number | null;
+};
+
+type VolumeImportResult = {
+  ok: boolean;
+  mode?: string;
+  total_rows?: number;
+  codes_in_file?: number;
+  updated?: number;
+  skipped_already_set?: number;
+  not_found?: number;
+  lists_limit?: number;
+  not_found_codes?: string[];
+  skipped_codes?: string[];
+  updated_codes?: string[];
+  detected_columns?: { code?: string; um2?: string | null; litri?: string };
+  error?: string;
 };
 
 function isTabacchiCategory(cat: Category | null | undefined) {
@@ -85,6 +104,42 @@ function isBarcodeLike(v: string) {
   return /^\d{8,14}$/.test(s);
 }
 
+function listToText(list: string[] | undefined) {
+  return (Array.isArray(list) ? list : []).join("\n");
+}
+
+async function copyToClipboard(text: string) {
+  const t = String(text || "");
+  if (!t.trim()) return;
+  try {
+    await navigator.clipboard.writeText(t);
+    alert("Copiato!");
+  } catch {
+    // fallback vecchio stile
+    const ta = document.createElement("textarea");
+    ta.value = t;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+    alert("Copiato!");
+  }
+}
+
+function downloadCSV(filename: string, codes: string[]) {
+  const list = (codes || []).map((c) => String(c).trim()).filter(Boolean);
+  const csv = ["code", ...list].join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.URL.revokeObjectURL(url);
+}
+
 export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   const [categoryId, setCategoryId] = useState<string>("");
   const [subcategoryId, setSubcategoryId] = useState<string>("");
@@ -108,6 +163,10 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   const [editPesoKg, setEditPesoKg] = useState<string>("");
   const [editConfDa, setEditConfDa] = useState<string>("");
   const [editPrezzo, setEditPrezzo] = useState<string>("");
+
+  // ✅ NEW: ML per pezzo (solo liquidi)
+  const [editVolumeMl, setEditVolumeMl] = useState<string>("");
+
   const [savingEdit, setSavingEdit] = useState(false);
 
   // ✅ MULTI-BARCODE (item_barcodes)
@@ -151,8 +210,18 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   const [assignPreviewError, setAssignPreviewError] = useState<string | null>(null);
   const [assignPreviewItem, setAssignPreviewItem] = useState<Item | null>(null);
 
+  // ✅ IMPORT ML (solo admin)
+  const [volumeFile, setVolumeFile] = useState<File | null>(null);
+  const [volumeImporting, setVolumeImporting] = useState(false);
+
+  // ✅ NEW: risultato import ML (per mostrare liste)
+  const [volumeResult, setVolumeResult] = useState<VolumeImportResult | null>(null);
+
   const selectedCategory = useMemo(() => categories.find((c) => c.id === categoryId) || null, [categories, categoryId]);
-  const selectedSubcategory = useMemo(() => subcategories.find((s) => s.id === subcategoryId) || null, [subcategories, subcategoryId]);
+  const selectedSubcategory = useMemo(
+    () => subcategories.find((s) => s.id === subcategoryId) || null,
+    [subcategories, subcategoryId]
+  );
 
   const showTabacchiCols = useMemo(() => isTabacchiCategory(selectedCategory), [selectedCategory]);
 
@@ -393,6 +462,45 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     }
   }
 
+  // ✅ IMPORT ML da Excel (solo admin)
+  async function importVolumeMl() {
+    if (!isAdmin) return;
+
+    if (!volumeFile) {
+      setError("Seleziona il file Excel con articoli UM = LT.");
+      return;
+    }
+
+    setVolumeImporting(true);
+    setMsg(null);
+    setError(null);
+    setVolumeResult(null);
+
+    try {
+      const fd = new FormData();
+      fd.append("file", volumeFile);
+
+      const res = await fetch("/api/items/import-volume-ml", { method: "POST", body: fd });
+      const json: VolumeImportResult = await res.json().catch(() => null);
+
+      if (!res.ok || !json?.ok) throw new Error((json as any)?.error || "Import volume ML fallito");
+
+      setVolumeResult(json);
+
+      const u = Number(json.updated ?? 0);
+      const nf = Number(json.not_found ?? 0);
+      const sk = Number(json.skipped_already_set ?? 0);
+
+      setMsg(`Aggiornati ${u} articoli. Saltati (già valorizzati): ${sk}. Non trovati: ${nf}.`);
+      setVolumeFile(null);
+      await loadItems();
+    } catch (e: any) {
+      setError(e?.message || "Errore import volume ML");
+    } finally {
+      setVolumeImporting(false);
+    }
+  }
+
   // ✅ EXPORT EXCEL
   async function exportExcel() {
     if (!isAdmin) return;
@@ -418,7 +526,9 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
       const blob = await res.blob();
 
       const catPart = slugifyFilename(selectedCategory?.slug || selectedCategory?.name || "categoria");
-      const subPart = subcategoryId ? slugifyFilename(selectedSubcategory?.slug || selectedSubcategory?.name || "sottocategoria") : "";
+      const subPart = subcategoryId
+        ? slugifyFilename(selectedSubcategory?.slug || selectedSubcategory?.name || "sottocategoria")
+        : "";
       const datePart = todayISO();
       const fname = `anagrafica-articoli_${catPart}${subPart ? `_${subPart}` : ""}_${datePart}.xlsx`;
 
@@ -517,7 +627,6 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
       const list: string[] = Array.isArray(json?.barcodes) ? json.barcodes : [];
       const uniq = Array.from(new Set(list.map((x) => String(x).trim()).filter(Boolean)));
 
-      // Se per qualche motivo la lista non contiene il legacy barcode, lo aggiungo in vista (senza scrivere DB)
       const legacy = String(legacyBarcode || "").trim();
       const merged = legacy ? Array.from(new Set([legacy, ...uniq])) : uniq;
 
@@ -568,7 +677,6 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     const barcode = String(b || "").trim();
     if (!barcode) return;
 
-    // non rimuovo dal mapping il barcode principale se coincide
     if (barcode === String(editBarcode || "").trim()) {
       alert("Questo è il barcode principale nel campo 'Barcode'. Se vuoi rimuoverlo, svuota il campo e salva.");
       return;
@@ -613,7 +721,9 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     setEditConfDa(item.conf_da == null ? "" : String(item.conf_da));
     setEditPrezzo(item.prezzo_vendita_eur == null ? "" : String(item.prezzo_vendita_eur));
 
-    // ✅ carico i barcode aggiuntivi
+    // ✅ NEW
+    setEditVolumeMl(item.volume_ml_per_unit == null ? "" : String(item.volume_ml_per_unit));
+
     setEditBarcodes([]);
     setNewExtraBarcode("");
     setBarcodesError(null);
@@ -677,11 +787,14 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
         id: editItem.id,
         code: nextCode,
         description: nextDesc,
-        barcode: normalizeNullableText(editBarcode), // barcode principale (retro-compat)
+        barcode: normalizeNullableText(editBarcode),
         um: normalizeNullableText(editUm),
         peso_kg: editPesoKg.trim() === "" ? null : normalizeNullableNumber(editPesoKg),
         conf_da: editConfDa.trim() === "" ? null : normalizeNullableInt(editConfDa),
         prezzo_vendita_eur: editPrezzo.trim() === "" ? null : normalizeNullableNumber(editPrezzo),
+
+        // ✅ NEW: ml per pezzo (solo liquidi). Vuoto => null
+        volume_ml_per_unit: editVolumeMl.trim() === "" ? null : normalizeNullableInt(editVolumeMl),
       };
 
       const res = await fetch("/api/items/update", {
@@ -693,7 +806,6 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
       const json = await res.json().catch(() => null);
       if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore aggiornamento");
 
-      // ✅ se hai un barcode principale, lo assicuro anche in item_barcodes
       const mainB = String(editBarcode || "").trim();
       if (mainB) {
         await fetch("/api/items/barcodes", {
@@ -807,7 +919,34 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
                   value={editBarcode}
                   onChange={(e) => setEditBarcode(e.target.value)}
                 />
-                <div className="mt-1 text-xs text-gray-500">Questo resta il barcode “principale” per compatibilità. Sotto trovi la lista completa.</div>
+                <div className="mt-1 text-xs text-gray-500">
+                  Questo resta il barcode “principale” per compatibilità. Sotto trovi la lista completa.
+                </div>
+              </div>
+
+              {/* ✅ NEW: ML per pezzo */}
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium mb-2">ML per pezzo (solo liquidi)</label>
+                <input
+                  className="w-full rounded-xl border p-3"
+                  inputMode="numeric"
+                  placeholder="Es. 700, 750, 1000"
+                  value={editVolumeMl}
+                  onChange={(e) => setEditVolumeMl(e.target.value)}
+                />
+                <div className="mt-1 text-xs text-gray-500">
+                  Se valorizzato, il sistema può lavorare in ML (scarico cocktail, import gestionale coerente).
+                </div>
+              </div>
+
+              <div className="md:col-span-2 rounded-xl border bg-slate-50 p-3">
+                <div className="text-sm font-medium">Esempi rapidi</div>
+                <div className="mt-1 text-xs text-gray-600">
+                  Bottiglia 1L → <b>1000</b> • 0,75L → <b>750</b> • 0,70L → <b>700</b>
+                </div>
+                <div className="mt-1 text-xs text-gray-600">
+                  Se lasci vuoto: l’articolo resta “a pezzi”.
+                </div>
               </div>
 
               {/* ✅ LISTA BARCODE ASSOCIATI */}
@@ -859,7 +998,9 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
                   </button>
                 </div>
 
-                <div className="mt-1 text-xs text-gray-500">Se provi ad aggiungere un barcode già assegnato a un altro articolo, ti blocca.</div>
+                <div className="mt-1 text-xs text-gray-500">
+                  Se provi ad aggiungere un barcode già assegnato a un altro articolo, ti blocca.
+                </div>
               </div>
 
               <div>
@@ -1000,173 +1141,147 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
         )}
       </div>
 
-      {/* ✅ BOX ASSEGNA BARCODE (solo admin) */}
-      {assignOpen && showAssignBox && (
-        <div className="rounded-2xl border bg-amber-50 p-4">
-          <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-            <div>
-              <div className="font-semibold">Barcode non trovato</div>
-              <div className="text-sm text-gray-700">
-                Barcode: <span className="font-mono">{qTrim}</span> — vuoi assegnarlo a un articolo esistente?
-              </div>
-              <div className="text-xs text-gray-600 mt-1">Inserisci il CODICE articolo (nella categoria selezionata) e conferma.</div>
-            </div>
-
-            <div className="flex gap-2 items-center">
-              <input className="w-44 rounded-xl border p-3" placeholder="Codice articolo" value={assignCode} onChange={(e) => setAssignCode(e.target.value)} disabled={assigning} />
-              <button type="button" className="rounded-xl bg-slate-900 text-white px-4 py-3 disabled:opacity-60" onClick={assignBarcodeToCode} disabled={assigning}>
-                {assigning ? "Assegno..." : "Assegna barcode"}
-              </button>
-            </div>
-          </div>
-
-          {/* ✅ PREVIEW ARTICOLO */}
-          <div className="mt-3">
-            {assignPreviewLoading && <div className="text-sm text-gray-700">Cerco articolo...</div>}
-
-            {!assignPreviewLoading && assignCode.trim() !== "" && assignPreviewItem && (
-              <div className="rounded-xl border bg-white p-3 text-sm">
-                <div className="font-semibold mb-1">Articolo selezionato</div>
-                <div>
-                  <b>Codice:</b> {assignPreviewItem.code}
-                </div>
-                <div>
-                  <b>Descrizione:</b> {assignPreviewItem.description}
-                </div>
-                <div>
-                  <b>UM:</b> {formatUm(assignPreviewItem.um)}
-                </div>
-                <div>
-                  <b>Prezzo:</b> {formatEuroIT(assignPreviewItem.prezzo_vendita_eur)}
-                </div>
-
-                {showTabacchiCols && (
-                  <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    <div>
-                      <b>Peso (kg):</b> {formatPesoKg(assignPreviewItem.peso_kg)}
-                    </div>
-                    <div>
-                      <b>Conf. da:</b> {formatConfDa(assignPreviewItem.conf_da)}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {!assignPreviewLoading && assignCode.trim() !== "" && !assignPreviewItem && assignPreviewError && <div className="text-sm text-red-700">{assignPreviewError}</div>}
-          </div>
-
-          {assignError && <div className="mt-2 text-sm text-red-700">{assignError}</div>}
-        </div>
-      )}
-
-      {/* ✅ IMPORT EXCEL (solo admin) */}
+      {/* ✅ IMPORT ML (solo admin) */}
       {isAdmin && (
-        <form onSubmit={doImport} className="rounded-2xl border bg-white p-4 space-y-3">
+        <div className="rounded-2xl border bg-white p-4 space-y-3">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <div className="font-semibold">Carica file Excel</div>
+              <div className="font-semibold">🔄 Aggiorna anagrafica: LT → ML</div>
               <div className="text-sm text-gray-600">
-                {importMode === "barcode-map"
-                  ? "Modalità BARCODE-MAP: assegna più barcode allo stesso articolo (senza sovrascrivere). Supporta separatori ; , | spazio. Il codice è cercato globalmente (l’Excel può contenere più categorie)."
-                  : "Modalità STANDARD: importa/aggiorna anagrafica (preview: Codice, Descrizione, Barcode, UM, Prezzo)."}
+                Carica l’Excel del gestionale con i prodotti in <b>UM = LT</b>. Il backend calcola e salva <b>volume_ml_per_unit</b>.
               </div>
             </div>
 
-            <button className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60" disabled={!file || importing}>
-              {importing ? "Importo..." : "Importa"}
+            <button
+              type="button"
+              className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60"
+              onClick={importVolumeMl}
+              disabled={!volumeFile || volumeImporting}
+              title={!volumeFile ? "Seleziona un file" : "Aggiorna ML"}
+            >
+              {volumeImporting ? "Importo..." : "Aggiorna ML"}
             </button>
           </div>
 
-          {/* ✅ toggle modalità */}
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="text-sm font-medium">Modalità import:</div>
-            <button
-              type="button"
-              className={`rounded-xl border px-3 py-2 text-sm ${importMode === "standard" ? "bg-slate-900 text-white border-slate-900" : "bg-white hover:bg-gray-50"}`}
-              onClick={() => setImportMode("standard")}
-              disabled={importing}
-            >
-              Standard
-            </button>
-            <button
-              type="button"
-              className={`rounded-xl border px-3 py-2 text-sm ${importMode === "barcode-map" ? "bg-slate-900 text-white border-slate-900" : "bg-white hover:bg-gray-50"}`}
-              onClick={() => setImportMode("barcode-map")}
-              disabled={importing}
-              title="Importa mappature su item_barcodes senza sovrascrivere items"
-            >
-              Import barcode
-            </button>
-          </div>
+          <input type="file" accept=".xlsx,.xls" onChange={(e) => setVolumeFile(e.target.files?.[0] || null)} />
 
-          <input
-            type="file"
-            accept=".xlsx"
-            onChange={(e) => {
-              const f = e.target.files?.[0] || null;
-              setFile(f);
-              loadImportPreview(f);
-            }}
-          />
-
-          {file && (
+          {volumeFile && (
             <div className="text-sm text-gray-600">
-              Selezionato: <b>{file.name}</b>
+              Selezionato: <b>{volumeFile.name}</b>
             </div>
           )}
 
-          {file && (
-            <div className="rounded-xl border bg-gray-50 p-3">
-              <div className="flex items-center justify-between gap-3">
-                <div className="text-sm font-medium">Anteprima import (prime righe)</div>
-                <button
-                  type="button"
-                  className="rounded-xl border bg-white px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-60"
-                  onClick={() => loadImportPreview(file)}
-                  disabled={previewLoading}
-                >
-                  {previewLoading ? "Carico..." : "Ricarica"}
-                </button>
-              </div>
+          <div className="text-xs text-gray-500">Esempio: 0,7 LT → 700 ML • 0,75 LT → 750 ML • 1 LT → 1000 ML</div>
 
-              <div className="mt-2 text-xs text-gray-600">
-                Mostro solo: Codice, Descrizione, Barcode, UM, Prezzo. (La Q.tà del file viene ignorata.)
-              </div>
-
-              {previewError && <div className="mt-2 text-sm text-red-600">{previewError}</div>}
-
-              {!previewError && previewRows.length === 0 && !previewLoading && <div className="mt-2 text-sm text-gray-600">Nessuna riga da mostrare.</div>}
-
-              {previewRows.length > 0 && (
-                <div className="mt-3 overflow-auto rounded-xl border bg-white">
-                  <table className="w-full text-sm">
-                    <thead className="bg-gray-50">
-                      <tr>
-                        <th className="text-left p-2">Codice</th>
-                        <th className="text-left p-2">Descrizione</th>
-                        <th className="text-left p-2">Barcode</th>
-                        <th className="text-left p-2">UM</th>
-                        <th className="text-left p-2">Prezzo</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {previewRows.map((r, idx) => (
-                        <tr key={idx} className="border-t">
-                          <td className="p-2 font-medium">{r.code || "—"}</td>
-                          <td className="p-2">{r.description || "—"}</td>
-                          <td className="p-2 font-mono text-xs">{r.barcode || "—"}</td>
-                          <td className="p-2">{r.um || "—"}</td>
-                          <td className="p-2">{r.prezzo || "—"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+          {/* ✅ RISULTATI DETTAGLIATI */}
+          {volumeResult?.ok && (
+            <div className="mt-2 grid grid-cols-1 md:grid-cols-3 gap-3">
+              {/* UPDATED */}
+              <div className="rounded-xl border bg-emerald-50 p-3">
+                <div className="font-semibold">✅ Aggiornati</div>
+                <div className="text-sm text-gray-700 mt-1">
+                  {Number(volumeResult.updated ?? 0)} / {Number(volumeResult.codes_in_file ?? 0)}
                 </div>
-              )}
+
+                <div className="mt-3 flex gap-2">
+                  <button
+                    type="button"
+                    className="rounded-lg border bg-white px-3 py-1.5 text-xs hover:bg-gray-50"
+                    onClick={() => copyToClipboard(listToText(volumeResult.updated_codes))}
+                    disabled={!volumeResult.updated_codes?.length}
+                  >
+                    Copia
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-lg border bg-white px-3 py-1.5 text-xs hover:bg-gray-50"
+                    onClick={() =>
+                      downloadCSV(`ml_updated_${todayISO()}.csv`, volumeResult.updated_codes || [])
+                    }
+                    disabled={!volumeResult.updated_codes?.length}
+                  >
+                    Scarica CSV
+                  </button>
+                </div>
+
+                <textarea
+                  className="mt-2 w-full rounded-lg border p-2 font-mono text-xs bg-white"
+                  rows={6}
+                  readOnly
+                  value={listToText(volumeResult.updated_codes)}
+                />
+              </div>
+
+              {/* SKIPPED */}
+              <div className="rounded-xl border bg-amber-50 p-3">
+                <div className="font-semibold">⚠️ Saltati (già valorizzati)</div>
+                <div className="text-sm text-gray-700 mt-1">{Number(volumeResult.skipped_already_set ?? 0)}</div>
+
+                <div className="mt-3 flex gap-2">
+                  <button
+                    type="button"
+                    className="rounded-lg border bg-white px-3 py-1.5 text-xs hover:bg-gray-50"
+                    onClick={() => copyToClipboard(listToText(volumeResult.skipped_codes))}
+                    disabled={!volumeResult.skipped_codes?.length}
+                  >
+                    Copia
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-lg border bg-white px-3 py-1.5 text-xs hover:bg-gray-50"
+                    onClick={() =>
+                      downloadCSV(`ml_skipped_${todayISO()}.csv`, volumeResult.skipped_codes || [])
+                    }
+                    disabled={!volumeResult.skipped_codes?.length}
+                  >
+                    Scarica CSV
+                  </button>
+                </div>
+
+                <textarea
+                  className="mt-2 w-full rounded-lg border p-2 font-mono text-xs bg-white"
+                  rows={6}
+                  readOnly
+                  value={listToText(volumeResult.skipped_codes)}
+                />
+              </div>
+
+              {/* NOT FOUND */}
+              <div className="rounded-xl border bg-rose-50 p-3">
+                <div className="font-semibold">❌ Non trovati</div>
+                <div className="text-sm text-gray-700 mt-1">{Number(volumeResult.not_found ?? 0)}</div>
+
+                <div className="mt-3 flex gap-2">
+                  <button
+                    type="button"
+                    className="rounded-lg border bg-white px-3 py-1.5 text-xs hover:bg-gray-50"
+                    onClick={() => copyToClipboard(listToText(volumeResult.not_found_codes))}
+                    disabled={!volumeResult.not_found_codes?.length}
+                  >
+                    Copia
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-lg border bg-white px-3 py-1.5 text-xs hover:bg-gray-50"
+                    onClick={() =>
+                      downloadCSV(`ml_not_found_${todayISO()}.csv`, volumeResult.not_found_codes || [])
+                    }
+                    disabled={!volumeResult.not_found_codes?.length}
+                  >
+                    Scarica CSV
+                  </button>
+                </div>
+
+                <textarea
+                  className="mt-2 w-full rounded-lg border p-2 font-mono text-xs bg-white"
+                  rows={6}
+                  readOnly
+                  value={listToText(volumeResult.not_found_codes)}
+                />
+              </div>
             </div>
           )}
-        </form>
+        </div>
       )}
 
       {msg && <p className="text-sm text-green-700">{msg}</p>}
@@ -1240,6 +1355,9 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     </div>
   );
 }
+
+
+
 
 
 

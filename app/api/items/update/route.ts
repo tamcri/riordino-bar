@@ -20,7 +20,7 @@ export async function PATCH(req: Request) {
   const body = await req.json().catch(() => null);
 
   const id = String(body?.id ?? "").trim();
-  const code = body?.code; // ✅ nuovo
+  const code = body?.code;
   const description = body?.description;
   const is_active = body?.is_active;
   const peso_kg = body?.peso_kg;
@@ -28,6 +28,9 @@ export async function PATCH(req: Request) {
   const conf_da = body?.conf_da;
   const barcode = body?.barcode;
   const um = body?.um;
+
+  // ✅ NEW
+  const volume_ml_per_unit = body?.volume_ml_per_unit;
 
   if (!id) return NextResponse.json({ ok: false, error: "ID mancante" }, { status: 400 });
 
@@ -55,7 +58,6 @@ export async function PATCH(req: Request) {
     return s;
   }
 
-  // ✅ Leggo lo scope dell'articolo, per controllare duplicati su code
   const { data: current, error: curErr } = await supabaseAdmin
     .from("items")
     .select("id, code, category, category_id, subcategory_id")
@@ -72,7 +74,6 @@ export async function PATCH(req: Request) {
 
   const patch: any = { updated_at: new Date().toISOString() };
 
-  // ✅ CODE: se fornito, controllo duplicati nello stesso scope
   if (code !== undefined) {
     const nextCode = String(code ?? "").trim();
     if (!nextCode) {
@@ -82,15 +83,12 @@ export async function PATCH(req: Request) {
     if (nextCode !== String(current.code)) {
       let dupQuery = supabaseAdmin.from("items").select("id").eq("code", nextCode).neq("id", id).limit(1);
 
-      // Nuovo schema: scope su category_id (+ subcategory_id se presente)
       if (current.category_id && isUuid(String(current.category_id))) {
         dupQuery = dupQuery.eq("category_id", current.category_id);
-        // se vuoi scope più stretto anche per subcategory_id, lo lasciamo così:
         if (current.subcategory_id && isUuid(String(current.subcategory_id))) {
           dupQuery = dupQuery.eq("subcategory_id", current.subcategory_id);
         }
       } else {
-        // Legacy: scope su category (TAB/GV)
         if (current.category) dupQuery = dupQuery.eq("category", current.category);
       }
 
@@ -129,6 +127,14 @@ export async function PATCH(req: Request) {
   const nextUm = toNullableText(um);
   if (nextUm !== undefined) patch.um = nextUm;
 
+  // ✅ NEW: volume_ml_per_unit (solo liquidi)
+// Vuoto o 0 => NULL (disattiva gestione ml)
+const nextVol = toNullableInt(volume_ml_per_unit);
+if (nextVol !== undefined) {
+  patch.volume_ml_per_unit = nextVol && nextVol > 0 ? nextVol : null;
+}
+
+
   const { error } = await supabaseAdmin.from("items").update(patch).eq("id", id);
   if (error) {
     console.error("[items/update] error:", error);
@@ -137,6 +143,7 @@ export async function PATCH(req: Request) {
 
   return NextResponse.json({ ok: true });
 }
+
 
 
 

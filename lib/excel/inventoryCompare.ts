@@ -6,12 +6,15 @@ export type CompareLine = {
   code: string;
   description: string;
 
-  qtyInventory: number; // inventario
-  qtyGestionale: number; // gestionale
+  qtyInventory: number; // inventario (pezzi oppure ML totali se volumeMlPerUnit presente)
+  qtyGestionale: number; // gestionale (pezzi oppure ML totali se volumeMlPerUnit presente)
   diff: number; // inventario - gestionale ✅
 
   prezzoVenditaEur?: number | null;
-  valoreDiffEur?: number | null; // diff * prezzo
+
+  // ✅ per calcolo litri (quando presente)
+  // Se presente, qtyInventory/qtyGestionale sono trattati come ML TOTALI (non pezzi).
+  volumeMlPerUnit?: number | null;
 
   // ✅ flags per evidenziare “codice mancante” (match assente)
   foundInInventory: boolean;
@@ -325,7 +328,7 @@ function styleTable(ws: ExcelJS.Worksheet, headerRow: number, lastRow: number, l
 }
 
 function writeMeta(ws: ExcelJS.Worksheet, meta: InventoryExcelMeta) {
-  ws.mergeCells("A1:G1");
+  ws.mergeCells("A1:N1");
   ws.getCell("A1").value = "CONFRONTO INVENTARIO vs GESTIONALE";
   ws.getCell("A1").font = { bold: true, size: 14 };
   ws.getCell("A1").alignment = { vertical: "middle", horizontal: "left" };
@@ -348,6 +351,10 @@ function writeMeta(ws: ExcelJS.Worksheet, meta: InventoryExcelMeta) {
   for (const rr of [3, 4, 5, 6, 7]) ws.getCell(`A${rr}`).font = { bold: true };
 }
 
+function mlToLitri(ml: number) {
+  return ml / 1000;
+}
+
 export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines: CompareLine[]): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
 
@@ -358,28 +365,58 @@ export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines:
   writeMeta(ws, meta);
 
   const headerRow = 9;
-  ws.getRow(headerRow).values = ["Codice", "Descrizione", "Qtà inventario", "Qtà gestionale", "Differenza", "Prezzo Vendita", "Valore Diff."];
+
+  // ✅ colonne “manageriali”
+  ws.getRow(headerRow).values = [
+    "Codice",
+    "Descrizione",
+    "Qtà inventario",
+    "Qtà gestionale",
+    "Differenza (Inv-Ges)",
+    "Prezzo Vendita",
+    "Valore Inventario",
+    "Valore Gestionale",
+    "Valore Diff.",
+    "ML/Unità",
+    "Litri Inventario",
+    "Litri Gestionale",
+    "Litri Diff.",
+    "Note",
+  ];
   ws.getRow(headerRow).font = { bold: true };
 
   ws.getColumn(1).width = 18;
-  ws.getColumn(2).width = 60;
+  ws.getColumn(2).width = 55;
   ws.getColumn(3).width = 14;
   ws.getColumn(4).width = 14;
-  ws.getColumn(5).width = 16;
+  ws.getColumn(5).width = 18;
   ws.getColumn(6).width = 14;
-  ws.getColumn(7).width = 14;
+  ws.getColumn(7).width = 16;
+  ws.getColumn(8).width = 16;
+  ws.getColumn(9).width = 14;
+  ws.getColumn(10).width = 12;
+  ws.getColumn(11).width = 16;
+  ws.getColumn(12).width = 16;
+  ws.getColumn(13).width = 14;
+  ws.getColumn(14).width = 22;
 
   let rr = headerRow + 1;
 
   let totInv = 0;
   let totGes = 0;
-  let totVal = 0;
+
+  let totValInv = 0;
+  let totValGes = 0;
+  let totValDiff = 0;
+
+  let totLitInv = 0;
+  let totLitGes = 0;
+  let totLitDiff = 0;
 
   // ✅ NEW: includo anche righe “solo gestionale” (inv=0, ges>0)
-  // Tengo comunque fuori roba completamente vuota (inv=0 e ges=0)
   const mergedView = (lines || []).filter((l) => Number(l.qtyInventory || 0) > 0 || Number(l.qtyGestionale || 0) > 0);
 
-  // ✅ MODIFICA RICHIESTA: ordine alfabetico per descrizione (A→Z), tie-break su codice
+  // ✅ ordine alfabetico per descrizione (A→Z), tie-break su codice
   mergedView.sort((a, b) => {
     const da = String(a.description || "").trim();
     const db = String(b.description || "").trim();
@@ -390,10 +427,10 @@ export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines:
     return String(a.code || "").localeCompare(String(b.code || ""), "it", { sensitivity: "base" });
   });
 
-  // ✅ totali SOLO negativi (diff < 0) richiesti:
-  // mostro come positivi per leggibilità
-  let totNegPieces = 0; // somma di -diff dove diff<0
-  let totNegValue = 0; // somma di (-diff * prezzo) dove diff<0 e prezzo presente
+  // ✅ totali SOLO negativi (diff < 0) richiesti
+  let totNegPieces = 0;
+  let totNegValue = 0;
+  let totNegLitri = 0;
 
   for (const line of mergedView) {
     const qi = Number(line.qtyInventory || 0);
@@ -401,7 +438,25 @@ export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines:
     const diff = Number(line.diff || 0);
 
     const prezzo = line.prezzoVenditaEur == null ? null : Number(line.prezzoVenditaEur);
-    const valore = prezzo == null ? null : diff * prezzo;
+
+    const valInv = prezzo == null ? null : qi * prezzo;
+    const valGes = prezzo == null ? null : qg * prezzo;
+    const valDiff = prezzo == null ? null : diff * prezzo;
+
+    const ml = line.volumeMlPerUnit == null ? null : Number(line.volumeMlPerUnit);
+
+    // ✅ Se ml/unità è presente, qi/qg/diff sono ML TOTALI ⇒ litri = mlTotali/1000
+    // ✅ Se ml/unità NON è presente, litri restano vuoti
+    const litInv = ml == null ? null : mlToLitri(qi);
+    const litGes = ml == null ? null : mlToLitri(qg);
+    const litDiff = ml == null ? null : mlToLitri(diff);
+
+    const note =
+      !line.foundInInventory && line.foundInGestionale
+        ? "Presente in gestionale, non in inventario"
+        : line.foundInInventory && !line.foundInGestionale
+          ? "Presente in inventario, non in gestionale"
+          : "";
 
     ws.getRow(rr).values = [
       line.code || "",
@@ -410,66 +465,106 @@ export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines:
       qg,
       diff,
       prezzo == null ? "" : prezzo,
-      valore == null ? "" : valore,
+      valInv == null ? "" : valInv,
+      valGes == null ? "" : valGes,
+      valDiff == null ? "" : valDiff,
+      ml == null ? "" : ml,
+      litInv == null ? "" : litInv,
+      litGes == null ? "" : litGes,
+      litDiff == null ? "" : litDiff,
+      note,
     ];
 
+    // formati
     ws.getCell(rr, 3).numFmt = "0";
     ws.getCell(rr, 4).numFmt = "0";
     ws.getCell(rr, 5).numFmt = "0";
+
     ws.getCell(rr, 6).numFmt = "0.00";
     ws.getCell(rr, 7).numFmt = "0.00";
+    ws.getCell(rr, 8).numFmt = "0.00";
+    ws.getCell(rr, 9).numFmt = "0.00";
 
-    // ✅ evidenzio “mancante” da uno dei due lati:
-    // - solo inventario (manca in gestionale)
-    // - solo gestionale (manca in inventario)
+    ws.getCell(rr, 10).numFmt = "0";
+    ws.getCell(rr, 11).numFmt = "0.00";
+    ws.getCell(rr, 12).numFmt = "0.00";
+    ws.getCell(rr, 13).numFmt = "0.00";
+
+    // ✅ evidenzio “mancante” da uno dei due lati
     if (!line.foundInGestionale || !line.foundInInventory) {
-      applyRedRow(ws, rr, 7);
+      applyRedRow(ws, rr, 14);
     }
 
     totInv += qi;
     totGes += qg;
-    if (valore != null) totVal += valore;
+
+    if (valInv != null) totValInv += valInv;
+    if (valGes != null) totValGes += valGes;
+    if (valDiff != null) totValDiff += valDiff;
+
+    if (litInv != null) totLitInv += litInv;
+    if (litGes != null) totLitGes += litGes;
+    if (litDiff != null) totLitDiff += litDiff;
 
     if (diff < 0) {
       totNegPieces += -diff;
       if (prezzo != null) totNegValue += (-diff) * prezzo;
+      if (ml != null) totNegLitri += mlToLitri(-diff);
     }
 
     rr++;
   }
 
-  // ====== TOTALI “classici” (senza somma diff) ======
+  // ====== TOTALI ======
   const totalRow = rr + 1;
   ws.getCell(totalRow, 2).value = "TOTALI";
   ws.getCell(totalRow, 3).value = totInv;
   ws.getCell(totalRow, 4).value = totGes;
 
-  // ✅ richiesto: niente somma in colonna Differenza (perché si azzera)
   ws.getCell(totalRow, 5).value = "";
 
   ws.getCell(totalRow, 6).value = "";
-  ws.getCell(totalRow, 7).value = totVal;
+  ws.getCell(totalRow, 7).value = totValInv || "";
+  ws.getCell(totalRow, 8).value = totValGes || "";
+  ws.getCell(totalRow, 9).value = totValDiff || "";
+
+  ws.getCell(totalRow, 10).value = "";
+  ws.getCell(totalRow, 11).value = totLitInv || "";
+  ws.getCell(totalRow, 12).value = totLitGes || "";
+  ws.getCell(totalRow, 13).value = totLitDiff || "";
+
   ws.getRow(totalRow).font = { bold: true };
 
   ws.getCell(totalRow, 3).numFmt = "0";
   ws.getCell(totalRow, 4).numFmt = "0";
   ws.getCell(totalRow, 7).numFmt = "0.00";
+  ws.getCell(totalRow, 8).numFmt = "0.00";
+  ws.getCell(totalRow, 9).numFmt = "0.00";
+  ws.getCell(totalRow, 11).numFmt = "0.00";
+  ws.getCell(totalRow, 12).numFmt = "0.00";
+  ws.getCell(totalRow, 13).numFmt = "0.00";
 
-  // ====== TOTALI NEGATIVI richiesti ======
+  // ====== TOTALI NEGATIVI (mancanti in inventario) ======
   const negRow1 = totalRow + 2;
-  ws.getCell(negRow1, 2).value = "Totale pezzi in negativo";
-  ws.getCell(negRow1, 5).value = totNegPieces; // metto nella colonna “Differenza” come valore positivo leggibile
+  ws.getCell(negRow1, 2).value = "Totale pezzi mancanti (Inv < Ges)";
+  ws.getCell(negRow1, 5).value = totNegPieces;
   ws.getRow(negRow1).font = { bold: true };
   ws.getCell(negRow1, 5).numFmt = "0";
 
   const negRow2 = totalRow + 3;
-  ws.getCell(negRow2, 2).value = "Totale valore in negativo";
-  ws.getCell(negRow2, 7).value = totNegValue; // valore in euro
+  ws.getCell(negRow2, 2).value = "Totale valore mancante (Inv < Ges)";
+  ws.getCell(negRow2, 9).value = totNegValue;
   ws.getRow(negRow2).font = { bold: true };
-  ws.getCell(negRow2, 7).numFmt = "0.00";
+  ws.getCell(negRow2, 9).numFmt = "0.00";
 
-  // tabella bordata fino ai totali
-  styleTable(ws, headerRow, totalRow, 7);
+  const negRow3 = totalRow + 4;
+  ws.getCell(negRow3, 2).value = "Totale litri mancanti (Inv < Ges)";
+  ws.getCell(negRow3, 13).value = totNegLitri || "";
+  ws.getRow(negRow3).font = { bold: true };
+  ws.getCell(negRow3, 13).numFmt = "0.00";
+
+  // tabella bordata fino ai totali (righe tabella)
+  styleTable(ws, headerRow, totalRow, 14);
 
   const outBuf = await wb.xlsx.writeBuffer();
   return Buffer.from(outBuf as any);
@@ -478,22 +573,46 @@ export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines:
 /**
  * Utility: costruisce righe confronto.
  * DIFFERENZA = Qtà inventario - Qtà gestionale ✅
- * + flags foundInGestionale / foundInInventory per evidenziazioni.
+ *
+ * ✅ Regola ML:
+ * - se volume_ml_per_unit > 0 ⇒ qtyInventory = qty_ml (ML totali) e qtyGestionale è interpretata come ML totali
+ * - altrimenti ⇒ qtyInventory = qty (pezzi)
  */
 export function buildCompareLines(
-  inventoryLines: { code: string; description: string; qty: number; prezzo_vendita_eur?: number | null }[],
+  inventoryLines: {
+    code: string;
+    description: string;
+    qty: number;
+    qty_ml?: number; // ✅ nuovo
+    prezzo_vendita_eur?: number | null;
+    volume_ml_per_unit?: number | null;
+  }[],
   gestionaleMap: Map<string, number>
 ): CompareLine[] {
-  const invMap = new Map<string, { description: string; qty: number; prezzo: number | null }>();
+  const invMap = new Map<
+    string,
+    {
+      description: string;
+      qtyPieces: number;
+      qtyMl: number;
+      prezzo: number | null;
+      mlPerUnit: number | null;
+    }
+  >();
 
   for (const l of inventoryLines) {
     const code = normCode(l.code);
     if (!looksLikeItemCode(code)) continue;
 
+    const mlPerUnitRaw = l.volume_ml_per_unit == null ? null : Number(l.volume_ml_per_unit);
+    const mlPerUnit = mlPerUnitRaw != null && Number.isFinite(mlPerUnitRaw) && mlPerUnitRaw > 0 ? mlPerUnitRaw : null;
+
     invMap.set(code, {
       description: l.description || "",
-      qty: Number(l.qty || 0),
+      qtyPieces: Number(l.qty || 0),
+      qtyMl: Number((l as any).qty_ml ?? 0),
       prezzo: l.prezzo_vendita_eur == null ? null : Number(l.prezzo_vendita_eur),
+      mlPerUnit,
     });
   }
 
@@ -511,13 +630,17 @@ export function buildCompareLines(
     const foundInInventory = invMap.has(code);
     const foundInGestionale = gestionaleMap.has(code);
 
-    const qtyInv = Number(inv?.qty ?? 0);
+    const isMlItem = inv?.mlPerUnit != null && Number.isFinite(inv.mlPerUnit) && inv.mlPerUnit > 0;
+
+    // ✅ inventario:
+    const qtyInv = isMlItem ? Number(inv?.qtyMl ?? 0) : Number(inv?.qtyPieces ?? 0);
+
+    // ✅ gestionale:
+    // - se è item ML, assumiamo che il gestionale dia ML totali (coerente con la tua richiesta)
+    // - altrimenti pezzi
     const qtyGes = Number(gestionaleMap.get(code) ?? 0);
 
     const diff = qtyInv - qtyGes; // ✅ inventario - gestionale
-
-    const prezzo = inv?.prezzo ?? null;
-    const valore = prezzo == null ? null : diff * prezzo;
 
     out.push({
       code,
@@ -525,8 +648,8 @@ export function buildCompareLines(
       qtyInventory: qtyInv,
       qtyGestionale: qtyGes,
       diff,
-      prezzoVenditaEur: prezzo,
-      valoreDiffEur: valore,
+      prezzoVenditaEur: inv?.prezzo ?? null,
+      volumeMlPerUnit: isMlItem ? inv?.mlPerUnit ?? null : null,
       foundInInventory,
       foundInGestionale,
     });
@@ -535,6 +658,8 @@ export function buildCompareLines(
   out.sort((a, b) => String(a.code || "").localeCompare(String(b.code || "")));
   return out;
 }
+
+
 
 
 

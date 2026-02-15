@@ -7,7 +7,8 @@ export const runtime = "nodejs";
 
 type Row = {
   item_id: string;
-  qty: number;
+  qty: number; // ✅ input unico (oggi arriva qui dalla UI)
+  qty_ml?: number; // ✅ opzionale: se in futuro la UI lo userà, lo trattiamo come input unico alternativo
 };
 
 type Body = {
@@ -143,9 +144,6 @@ export async function POST(req: Request) {
 
   const alreadyExists = !!existingId;
 
-  // ✅ REGOLA: inventario unico al giorno.
-  // - se esiste e creato da ALTRO utente => 409
-  // - se esiste e creato dallo STESSO utente => aggiornamento progressivo (NO force_overwrite)
   if (alreadyExists && existingCreatedBy && existingCreatedBy !== session.username) {
     return NextResponse.json(
       {
@@ -186,7 +184,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: updErr.message }, { status: 500 });
     }
 
-    // ✅ aggiornamento progressivo: sostituisco le righe della stessa chiave logica
     let delQ = supabaseAdmin
       .from("inventories")
       .delete()
@@ -204,24 +201,84 @@ export async function POST(req: Request) {
     }
   }
 
-  // ✅ 2) prepara righe
+  // ✅ 2) carica volume_ml_per_unit per gli item presenti nelle righe
+  const validItemIds = Array.from(
+    new Set(
+      rows
+        .map((r) => (typeof r?.item_id === "string" ? r.item_id.trim() : ""))
+        .filter((id) => isUuid(id))
+    )
+  );
+
+  const volumeByItemId = new Map<string, number>();
+
+  if (validItemIds.length > 0) {
+    const { data: itemsData, error: itemsErr } = await supabaseAdmin
+      .from("items")
+      .select("id, volume_ml_per_unit")
+      .in("id", validItemIds);
+
+    if (itemsErr) {
+      console.error("[inventories/save] items volume fetch error:", itemsErr);
+      return NextResponse.json({ ok: false, error: itemsErr.message }, { status: 500 });
+    }
+
+    for (const it of itemsData || []) {
+      const id = (it as any)?.id as string | undefined;
+      const v = Number((it as any)?.volume_ml_per_unit ?? 0);
+      if (id && isUuid(id) && Number.isFinite(v) && v > 0) {
+        volumeByItemId.set(id, v);
+      }
+    }
+  }
+
+  // ✅ 3) prepara righe con logica "campo unico" (SCELTA B)
   const payload = rows
     .filter((r) => isUuid(r.item_id))
-    .map((r) => ({
-      pv_id,
-      category_id,
-      subcategory_id,
-      item_id: r.item_id,
-      qty: clampInt(r.qty),
-      inventory_date: dateOrNull,
-      created_by_username: session.username,
-    }));
+    .map((r) => {
+      const itemId = r.item_id.trim();
+
+      // input unico:
+      // - se la UI manda qty_ml lo consideriamo preferenziale (futuro)
+      // - altrimenti usiamo qty (stato attuale + bug: 7670 finisce in qty)
+      const inputUnique = clampInt((r as any).qty_ml ?? r.qty ?? 0);
+
+      const volume = volumeByItemId.get(itemId) ?? 0;
+
+      if (volume > 0) {
+        // ✅ item a ML: input = ML totali
+        const qty_ml = inputUnique;
+        const qty = Math.floor(qty_ml / volume); // bottiglie chiuse equivalenti
+        return {
+          pv_id,
+          category_id,
+          subcategory_id,
+          item_id: itemId,
+          qty: clampInt(qty),
+          qty_ml: clampInt(qty_ml),
+          inventory_date: dateOrNull,
+          created_by_username: session.username,
+        };
+      }
+
+      // ✅ item a pezzi: input = qty
+      return {
+        pv_id,
+        category_id,
+        subcategory_id,
+        item_id: itemId,
+        qty: clampInt(inputUnique),
+        qty_ml: 0,
+        inventory_date: dateOrNull,
+        created_by_username: session.username,
+      };
+    });
 
   if (payload.length === 0) {
     return NextResponse.json({ ok: false, error: "Nessuna riga valida" }, { status: 400 });
   }
 
-  // ✅ 3) insert righe
+  // ✅ 4) insert righe
   const { error: insRowsErr } = await supabaseAdmin.from("inventories").insert(payload as any);
 
   if (insRowsErr) {
@@ -235,9 +292,11 @@ export async function POST(req: Request) {
     pv_id,
     operatore,
     enforced_pv: session.role === "punto_vendita",
-    overwritten: alreadyExists, // true se update progressivo
+    overwritten: alreadyExists,
   });
 }
+
+
 
 
 

@@ -22,7 +22,6 @@ type InventoryGroup = {
   lines_count: number;
   qty_sum: number;
 
-  // ✅ NEW: arriva da inventories_headers
   operatore?: string | null;
 };
 
@@ -31,10 +30,19 @@ type InventoryLine = {
   item_id: string;
   code: string;
   description: string;
+
+  // ✅ PZ (bottiglie chiuse equivalenti se ML)
   qty: number;
 
-  // ✅ se /api/inventories/rows lo restituisce, calcoliamo il valore.
-  // Se non arriva, mostriamo "—".
+  // ✅ ML totale (per comparazione/valore)
+  qty_ml?: number;
+
+  // ✅ volume per unità (se item ML)
+  volume_ml_per_unit?: number | null;
+
+  // ✅ ML "aperto" da mostrare nel dettaglio
+  ml_open?: number | null;
+
   prezzo_vendita_eur?: number | null;
 };
 
@@ -53,7 +61,6 @@ type MeState = {
   isPv: boolean;
 };
 
-// ISO -> IT (YYYY-MM-DD => DD-MM-YYYY)
 function formatDateIT(iso: string) {
   const s = (iso || "").trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
@@ -70,12 +77,6 @@ function formatEUR(n: number) {
   return new Intl.NumberFormat("it-IT", { style: "currency", currency: "EUR" }).format(n);
 }
 
-/**
- * Fetch "robusto":
- * - legge SEMPRE res.text()
- * - prova a parsare JSON
- * - se non ok: errore con status + body (snippet)
- */
 async function fetchJsonSafe<T = any>(
   url: string,
   init?: RequestInit
@@ -100,7 +101,6 @@ async function fetchJsonSafe<T = any>(
   }
 
   const ok = res.ok && !!data?.ok;
-
   return { ok, data, status, rawText };
 }
 
@@ -118,16 +118,13 @@ export default function InventoryHistoryClient() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [subcategories, setSubcategories] = useState<Subcategory[]>([]);
 
-  // filtri admin/ammin
-  const [pvId, setPvId] = useState<string>(""); // "" = tutti
-  const [categoryId, setCategoryId] = useState<string>(""); // "" = tutte
-  const [subcategoryId, setSubcategoryId] = useState<string>(""); // "" = tutte
+  const [pvId, setPvId] = useState<string>("");
+  const [categoryId, setCategoryId] = useState<string>("");
+  const [subcategoryId, setSubcategoryId] = useState<string>("");
 
-  // date range
   const [dateFromISO, setDateFromISO] = useState<string>("");
   const [dateToISO, setDateToISO] = useState<string>("");
 
-  // ricerca dettaglio
   const [searchDetail, setSearchDetail] = useState("");
 
   const [rows, setRows] = useState<InventoryGroup[]>([]);
@@ -139,7 +136,6 @@ export default function InventoryHistoryClient() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
 
-  // compare (solo admin/ammin)
   const [compareOpen, setCompareOpen] = useState(false);
   const [compareTarget, setCompareTarget] = useState<InventoryGroup | null>(null);
   const [compareFile, setCompareFile] = useState<File | null>(null);
@@ -161,22 +157,46 @@ export default function InventoryHistoryClient() {
     });
   }, [detail, searchDetail]);
 
-  // ✅ NEW: Articoli + Valore (calcolati sul dettaglio caricato)
+  // ✅ Articoli: conta righe con qty>0 oppure qty_ml>0
   const detailArticoli = useMemo(() => {
-    return detail.reduce((n, r) => n + ((Number(r.qty) || 0) > 0 ? 1 : 0), 0);
-  }, [detail]);
+  return detail.reduce((n, r: any) => {
+    const q = Number(r.qty) || 0;
+    const qml = Number(r.qty_ml) || 0;
+    return n + (q > 0 || qml > 0 ? 1 : 0);
+  }, 0);
+}, [detail]);
 
+  const detailMlOpen = useMemo(() => {
+  return (detail as any[]).reduce((sum, r: any) => {
+    return sum + (Number(r?.ml_open) || 0);
+  }, 0);
+}, [detail]);
+
+  // ✅ Valore: se ML => (qty_ml/volume)*prezzo, altrimenti qty*prezzo
   const detailValueEur = useMemo(() => {
     return detail.reduce((sum, r) => {
-      const q = Number(r.qty) || 0;
-      const p = Number((r as any).prezzo_vendita_eur);
+      const p = Number(r.prezzo_vendita_eur);
       if (!Number.isFinite(p)) return sum;
-      return sum + q * p;
+
+      const volume = Number(r.volume_ml_per_unit ?? 0);
+      const qty_ml = Number(r.qty_ml ?? 0);
+      const qty = Number(r.qty ?? 0);
+
+      if (Number.isFinite(volume) && volume > 0 && Number.isFinite(qty_ml) && qty_ml > 0) {
+        const unitsEq = qty_ml / volume;
+        return sum + unitsEq * p;
+      }
+
+      if (Number.isFinite(qty) && qty > 0) {
+        return sum + qty * p;
+      }
+
+      return sum;
     }, 0);
   }, [detail]);
 
   const hasAnyPriceInDetail = useMemo(() => {
-    return detail.some((r) => Number.isFinite(Number((r as any).prezzo_vendita_eur)));
+    return detail.some((r) => Number.isFinite(Number(r.prezzo_vendita_eur)));
   }, [detail]);
 
   async function fetchMe(): Promise<MeState> {
@@ -299,7 +319,6 @@ export default function InventoryHistoryClient() {
     }
   }
 
-  // ✅ download excel
   function downloadExcel(g: InventoryGroup, effectiveMe: MeState) {
     if (effectiveMe.isPv && effectiveMe.pv_id && g.pv_id !== effectiveMe.pv_id) {
       setError("Non autorizzato.");
@@ -387,14 +406,9 @@ export default function InventoryHistoryClient() {
     }
   }
 
-  // =========================
-  // ✅ AZIONI: menu a tendina in PORTAL (non clippato dall'overflow)
-  // =========================
   const [actionsOpenKey, setActionsOpenKey] = useState<string | null>(null);
   const [menuPos, setMenuPos] = useState<MenuPos | null>(null);
   const actionsMenuRef = useRef<HTMLDivElement | null>(null);
-
-  // refs dei bottoni "..." per riga
   const btnRefs = useRef<Record<string, HTMLButtonElement | null>>({});
 
   function computeMenuPos(key: string) {
@@ -404,11 +418,9 @@ export default function InventoryHistoryClient() {
     const r = btn.getBoundingClientRect();
     const width = 220;
 
-    // default: apre sotto, allineato a destra del bottone
     let left = r.right - width;
     let top = r.bottom + 8;
 
-    // clamp viewport
     const pad = 8;
     const vw = window.innerWidth;
     const vh = window.innerHeight;
@@ -416,7 +428,6 @@ export default function InventoryHistoryClient() {
     if (left < pad) left = pad;
     if (left + width > vw - pad) left = Math.max(pad, vw - pad - width);
 
-    // se sotto non c'è spazio, apri sopra
     const approxMenuH = 160;
     if (top + approxMenuH > vh - pad) {
       top = Math.max(pad, r.top - 8 - approxMenuH);
@@ -435,7 +446,6 @@ export default function InventoryHistoryClient() {
     setTimeout(() => computeMenuPos(key), 0);
   }
 
-  // chiusura su click fuori / ESC
   useEffect(() => {
     if (!actionsOpenKey) return;
 
@@ -460,7 +470,6 @@ export default function InventoryHistoryClient() {
       setMenuPos(null);
     };
 
-    // se scrolli la pagina, il menu segue
     const onScroll = () => computeMenuPos(actionsOpenKey);
     const onResize = () => computeMenuPos(actionsOpenKey);
 
@@ -477,7 +486,6 @@ export default function InventoryHistoryClient() {
     };
   }, [actionsOpenKey]);
 
-  // ✅ elimina (solo admin) — conferma sempre
   async function deleteInventory(g: InventoryGroup) {
     if (me.role !== "admin") return;
 
@@ -530,7 +538,6 @@ export default function InventoryHistoryClient() {
     }
   }
 
-  // bootstrap
   useEffect(() => {
     (async () => {
       try {
@@ -558,7 +565,6 @@ export default function InventoryHistoryClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // sottocategorie solo per admin/ammin
   useEffect(() => {
     (async () => {
       try {
@@ -740,9 +746,7 @@ export default function InventoryHistoryClient() {
                     <div className="text-xs text-gray-500">{r.pv_name}</div>
                   </td>
                   <td className="p-3">{r.category_name || r.category_id}</td>
-                  <td className="p-3">
-                    {r.subcategory_name || (r.subcategory_id ? r.subcategory_id : "—")}
-                  </td>
+                  <td className="p-3">{r.subcategory_name || (r.subcategory_id ? r.subcategory_id : "—")}</td>
                   <td className="p-3">{(r.operatore || "").trim() ? r.operatore : "—"}</td>
                   <td className="p-3 text-right">{r.lines_count}</td>
                   <td className="p-3 text-right font-semibold">{r.qty_sum}</td>
@@ -761,9 +765,7 @@ export default function InventoryHistoryClient() {
                         ref={(el) => {
                           btnRefs.current[r.key] = el;
                         }}
-                        className={`rounded-lg border px-3 py-1.5 hover:bg-gray-50 text-sm ${
-                          menuOpen ? "bg-gray-50" : ""
-                        }`}
+                        className={`rounded-lg border px-3 py-1.5 hover:bg-gray-50 text-sm ${menuOpen ? "bg-gray-50" : ""}`}
                         onClick={() => toggleActions(r.key)}
                         aria-haspopup="menu"
                         aria-expanded={menuOpen}
@@ -786,13 +788,7 @@ export default function InventoryHistoryClient() {
         createPortal(
           <div
             ref={actionsMenuRef}
-            style={{
-              position: "fixed",
-              top: menuPos.top,
-              left: menuPos.left,
-              width: menuPos.width,
-              zIndex: 9999,
-            }}
+            style={{ position: "fixed", top: menuPos.top, left: menuPos.left, width: menuPos.width, zIndex: 9999 }}
             className="rounded-xl border bg-white shadow-lg p-2"
             role="menu"
           >
@@ -859,11 +855,16 @@ export default function InventoryHistoryClient() {
               </div>
 
               <div className="text-sm text-gray-600">
-                Operatore:{" "}
-                <b>{(selected.operatore || "").trim() ? selected.operatore : "—"}</b> — Righe:{" "}
-                <b>{selected.lines_count}</b> — Articoli: <b>{detailArticoli}</b> — Pezzi:{" "}
-                <b>{selected.qty_sum}</b> — Valore:{" "}
-                <b>{hasAnyPriceInDetail ? formatEUR(detailValueEur) : "—"}</b>
+              Operatore: <b>{(selected.operatore || "").trim() ? selected.operatore : "—"}</b> — Righe:{" "}
+              <b>{selected.lines_count}</b> — Articoli: <b>{detailArticoli}</b> — Pezzi: <b>{selected.qty_sum}</b>
+              {detailMlOpen > 0 ? (
+               <>
+               {" "}
+                — Ml: <b>{detailMlOpen}</b>
+               </>
+               ) : null}
+                {" "}
+                — Valore: <b>{hasAnyPriceInDetail ? formatEUR(detailValueEur) : "—"}</b>
               </div>
             </div>
 
@@ -902,26 +903,41 @@ export default function InventoryHistoryClient() {
                   <tr>
                     <th className="text-left p-3 w-40">Codice</th>
                     <th className="text-left p-3">Descrizione</th>
-                    <th className="text-right p-3 w-28">Qty</th>
+                    <th className="text-right p-3 w-24">PZ</th>
+                    <th className="text-right p-3 w-28">ML</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredDetail.map((x) => (
-                    <tr key={x.id} className="border-t">
-                      <td className="p-3 font-medium">{x.code}</td>
-                      <td className="p-3">{x.description}</td>
-                      <td className="p-3 text-right font-semibold">{x.qty}</td>
-                    </tr>
-                  ))}
+                  {filteredDetail.map((x) => {
+                    const volume = Number(x.volume_ml_per_unit ?? 0);
+                    const isMl = Number.isFinite(volume) && volume > 0;
+
+                    const pz = Number(x.qty) || 0;
+                    const mlOpen = isMl ? Number(x.ml_open ?? 0) || 0 : null;
+
+                    return (
+                      <tr key={x.id} className="border-t">
+                        <td className="p-3 font-medium">{x.code}</td>
+                        <td className="p-3">{x.description}</td>
+                        <td className="p-3 text-right font-semibold">{pz}</td>
+                        <td className="p-3 text-right font-semibold">{isMl ? mlOpen : "—"}</td>
+                      </tr>
+                    );
+                  })}
+
                   {filteredDetail.length === 0 && (
                     <tr className="border-t">
-                      <td className="p-3 text-gray-500" colSpan={3}>
+                      <td className="p-3 text-gray-500" colSpan={4}>
                         Nessuna riga trovata.
                       </td>
                     </tr>
                   )}
                 </tbody>
               </table>
+
+              <div className="px-3 py-2 text-xs text-gray-500 border-t">
+                Nota: per articoli a ML, <b>PZ</b> = bottiglie chiuse equivalenti, <b>ML</b> = residuo “aperto”.
+              </div>
             </div>
           )}
         </div>
@@ -937,8 +953,7 @@ export default function InventoryHistoryClient() {
               <div>
                 <div className="text-lg font-semibold">Compara inventario</div>
                 <div className="text-sm text-gray-600 mt-1">
-                  {formatDateIT(compareTarget.inventory_date)} — {compareTarget.pv_code} —{" "}
-                  {compareTarget.category_name}
+                  {formatDateIT(compareTarget.inventory_date)} — {compareTarget.pv_code} — {compareTarget.category_name}
                   {compareTarget.subcategory_name ? ` — ${compareTarget.subcategory_name}` : ""}
                 </div>
               </div>
@@ -951,11 +966,7 @@ export default function InventoryHistoryClient() {
             <div className="mt-4 space-y-3">
               <div>
                 <label className="block text-sm font-medium mb-2">File gestionale (.xlsx)</label>
-                <input
-                  type="file"
-                  accept=".xlsx"
-                  onChange={(e) => setCompareFile(e.target.files?.[0] || null)}
-                />
+                <input type="file" accept=".xlsx" onChange={(e) => setCompareFile(e.target.files?.[0] || null)} />
                 {compareFile && (
                   <p className="text-xs text-gray-600 mt-2">
                     Selezionato: <b>{compareFile.name}</b>
@@ -976,10 +987,7 @@ export default function InventoryHistoryClient() {
                 </button>
 
                 {compareDownloadUrl && (
-                  <button
-                    className="rounded-xl border px-4 py-2 hover:bg-gray-50"
-                    onClick={() => (window.location.href = compareDownloadUrl)}
-                  >
+                  <button className="rounded-xl border px-4 py-2 hover:bg-gray-50" onClick={() => (window.location.href = compareDownloadUrl)}>
                     Scarica risultato
                   </button>
                 )}
@@ -995,6 +1003,8 @@ export default function InventoryHistoryClient() {
     </div>
   );
 }
+
+
 
 
 

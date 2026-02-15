@@ -15,7 +15,7 @@ type DepositItemRow = {
   item_id: string;
   imported_code: string;
   stock_qty: number;
-  items?: any; // items.code, items.description, items.barcode, ecc
+  items?: any; // items.code, items.description, items.barcode, um, ecc
 };
 
 function todayISO() {
@@ -81,6 +81,23 @@ function rowMatches(r: DepositItemRow, q: string) {
   return { ok: false, reason: "" };
 }
 
+// --- LT -> CL helpers
+function isLT(row: DepositItemRow) {
+  const um = String(row.items?.um ?? "").trim().toUpperCase();
+  return um === "LT";
+}
+
+// Se stock_qty arriva "vecchio" in litri (0.8, 1.0, 0.75) lo converto in cl.
+// Se arriva già in cl (80, 100, 75) lo lascio.
+function normalizeToClIfLT(row: DepositItemRow, qtyAny: any): number {
+  const n = Number(qtyAny ?? 0);
+  if (!Number.isFinite(n)) return 0;
+  if (!isLT(row)) return Math.max(0, Math.round(n)); // per altri UM: quantità intera
+  // euristica: se è <= 10 presumiamo litri
+  if (n > 0 && n <= 10) return Math.max(0, Math.round(n * 100));
+  return Math.max(0, Math.round(n)); // già cl
+}
+
 export default function AdminDepositInventoryPage() {
   const [pvs, setPvs] = useState<PV[]>([]);
   const [pvId, setPvId] = useState("");
@@ -104,6 +121,11 @@ export default function AdminDepositInventoryPage() {
 
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+
+  // --- Import gestionale state
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importDate, setImportDate] = useState(todayISO());
+  const [importing, setImporting] = useState(false);
 
   const filteredSubcategories = useMemo(() => {
     if (!categoryId) return subcategories;
@@ -153,6 +175,9 @@ export default function AdminDepositInventoryPage() {
     setSubcategoryId("");
     setSubcategories([]);
 
+    setImportFile(null);
+    setImportDate(todayISO());
+
     if (!pv_id) return;
 
     const res = await fetch(`/api/deposits/list?pv_id=${pv_id}`, { cache: "no-store" });
@@ -177,7 +202,8 @@ export default function AdminDepositInventoryPage() {
 
       const initial: Record<string, number> = {};
       for (const r of list) {
-        initial[r.item_id] = Number(r.stock_qty ?? 0);
+        // Regola UM: se LT => teniamo in cl (intero), altrimenti intero normale
+        initial[r.item_id] = normalizeToClIfLT(r, r.stock_qty ?? 0);
       }
       setQuantities(initial);
     } else {
@@ -204,12 +230,12 @@ export default function AdminDepositInventoryPage() {
     if (!depositId) return setMsg("Seleziona un deposito.");
     if (!operatorName.trim()) return setMsg("Inserisci nome operatore.");
 
-   // ✅ salva tutta la categoria/sottocategoria selezionata (ricerca = solo “trova”)
-const lines = items.map((r) => ({
-  item_id: r.item_id,
-  qty: Number(quantities[r.item_id] ?? 0),
-}));
-
+    // ✅ salva tutta la categoria/sottocategoria selezionata (ricerca = solo “trova”)
+    const lines = items.map((r) => ({
+      item_id: r.item_id,
+      // Se LT: qty già in cl (intero). Se altro: intero
+      qty: normalizeToClIfLT(r, quantities[r.item_id] ?? 0),
+    }));
 
     setLoading(true);
     try {
@@ -236,6 +262,49 @@ const lines = items.map((r) => ({
       await loadItems(depositId, categoryId || "", subcategoryId || "");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleImportGestionale() {
+    setMsg(null);
+    if (!depositId) return setMsg("Seleziona un deposito prima di importare.");
+    if (!importFile) return setMsg("Seleziona il file Excel del gestionale.");
+
+    setImporting(true);
+    try {
+      const fd = new FormData();
+      fd.set("deposit_id", depositId);
+      fd.set("inventory_date", importDate || todayISO());
+      fd.set("file", importFile);
+
+      const res = await fetch("/api/deposits/stock/import-gestionale", {
+        method: "POST",
+        body: fd,
+      });
+
+      const json = await res.json().catch(() => null);
+
+      if (!res.ok || !json?.ok) {
+        setMsg(json?.error || "Errore import gestionale");
+        return;
+      }
+
+      const unknown = Number(json?.unknown_codes_count ?? 0);
+      const cols = json?.detected_columns
+        ? ` (colonne: codice="${json.detected_columns.code}", qty="${json.detected_columns.qty}", um="${json.detected_columns.um || "-"}")`
+        : "";
+
+      setMsg(
+        `✅ Import gestionale completato: ${json.rows_inserted} righe applicate.${unknown ? ` Codici non trovati: ${unknown} (vedi sample in console).` : ""}${cols}`
+      );
+
+      if (unknown && Array.isArray(json.unknown_codes_sample)) {
+        console.warn("Codici non trovati (sample):", json.unknown_codes_sample);
+      }
+
+      await loadItems(depositId, categoryId || "", subcategoryId || "");
+    } finally {
+      setImporting(false);
     }
   }
 
@@ -330,6 +399,46 @@ const lines = items.map((r) => ({
           </div>
         </section>
 
+        {/* IMPORT GIACENZE GESTIONALE */}
+        <section className="bg-white rounded-2xl border p-4 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="font-semibold">📥 Import giacenze da gestionale</div>
+              <div className="text-xs text-gray-600">
+                Colonna quantità: <b>Giac.fisc.1</b>. Se UM = <b>LT</b> → convertiamo in <b>cl</b>.
+              </div>
+            </div>
+            <div className="text-xs text-gray-600">
+              Data import:{" "}
+              <input
+                type="date"
+                className="border rounded px-2 py-1"
+                value={importDate}
+                onChange={(e) => setImportDate(e.target.value)}
+                disabled={!depositId}
+              />
+            </div>
+          </div>
+
+          <div className="grid md:grid-cols-2 gap-4 items-center">
+            <input
+              type="file"
+              accept=".xlsx,.xls"
+              className="border p-3 rounded-xl bg-white"
+              disabled={!depositId}
+              onChange={(e) => setImportFile(e.target.files?.[0] || null)}
+            />
+
+            <button
+              onClick={handleImportGestionale}
+              disabled={!depositId || !importFile || importing}
+              className="bg-black text-white px-6 py-3 rounded-xl disabled:opacity-60"
+            >
+              {importing ? "Import in corso..." : "Importa giacenze"}
+            </button>
+          </div>
+        </section>
+
         {/* 🔎 RICERCA STICKY (rimane su) */}
         <section className="sticky top-0 z-30">
           <div className="bg-gray-100 pt-2">
@@ -344,11 +453,7 @@ const lines = items.map((r) => ({
                 />
                 <div className="text-xs text-gray-600">
                   Visualizzati: <b>{visibleItems.length}</b> / Totali: <b>{items.length}</b>
-                  {searchQ ? (
-                    <span className="ml-2">
-                      (ricerca attiva)
-                    </span>
-                  ) : null}
+                  {searchQ ? <span className="ml-2">(ricerca attiva)</span> : null}
                 </div>
               </div>
             </div>
@@ -377,7 +482,9 @@ const lines = items.map((r) => ({
                     const match = rowMatches(r, searchQ);
                     const highlight = searchQ && match.ok;
 
-                    // evidenzio riga se match (e metto una piccola “tag”)
+                    const um = String(r.items?.um ?? "").trim().toUpperCase();
+                    const showUm = um ? `(${um === "LT" ? "CL" : um})` : "";
+
                     return (
                       <tr
                         key={r.id}
@@ -390,39 +497,36 @@ const lines = items.map((r) => ({
                         <td className="p-2 border-b font-mono">
                           {r.items?.code}
                           {highlight && match.reason === "codice" ? (
-                            <span className="ml-2 text-[10px] px-2 py-0.5 rounded-full border bg-white">
-                              match
-                            </span>
+                            <span className="ml-2 text-[10px] px-2 py-0.5 rounded-full border bg-white">match</span>
                           ) : null}
                         </td>
                         <td className="p-2 border-b">
                           {r.items?.description}
                           {highlight && match.reason === "descrizione" ? (
-                            <span className="ml-2 text-[10px] px-2 py-0.5 rounded-full border bg-white">
-                              match
-                            </span>
+                            <span className="ml-2 text-[10px] px-2 py-0.5 rounded-full border bg-white">match</span>
                           ) : null}
                         </td>
                         <td className="p-2 border-b font-mono">
                           {r.items?.barcode}
                           {highlight && match.reason === "barcode" ? (
-                            <span className="ml-2 text-[10px] px-2 py-0.5 rounded-full border bg-white">
-                              match
-                            </span>
+                            <span className="ml-2 text-[10px] px-2 py-0.5 rounded-full border bg-white">match</span>
                           ) : null}
                         </td>
                         <td className="p-2 border-b text-right">
-                          <input
-                            type="number"
-                            className="w-24 border rounded px-2 py-1 text-right"
-                            value={quantities[r.item_id] ?? 0}
-                            onChange={(e) =>
-                              setQuantities((prev) => ({
-                                ...prev,
-                                [r.item_id]: Number(e.target.value) || 0,
-                              }))
-                            }
-                          />
+                          <div className="flex items-center justify-end gap-2">
+                            <span className="text-[10px] text-gray-600">{showUm}</span>
+                            <input
+                              type="number"
+                              className="w-24 border rounded px-2 py-1 text-right"
+                              value={quantities[r.item_id] ?? 0}
+                              onChange={(e) =>
+                                setQuantities((prev) => ({
+                                  ...prev,
+                                  [r.item_id]: Number(e.target.value) || 0,
+                                }))
+                              }
+                            />
+                          </div>
                         </td>
                       </tr>
                     );
@@ -438,7 +542,7 @@ const lines = items.map((r) => ({
               disabled={loading || visibleItems.length === 0}
               className="bg-black text-white px-6 py-3 rounded-xl disabled:opacity-60"
               title={categoryId ? "Salva inventario della categoria selezionata" : "Salva inventario deposito"}
-       >
+            >
               {loading ? "Salvataggio..." : "Salva Inventario Deposito"}
             </button>
           </div>
@@ -447,6 +551,7 @@ const lines = items.map((r) => ({
     </main>
   );
 }
+
 
 
 

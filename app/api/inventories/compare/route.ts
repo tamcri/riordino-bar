@@ -111,9 +111,11 @@ export async function POST(req: Request) {
   const operatore = ((headers?.[0] as any)?.operatore || "").toString().trim() || "—";
 
   // 4) righe inventario + join items (LEFT JOIN, così NON perdi righe se item mancante)
+  // ✅ aggiungo volume_ml_per_unit per litri
   let q = supabaseAdmin
-    .from("inventories")
-    .select("item_id, qty, items:items!left(code, description, prezzo_vendita_eur)")
+  .from("inventories")
+  .select("item_id, qty, qty_ml, items:items!left(code, description, prezzo_vendita_eur, volume_ml_per_unit)")
+
     .eq("pv_id", pv_id)
     .eq("category_id", category_id)
     .eq("inventory_date", inventory_date);
@@ -125,26 +127,36 @@ export async function POST(req: Request) {
   if (invErr) return NextResponse.json({ ok: false, error: invErr.message }, { status: 500 });
 
   const inventoryLines = ((invRows || []) as any[]).map((r: any) => ({
-    item_id: String(r?.item_id ?? ""),
-    code: r?.items?.code ?? "",
-    description: r?.items?.description ?? "",
-    qty: Number(r?.qty ?? 0),
-    prezzo_vendita_eur: r?.items?.prezzo_vendita_eur ?? null,
-  }));
+  item_id: String(r?.item_id ?? ""),
+  code: r?.items?.code ?? "",
+  description: r?.items?.description ?? "",
+  qty: Number(r?.qty ?? 0),
+  qty_ml: Number(r?.qty_ml ?? 0), // ✅ fondamentale
+  prezzo_vendita_eur: r?.items?.prezzo_vendita_eur ?? null,
+  volume_ml_per_unit: r?.items?.volume_ml_per_unit ?? null,
+}));
+
 
   // 5) confronto
   const compareLines = buildCompareLines(inventoryLines, gestionaleMap);
 
   // ✅ DEBUG (server)
   try {
-    const missingInGestionale = compareLines.filter((l) => (l as any)?.foundInInventory && !(l as any)?.foundInGestionale).length;
-    const onlyGestionale = compareLines.filter((l) => !(l as any)?.foundInInventory && (l as any)?.foundInGestionale).length;
+    const missingInGestionale = compareLines.filter(
+      (l) => (l as any)?.foundInInventory && !(l as any)?.foundInGestionale
+    ).length;
+    const onlyGestionale = compareLines.filter(
+      (l) => !(l as any)?.foundInInventory && (l as any)?.foundInGestionale
+    ).length;
+
+    const withMl = compareLines.filter((l: any) => Number(l?.volumeMlPerUnit ?? 0) > 0).length;
 
     console.log("[inventories/compare] PV:", pvRes.data?.code ?? pv_id, "date:", inventory_date);
     console.log("[inventories/compare] inventoryLines:", inventoryLines.length);
     console.log("[inventories/compare] gestionaleCodes:", gestionaleMap.size);
     console.log("[inventories/compare] compareLines:", compareLines.length);
     console.log("[inventories/compare] missingInGestionale:", missingInGestionale, "| onlyGestionale:", onlyGestionale);
+    console.log("[inventories/compare] linesWithVolumeMlPerUnit:", withMl);
   } catch {}
 
   const xlsx = await buildInventoryCompareXlsx(
@@ -164,6 +176,7 @@ export async function POST(req: Request) {
     },
   });
 }
+
 
 
 

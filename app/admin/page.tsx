@@ -231,6 +231,12 @@ export default function AdminPage() {
                 Depositi (Magazzini)
               </Link>
 
+              {/* ✅ SOGLIE NUOVO */}
+              <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/admin/alerts">
+                Soglie &amp; Alert
+              </Link>
+
+
               <div className="pt-3 border-t mt-2">
                 <p className="text-xs text-gray-500">
                   Tip: nel menu dell’area operativa aggiungeremo anche il tasto “Admin” per tornare qui.

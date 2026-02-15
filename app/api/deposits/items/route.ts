@@ -58,6 +58,7 @@ export async function GET(req: Request) {
          description,
          barcode,
          um,
+         volume_ml_per_unit,
          peso_kg,
          conf_da,
          prezzo_vendita_eur,
@@ -78,6 +79,8 @@ export async function GET(req: Request) {
 
   return NextResponse.json({ ok: true, items: data || [] });
 }
+
+
 
 
 

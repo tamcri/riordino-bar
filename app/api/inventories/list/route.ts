@@ -20,8 +20,8 @@ const USER_TABLE_CANDIDATES = ["app_user", "app_users", "utenti", "users"];
 async function lookupPvIdFromUserTables(username: string): Promise<string | null> {
   for (const table of USER_TABLE_CANDIDATES) {
     const { data, error } = await supabaseAdmin.from(table).select("pv_id").eq("username", username).maybeSingle();
-
     if (error) continue;
+
     const pv_id = (data as any)?.pv_id ?? null;
     if (pv_id && isUuid(pv_id)) return pv_id;
     return null;
@@ -34,7 +34,6 @@ async function lookupPvIdFromUsernameCode(username: string): Promise<string | nu
   if (!code || code.length > 5) return null;
 
   const { data, error } = await supabaseAdmin.from("pvs").select("id").eq("is_active", true).eq("code", code).maybeSingle();
-
   if (error) return null;
   return data?.id ?? null;
 }
@@ -65,12 +64,14 @@ type InventoryHeaderRow = {
   subcategory_id: string | null;
   inventory_date: string; // YYYY-MM-DD
   operatore: string | null;
+  created_by_username?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
 };
 
 export async function GET(req: Request) {
   const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
 
-  // ✅ ora permettiamo anche punto_vendita
   if (!session || !["admin", "amministrativo", "punto_vendita"].includes(session.role)) {
     return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
   }
@@ -81,13 +82,13 @@ export async function GET(req: Request) {
   const pv_id_qs = (url.searchParams.get("pv_id") || "").trim(); // opzionale (IGNORATO per PV)
   const subcategory_id = (url.searchParams.get("subcategory_id") || "").trim();
 
-  // ✅ supporto nuovi parametri (UI nuova) + legacy (from/to)
   const dateFrom = (url.searchParams.get("date_from") || url.searchParams.get("from") || "").trim(); // YYYY-MM-DD
   const dateTo = (url.searchParams.get("date_to") || url.searchParams.get("to") || "").trim(); // YYYY-MM-DD
 
-  const limitRows = Math.min(Number(url.searchParams.get("limit") || 8000), 20000);
+  // questo limita il numero di RIGHE inventories lette (non i gruppi)
+  // tienilo alto ma non infinito: se la storia è enorme, serve paginazione (step futuro)
+  const limitRows = Math.min(Number(url.searchParams.get("limit") || 20000), 50000);
 
-  // ✅ validazioni
   if (category_id && !isUuid(category_id)) {
     return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
   }
@@ -98,12 +99,10 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: "subcategory_id non valido" }, { status: 400 });
   }
 
-  // ✅ subcategory ha senso solo se c’è category
   if (subcategory_id && !category_id) {
     return NextResponse.json({ ok: false, error: "subcategory_id richiede anche category_id" }, { status: 400 });
   }
 
-  // ✅ validazione date (se passate)
   if (dateFrom && !isIsoDate(dateFrom)) {
     return NextResponse.json({ ok: false, error: "date_from/from non valido (usa YYYY-MM-DD)" }, { status: 400 });
   }
@@ -114,7 +113,7 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: "Intervallo date non valido: 'Dal' è dopo 'Al'." }, { status: 400 });
   }
 
-  // ✅ enforcement PV: se punto_vendita, forzo pv_id dall’utente loggato
+  // enforcement PV
   let effectivePvId = pv_id_qs;
   if (session.role === "punto_vendita") {
     try {
@@ -124,14 +123,15 @@ export async function GET(req: Request) {
     }
   }
 
-  // 1) carico righe inventories (come prima)
+  // 1) carico righe inventories (SENZA aggregati: PostgREST non li permette)
   let q = supabaseAdmin
     .from("inventories")
-    .select("pv_id, category_id, subcategory_id, inventory_date, qty, created_by_username, created_at")
+    .select("pv_id, category_id, subcategory_id, inventory_date, qty, qty_ml, created_by_username, created_at")
+    .order("inventory_date", { ascending: false })
     .limit(limitRows);
 
-  if (category_id) q = q.eq("category_id", category_id);
   if (effectivePvId) q = q.eq("pv_id", effectivePvId);
+  if (category_id) q = q.eq("category_id", category_id);
   if (subcategory_id) q = q.eq("subcategory_id", subcategory_id);
 
   if (dateFrom) q = q.gte("inventory_date", dateFrom);
@@ -144,7 +144,7 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
 
-  const rows = (data || []) as InventoryRow[];
+  const invRows = (Array.isArray(data) ? data : []) as InventoryRow[];
 
   // raggruppo lato server
   type Group = {
@@ -161,34 +161,39 @@ export async function GET(req: Request) {
 
   const groups = new Map<string, Group>();
 
-  for (const r of rows) {
-    const key = `${r.pv_id}|${r.category_id}|${r.subcategory_id ?? ""}|${r.inventory_date}`;
-    const qty = Number(r.qty ?? 0);
+  for (const r of invRows) {
+  const qty = Number(r.qty ?? 0) || 0;
+  const qty_ml = Number((r as any).qty_ml ?? 0) || 0;
 
-    const g = groups.get(key);
-    if (!g) {
-      groups.set(key, {
-        key,
-        pv_id: r.pv_id,
-        category_id: r.category_id,
-        subcategory_id: r.subcategory_id ?? null,
-        inventory_date: r.inventory_date,
-        created_by_username: r.created_by_username ?? null,
-        created_at: r.created_at ?? null,
-        lines_count: 1,
-        qty_sum: qty,
-      });
-    } else {
-      g.lines_count += 1;
-      g.qty_sum += qty;
+  // ✅ conta SOLO righe "utili"
+  if (qty <= 0 && qty_ml <= 0) continue;
 
-      // tieni il created_at massimo come “ultimo aggiornamento”
-      if (r.created_at && (!g.created_at || r.created_at > g.created_at)) {
-        g.created_at = r.created_at;
-        g.created_by_username = r.created_by_username ?? g.created_by_username;
-      }
+  const key = `${r.pv_id}|${r.category_id}|${r.subcategory_id ?? ""}|${r.inventory_date}`;
+
+  const g = groups.get(key);
+  if (!g) {
+    groups.set(key, {
+      key,
+      pv_id: r.pv_id,
+      category_id: r.category_id,
+      subcategory_id: r.subcategory_id ?? null,
+      inventory_date: r.inventory_date,
+      created_by_username: r.created_by_username ?? null,
+      created_at: r.created_at ?? null,
+      lines_count: 1,
+      qty_sum: qty,
+    });
+  } else {
+    g.lines_count += 1;
+    g.qty_sum += qty;
+
+    if (r.created_at && (!g.created_at || r.created_at > g.created_at)) {
+      g.created_at = r.created_at;
+      g.created_by_username = r.created_by_username ?? g.created_by_username;
     }
   }
+}
+
 
   const list = Array.from(groups.values());
 
@@ -196,15 +201,15 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: true, rows: [] });
   }
 
-  // 2) carico headers (inventories_headers) per ricavare OPERATORE
-  // filtro coerente con query principale
+  // 2) carico headers per ricavare operatore (coerente con i filtri)
   let hq = supabaseAdmin
     .from("inventories_headers")
     .select("pv_id, category_id, subcategory_id, inventory_date, operatore");
 
-  if (category_id) hq = hq.eq("category_id", category_id);
   if (effectivePvId) hq = hq.eq("pv_id", effectivePvId);
+  if (category_id) hq = hq.eq("category_id", category_id);
   if (subcategory_id) hq = hq.eq("subcategory_id", subcategory_id);
+
   if (dateFrom) hq = hq.gte("inventory_date", dateFrom);
   if (dateTo) hq = hq.lte("inventory_date", dateTo);
 
@@ -212,24 +217,17 @@ export async function GET(req: Request) {
 
   if (headersErr) {
     console.error("[inventories/list] headers error:", headersErr);
-    return NextResponse.json(
-      {
-        ok: false,
-        error: headersErr.message,
-        hint: "Probabile: la tabella 'inventories_headers' non esiste ancora o manca permesso. Creala in Supabase e riprova.",
-      },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: headersErr.message }, { status: 500 });
   }
 
-  const headers = (headersData || []) as InventoryHeaderRow[];
+  const headers = (Array.isArray(headersData) ? headersData : []) as InventoryHeaderRow[];
   const headerMap = new Map<string, string | null>();
   for (const h of headers) {
     const k = `${h.pv_id}|${h.category_id}|${h.subcategory_id ?? ""}|${h.inventory_date}`;
     headerMap.set(k, (h.operatore ?? "").trim() || null);
   }
 
-  // enrich: PV + Category names
+  // 3) enrich nomi PV/CAT/SUB
   const pvIds = Array.from(new Set(list.map((x) => x.pv_id)));
   const catIds = Array.from(new Set(list.map((x) => x.category_id)));
   const subIds = Array.from(new Set(list.map((x) => x.subcategory_id).filter(Boolean))) as string[];
@@ -277,13 +275,14 @@ export async function GET(req: Request) {
     created_at: g.created_at,
     lines_count: g.lines_count,
     qty_sum: g.qty_sum,
-
-    // ✅ NEW
     operatore: headerMap.get(g.key) ?? null,
   }));
 
   return NextResponse.json({ ok: true, rows: out });
 }
+
+
+
 
 
 
