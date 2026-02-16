@@ -14,9 +14,24 @@ type Item = {
   prezzo_vendita_eur?: number | null;
   is_active: boolean;
 
-  // ✅ NEW: se valorizzato => inventario in ML
+  um?: string | null;
+  peso_kg?: number | null;
+
+  // ✅ se valorizzato => inventario in ML
   volume_ml_per_unit?: number | null;
 };
+
+type InventoryRowApi = {
+  item_id: string;
+  qty: number; // PZ
+  qty_gr?: number; // GR
+  qty_ml: number; // totale ml
+  volume_ml_per_unit: number | null;
+  ml_open: number | null;
+  code?: string;
+};
+
+type MlInputMode = "fixed" | "mixed"; // fixed=PZ+ML aperti, mixed=solo Totale ML
 
 function todayISO() {
   const d = new Date();
@@ -43,18 +58,56 @@ function isMlItem(it: Item) {
   return Number.isFinite(v) && v > 0;
 }
 
+function isKgItem(it: Item) {
+  return String(it.um || "").toLowerCase() === "kg";
+}
+
 function mlToLitriLabel(ml: number) {
   const l = ml / 1000;
-  // 1 decimale per leggibilità
   return `${l.toFixed(1)} L`;
+}
+
+function safeIntFromStr(v: string) {
+  const cleaned = onlyDigits(v || "");
+  const n = Number(cleaned || "0");
+  return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
+}
+
+function safeGrFromStr(v: string) {
+  const n = safeIntFromStr(v);
+  return Math.min(9999, n);
 }
 
 type DraftAdmin = {
   operatore: string;
-  qtyMap: Record<string, string>; // ✅ per ML item contiene ML, per altri contiene pezzi
+
+  qtyPzMap: Record<string, string>;
+
+  // ✅ KG
+  qtyGrMap: Record<string, string>;
+
+  // ✅ ML fixed: open
+  openMlMap: Record<string, string>;
+
+  // ✅ ML mixed: total
+  totalMlMap: Record<string, string>;
+
+  mlModeMap: Record<string, MlInputMode>;
+
   scannedIds: string[];
   showAllScanned: boolean;
-  addQtyMap: Record<string, string>; // ✅ per ML item contiene ML da aggiungere
+
+  addPzMap: Record<string, string>;
+
+  // ✅ KG
+  addGrMap: Record<string, string>;
+
+  addOpenMlMap: Record<string, string>;
+  addTotalMlMap: Record<string, string>;
+
+  // ⚠️ retrocompat
+  qtyMap?: Record<string, string>;
+  addQtyMap?: Record<string, string>;
 };
 
 export default function InventoryClient() {
@@ -72,32 +125,51 @@ export default function InventoryClient() {
 
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [prefillLoading, setPrefillLoading] = useState(false);
+
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // ✅ qtyMap: per item ML = tot ML, per item normali = pezzi
-  const [qtyMap, setQtyMap] = useState<Record<string, string>>({});
+  // ✅ pezzi (per tutti)
+  const [qtyPzMap, setQtyPzMap] = useState<Record<string, string>>({});
+
+  // ✅ KG: grammi aperti
+  const [qtyGrMap, setQtyGrMap] = useState<Record<string, string>>({});
+
+  // ✅ ML aperti (solo ML e solo in modalità fixed)
+  const [openMlMap, setOpenMlMap] = useState<Record<string, string>>({});
+
+  // ✅ Totale ML manuale (solo ML e solo in modalità mixed)
+  const [totalMlMap, setTotalMlMap] = useState<Record<string, string>>({});
+
+  // ✅ modalità input per item ML
+  const [mlModeMap, setMlModeMap] = useState<Record<string, MlInputMode>>({});
 
   const [search, setSearch] = useState("");
 
-  // ✅ lista “Scansionati” in ordine cronologico: ultimo in cima
+  // ✅ lista “Scansionati”
   const [scannedIds, setScannedIds] = useState<string[]>([]);
-
-  // ✅ evidenza verde “ultimo toccato”
   const [highlightScannedId, setHighlightScannedId] = useState<string | null>(null);
-
-  // ✅ mostra solo ultimi 10 di default
   const [showAllScanned, setShowAllScanned] = useState(false);
 
-  // ✅ qty/ML “da aggiungere” (solo in sezione Scansionati)
-  const [addQtyMap, setAddQtyMap] = useState<Record<string, string>>({});
+  // ✅ “da aggiungere”
+  const [addPzMap, setAddPzMap] = useState<Record<string, string>>({});
 
-  // ✅ dopo scan/Invio, nella tabella sotto mostro SOLO l’articolo trovato
+  // ✅ KG
+  const [addGrMap, setAddGrMap] = useState<Record<string, string>>({});
+
+  const [addOpenMlMap, setAddOpenMlMap] = useState<Record<string, string>>({});
+  const [addTotalMlMap, setAddTotalMlMap] = useState<Record<string, string>>({});
+
+  // ✅ focus singolo articolo
   const [focusItemId, setFocusItemId] = useState<string | null>(null);
 
   // ✅ UX: focus automatico tra ricerca <-> quantità
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const qtyInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+
+  // ✅ guard prefill
+  const lastPrefillKeyRef = useRef<string>("");
 
   const canSave = useMemo(
     () => !!operatore.trim() && !!pvId && !!categoryId && items.length > 0,
@@ -108,6 +180,50 @@ export default function InventoryClient() {
     const sub = subcategoryId || "null";
     return `inv_draft_admin:${pvId}:${categoryId}:${sub}:${inventoryDate}`;
   }, [pvId, categoryId, subcategoryId, inventoryDate]);
+
+  function getMlMode(itemId: string): MlInputMode {
+    return mlModeMap[itemId] || "fixed";
+  }
+
+  function calcTotalMl(it: Item) {
+    if (!isMlItem(it)) return 0;
+
+    const mode = getMlMode(it.id);
+    if (mode === "mixed") {
+      return safeIntFromStr(totalMlMap[it.id] ?? "");
+    }
+
+    const perUnit = Number(it.volume_ml_per_unit) || 0;
+    if (perUnit <= 0) return 0;
+
+    const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
+    const open = safeIntFromStr(openMlMap[it.id] ?? "");
+    return pz * perUnit + open;
+  }
+
+  function calcTotalKg(it: Item) {
+    if (!isKgItem(it)) return 0;
+
+    const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
+    const gr = safeGrFromStr(qtyGrMap[it.id] ?? "");
+    const pesoKg = Number(it.peso_kg ?? 0) || 0;
+
+    return pz * pesoKg + gr / 1000;
+  }
+
+  function ensureMlDefaults(rows: Item[]) {
+    const nextMode: Record<string, MlInputMode> = {};
+    const nextTotal: Record<string, string> = {};
+
+    rows.forEach((it) => {
+      if (!isMlItem(it)) return;
+      nextMode[it.id] = mlModeMap[it.id] || "fixed";
+      nextTotal[it.id] = totalMlMap[it.id] ?? "";
+    });
+
+    setMlModeMap((prev) => ({ ...nextMode, ...prev }));
+    setTotalMlMap((prev) => ({ ...nextTotal, ...prev }));
+  }
 
   function loadDraftIfAny(rows: Item[]) {
     try {
@@ -121,11 +237,52 @@ export default function InventoryClient() {
 
       if (typeof d.operatore === "string") setOperatore(d.operatore);
 
-      if (d.qtyMap && typeof d.qtyMap === "object") {
-        setQtyMap((prev) => {
+      if (d.qtyPzMap && typeof d.qtyPzMap === "object") {
+        setQtyPzMap((prev) => {
           const next: Record<string, string> = { ...prev };
           rows.forEach((it) => {
-            if (d.qtyMap[it.id] != null) next[it.id] = String(d.qtyMap[it.id] ?? "");
+            if (d.qtyPzMap[it.id] != null) next[it.id] = String(d.qtyPzMap[it.id] ?? "");
+          });
+          return next;
+        });
+      }
+
+      if (d.qtyGrMap && typeof d.qtyGrMap === "object") {
+        setQtyGrMap((prev) => {
+          const next: Record<string, string> = { ...prev };
+          rows.forEach((it) => {
+            if (d.qtyGrMap[it.id] != null) next[it.id] = String(d.qtyGrMap[it.id] ?? "");
+          });
+          return next;
+        });
+      }
+
+      if (d.openMlMap && typeof d.openMlMap === "object") {
+        setOpenMlMap((prev) => {
+          const next: Record<string, string> = { ...prev };
+          rows.forEach((it) => {
+            if (d.openMlMap[it.id] != null) next[it.id] = String(d.openMlMap[it.id] ?? "");
+          });
+          return next;
+        });
+      }
+
+      if (d.totalMlMap && typeof d.totalMlMap === "object") {
+        setTotalMlMap((prev) => {
+          const next: Record<string, string> = { ...prev };
+          rows.forEach((it) => {
+            if (d.totalMlMap[it.id] != null) next[it.id] = String(d.totalMlMap[it.id] ?? "");
+          });
+          return next;
+        });
+      }
+
+      if (d.mlModeMap && typeof d.mlModeMap === "object") {
+        setMlModeMap((prev) => {
+          const next: Record<string, MlInputMode> = { ...prev };
+          rows.forEach((it) => {
+            const m = (d.mlModeMap as any)?.[it.id];
+            if (m === "fixed" || m === "mixed") next[it.id] = m;
           });
           return next;
         });
@@ -138,12 +295,36 @@ export default function InventoryClient() {
 
       if (typeof d.showAllScanned === "boolean") setShowAllScanned(d.showAllScanned);
 
-      if (d.addQtyMap && typeof d.addQtyMap === "object") {
+      if (d.addPzMap && typeof d.addPzMap === "object") {
         const next: Record<string, string> = {};
         rows.forEach((it) => {
-          if (d.addQtyMap[it.id] != null) next[it.id] = String(d.addQtyMap[it.id] ?? "");
+          if (d.addPzMap[it.id] != null) next[it.id] = String(d.addPzMap[it.id] ?? "");
         });
-        setAddQtyMap(next);
+        setAddPzMap(next);
+      }
+
+      if (d.addGrMap && typeof d.addGrMap === "object") {
+        const next: Record<string, string> = {};
+        rows.forEach((it) => {
+          if (d.addGrMap[it.id] != null) next[it.id] = String(d.addGrMap[it.id] ?? "");
+        });
+        setAddGrMap(next);
+      }
+
+      if (d.addOpenMlMap && typeof d.addOpenMlMap === "object") {
+        const next: Record<string, string> = {};
+        rows.forEach((it) => {
+          if (d.addOpenMlMap[it.id] != null) next[it.id] = String(d.addOpenMlMap[it.id] ?? "");
+        });
+        setAddOpenMlMap(next);
+      }
+
+      if (d.addTotalMlMap && typeof d.addTotalMlMap === "object") {
+        const next: Record<string, string> = {};
+        rows.forEach((it) => {
+          if (d.addTotalMlMap[it.id] != null) next[it.id] = String(d.addTotalMlMap[it.id] ?? "");
+        });
+        setAddTotalMlMap(next);
       }
     } catch {
       // ignore
@@ -155,10 +336,17 @@ export default function InventoryClient() {
       if (!draftKey) return;
       const draft: DraftAdmin = {
         operatore,
-        qtyMap,
+        qtyPzMap,
+        qtyGrMap,
+        openMlMap,
+        totalMlMap,
+        mlModeMap,
         scannedIds,
         showAllScanned,
-        addQtyMap,
+        addPzMap,
+        addGrMap,
+        addOpenMlMap,
+        addTotalMlMap,
       };
       localStorage.setItem(draftKey, JSON.stringify(draft));
     } catch {
@@ -182,7 +370,25 @@ export default function InventoryClient() {
     const t = window.setTimeout(() => persistDraft(), 250);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pvId, categoryId, subcategoryId, inventoryDate, items.length, operatore, scannedIds, showAllScanned, addQtyMap, qtyMap]);
+  }, [
+    pvId,
+    categoryId,
+    subcategoryId,
+    inventoryDate,
+    items.length,
+    operatore,
+    scannedIds,
+    showAllScanned,
+    addPzMap,
+    addGrMap,
+    addOpenMlMap,
+    addTotalMlMap,
+    qtyPzMap,
+    qtyGrMap,
+    openMlMap,
+    totalMlMap,
+    mlModeMap,
+  ]);
 
   const filteredItems = useMemo(() => {
     if (focusItemId) {
@@ -232,20 +438,44 @@ export default function InventoryClient() {
     return scannedItems.slice(0, 10);
   }, [scannedItems, showAllScanned]);
 
-  // ✅ Totali separati (per non mischiare unità)
-  const totScannedPieces = useMemo(() => {
+  const totScannedPiecesNoMl = useMemo(() => {
     return scannedItems.reduce((sum, it) => {
       if (isMlItem(it)) return sum;
-      return sum + (Number(qtyMap[it.id]) || 0);
+      return sum + safeIntFromStr(qtyPzMap[it.id] ?? "");
     }, 0);
-  }, [scannedItems, qtyMap]);
+  }, [scannedItems, qtyPzMap]);
 
-  const totScannedMl = useMemo(() => {
+  const totScannedKg = useMemo(() => {
+    return scannedItems.reduce((sum, it) => {
+      if (!isKgItem(it)) return sum;
+      return sum + calcTotalKg(it);
+    }, 0);
+  }, [scannedItems, qtyPzMap, qtyGrMap]);
+
+  const totScannedPiecesMl = useMemo(() => {
     return scannedItems.reduce((sum, it) => {
       if (!isMlItem(it)) return sum;
-      return sum + (Number(qtyMap[it.id]) || 0);
+      const mode = getMlMode(it.id);
+      if (mode !== "fixed") return sum;
+      return sum + safeIntFromStr(qtyPzMap[it.id] ?? "");
     }, 0);
-  }, [scannedItems, qtyMap]);
+  }, [scannedItems, qtyPzMap, mlModeMap]);
+
+  const totScannedOpenMl = useMemo(() => {
+    return scannedItems.reduce((sum, it) => {
+      if (!isMlItem(it)) return sum;
+      const mode = getMlMode(it.id);
+      if (mode !== "fixed") return sum;
+      return sum + safeIntFromStr(openMlMap[it.id] ?? "");
+    }, 0);
+  }, [scannedItems, openMlMap, mlModeMap]);
+
+  const totScannedTotalMl = useMemo(() => {
+    return scannedItems.reduce((sum, it) => {
+      if (!isMlItem(it)) return sum;
+      return sum + calcTotalMl(it);
+    }, 0);
+  }, [scannedItems, qtyPzMap, openMlMap, totalMlMap, mlModeMap]);
 
   const totScannedDistinct = scannedItems.length;
 
@@ -254,17 +484,17 @@ export default function InventoryClient() {
       const p = Number(it.prezzo_vendita_eur) || 0;
 
       if (isMlItem(it)) {
-        const ml = Number(qtyMap[it.id]) || 0;
+        const totalMl = calcTotalMl(it);
         const perUnit = Number(it.volume_ml_per_unit) || 0;
         if (perUnit <= 0) return sum;
-        const unitsEq = ml / perUnit; // bottiglie equivalenti
+        const unitsEq = totalMl / perUnit;
         return sum + unitsEq * p;
       }
 
-      const q = Number(qtyMap[it.id]) || 0;
+      const q = safeIntFromStr(qtyPzMap[it.id] ?? "");
       return sum + q * p;
     }, 0);
-  }, [scannedItems, qtyMap]);
+  }, [scannedItems, qtyPzMap, openMlMap, totalMlMap, mlModeMap]);
 
   function highlightAndMoveToTop(itemId: string) {
     setScannedIds((prev) => {
@@ -274,51 +504,203 @@ export default function InventoryClient() {
     setHighlightScannedId(itemId);
   }
 
-  function setQty(itemId: string, v: string) {
-    const cleaned = onlyDigits(v);
-    setQtyMap((prev) => ({ ...prev, [itemId]: cleaned }));
+  function shouldBeScanned(it: Item): boolean {
+    // KG: attivo se PZ>0 o GR>0
+    if (isKgItem(it) && !isMlItem(it)) {
+      const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
+      const gr = safeGrFromStr(qtyGrMap[it.id] ?? "");
+      return pz > 0 || gr > 0;
+    }
 
-    const n = Number(cleaned || "0") || 0;
+    if (!isMlItem(it)) {
+      const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
+      return pz > 0;
+    }
 
+    const mode = getMlMode(it.id);
+    if (mode === "mixed") {
+      const total = safeIntFromStr(totalMlMap[it.id] ?? "");
+      return total > 0;
+    }
+
+    const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
+    const open = safeIntFromStr(openMlMap[it.id] ?? "");
+    const perUnit = Number(it.volume_ml_per_unit) || 0;
+    const total = perUnit > 0 ? pz * perUnit + open : open;
+    return total > 0;
+  }
+
+  function syncScannedPresence(itemId: string) {
     setScannedIds((prev) => {
+      const it = items.find((x) => x.id === itemId);
+      if (!it) return prev;
+
       const has = prev.includes(itemId);
+      const active = shouldBeScanned(it);
 
-      if (n > 0 && !has) return [itemId, ...prev];
-      if (n > 0 && has) return [itemId, ...prev.filter((id) => id !== itemId)];
-
-      if (n <= 0 && has) return prev.filter((id) => id !== itemId);
-
+      if (active && !has) return [itemId, ...prev];
+      if (active && has) return [itemId, ...prev.filter((id) => id !== itemId)];
+      if (!active && has) return prev.filter((id) => id !== itemId);
       return prev;
     });
+  }
 
-    if (n > 0) setHighlightScannedId(itemId);
+  function setPz(itemId: string, v: string) {
+    const cleaned = onlyDigits(v);
+    setQtyPzMap((prev) => ({ ...prev, [itemId]: cleaned }));
+    setHighlightScannedId(itemId);
+    requestAnimationFrame(() => syncScannedPresence(itemId));
+  }
+
+  function setGr(itemId: string, v: string) {
+    const cleaned = onlyDigits(v);
+    const capped = String(Math.min(9999, Number(cleaned || "0") || 0));
+    setQtyGrMap((prev) => ({ ...prev, [itemId]: cleaned ? capped : "" }));
+    setHighlightScannedId(itemId);
+    requestAnimationFrame(() => syncScannedPresence(itemId));
+  }
+
+  function setOpenMl(itemId: string, v: string) {
+    const cleaned = onlyDigits(v);
+    setOpenMlMap((prev) => ({ ...prev, [itemId]: cleaned }));
+    setHighlightScannedId(itemId);
+    requestAnimationFrame(() => syncScannedPresence(itemId));
+  }
+
+  function setTotalMl(itemId: string, v: string) {
+    const cleaned = onlyDigits(v);
+    setTotalMlMap((prev) => ({ ...prev, [itemId]: cleaned }));
+    setHighlightScannedId(itemId);
+    requestAnimationFrame(() => syncScannedPresence(itemId));
+  }
+
+  function setMlMode(itemId: string, mode: MlInputMode) {
+    setMlModeMap((prev) => ({ ...prev, [itemId]: mode }));
+
+    if (mode === "mixed") {
+      const it = items.find((x) => x.id === itemId);
+      if (it && isMlItem(it)) {
+        const total = calcTotalMl(it);
+        setTotalMlMap((prev) => ({ ...prev, [itemId]: total > 0 ? String(total) : "" }));
+      }
+    }
+
+    requestAnimationFrame(() => syncScannedPresence(itemId));
   }
 
   function addQty(itemId: string) {
-    const delta = Number(onlyDigits(addQtyMap[itemId] ?? "")) || 0;
-    if (delta <= 0) return;
+    const it = items.find((x) => x.id === itemId);
+    if (!it) return;
 
-    setQtyMap((prev) => {
-      const current = Number(prev[itemId] || "0") || 0;
-      const next = Math.max(0, current + delta);
+    // ✅ KG: aggiungo separatamente PZ e GR
+    if (isKgItem(it) && !isMlItem(it)) {
+      const deltaPz = safeIntFromStr(addPzMap[itemId] ?? "");
+      const deltaGr = safeGrFromStr(addGrMap[itemId] ?? "");
+      if (deltaPz <= 0 && deltaGr <= 0) return;
+
+      setQtyPzMap((prev) => {
+        const current = safeIntFromStr(prev[itemId] ?? "");
+        const next = Math.max(0, current + deltaPz);
+        return { ...prev, [itemId]: String(next) };
+      });
+
+      setQtyGrMap((prev) => {
+        const current = safeGrFromStr(prev[itemId] ?? "");
+        const next = Math.min(9999, Math.max(0, current + deltaGr));
+        return { ...prev, [itemId]: next > 0 ? String(next) : "" };
+      });
+
+      setAddPzMap((prev) => ({ ...prev, [itemId]: "" }));
+      setAddGrMap((prev) => ({ ...prev, [itemId]: "" }));
+      highlightAndMoveToTop(itemId);
+      return;
+    }
+
+    if (!isMlItem(it)) {
+      const delta = safeIntFromStr(addPzMap[itemId] ?? "");
+      if (delta <= 0) return;
+
+      setQtyPzMap((prev) => {
+        const current = safeIntFromStr(prev[itemId] ?? "");
+        const next = Math.max(0, current + delta);
+        return { ...prev, [itemId]: String(next) };
+      });
+
+      setAddPzMap((prev) => ({ ...prev, [itemId]: "" }));
+      highlightAndMoveToTop(itemId);
+      return;
+    }
+
+    const mode = getMlMode(itemId);
+
+    if (mode === "mixed") {
+      const deltaMl = safeIntFromStr(addTotalMlMap[itemId] ?? "");
+      if (deltaMl <= 0) return;
+
+      setTotalMlMap((prev) => {
+        const current = safeIntFromStr(prev[itemId] ?? "");
+        const next = Math.max(0, current + deltaMl);
+        return { ...prev, [itemId]: String(next) };
+      });
+
+      setAddTotalMlMap((prev) => ({ ...prev, [itemId]: "" }));
+      highlightAndMoveToTop(itemId);
+      return;
+    }
+
+    const deltaPz = safeIntFromStr(addPzMap[itemId] ?? "");
+    const deltaOpen = safeIntFromStr(addOpenMlMap[itemId] ?? "");
+    if (deltaPz <= 0 && deltaOpen <= 0) return;
+
+    setQtyPzMap((prev) => {
+      const current = safeIntFromStr(prev[itemId] ?? "");
+      const next = Math.max(0, current + deltaPz);
       return { ...prev, [itemId]: String(next) };
     });
 
-    setAddQtyMap((prev) => ({ ...prev, [itemId]: "" }));
+    setOpenMlMap((prev) => {
+      const current = safeIntFromStr(prev[itemId] ?? "");
+      const next = Math.max(0, current + deltaOpen);
+      return { ...prev, [itemId]: String(next) };
+    });
+
+    setAddPzMap((prev) => ({ ...prev, [itemId]: "" }));
+    setAddOpenMlMap((prev) => ({ ...prev, [itemId]: "" }));
+
     highlightAndMoveToTop(itemId);
   }
 
   function clearScannedList() {
-    setQtyMap((prev) => {
+    setQtyPzMap((prev) => {
       const next = { ...prev };
-      scannedIds.forEach((id) => {
-        next[id] = "";
-      });
+      scannedIds.forEach((id) => (next[id] = ""));
       return next;
     });
+
+    setQtyGrMap((prev) => {
+      const next = { ...prev };
+      scannedIds.forEach((id) => (next[id] = ""));
+      return next;
+    });
+
+    setOpenMlMap((prev) => {
+      const next = { ...prev };
+      scannedIds.forEach((id) => (next[id] = ""));
+      return next;
+    });
+
+    setTotalMlMap((prev) => {
+      const next = { ...prev };
+      scannedIds.forEach((id) => (next[id] = ""));
+      return next;
+    });
+
     setScannedIds([]);
     setShowAllScanned(false);
-    setAddQtyMap({});
+    setAddPzMap({});
+    setAddGrMap({});
+    setAddOpenMlMap({});
+    setAddTotalMlMap({});
     setHighlightScannedId(null);
   }
 
@@ -399,17 +781,23 @@ export default function InventoryClient() {
     const json = await res.json().catch(() => null);
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore caricamento sottocategorie");
     setSubcategories(json.rows || []);
-
     setFocusItemId(null);
   }
 
   async function loadItems(nextCategoryId: string, nextSubcategoryId: string) {
     setItems([]);
-    setQtyMap({});
+    setQtyPzMap({});
+    setQtyGrMap({});
+    setOpenMlMap({});
+    setTotalMlMap({});
+    setMlModeMap({});
     setSearch("");
     setScannedIds([]);
     setShowAllScanned(false);
-    setAddQtyMap({});
+    setAddPzMap({});
+    setAddGrMap({});
+    setAddOpenMlMap({});
+    setAddTotalMlMap({});
     setHighlightScannedId(null);
     setFocusItemId(null);
 
@@ -427,15 +815,128 @@ export default function InventoryClient() {
     const rows: Item[] = (json.rows || []).map((r: any) => ({
       ...r,
       volume_ml_per_unit: r?.volume_ml_per_unit ?? null,
+      um: r?.um ?? null,
+      peso_kg: r?.peso_kg ?? null,
     }));
 
     setItems(rows);
 
-    const m: Record<string, string> = {};
-    rows.forEach((it) => (m[it.id] = ""));
-    setQtyMap(m);
+    const pz: Record<string, string> = {};
+    const gr: Record<string, string> = {};
+    const open: Record<string, string> = {};
+    const total: Record<string, string> = {};
+    const mode: Record<string, MlInputMode> = {};
 
-    loadDraftIfAny(rows);
+    rows.forEach((it) => {
+      pz[it.id] = "";
+      gr[it.id] = "";
+      open[it.id] = "";
+      if (isMlItem(it)) {
+        total[it.id] = "";
+        mode[it.id] = "fixed";
+      }
+    });
+
+    setQtyPzMap(pz);
+    setQtyGrMap(gr);
+    setOpenMlMap(open);
+    setTotalMlMap(total);
+    setMlModeMap(mode);
+  }
+
+  async function prefillFromServer(currentItems: Item[]) {
+    if (!pvId || !categoryId || !inventoryDate) return;
+    if (!isIsoDate(inventoryDate)) return;
+    if (!currentItems?.length) return;
+
+    setPrefillLoading(true);
+
+    try {
+      const params = new URLSearchParams();
+      params.set("pv_id", pvId);
+      params.set("category_id", categoryId);
+      if (subcategoryId) params.set("subcategory_id", subcategoryId);
+      params.set("inventory_date", inventoryDate);
+
+      const res = await fetch(`/api/inventories/rows?${params.toString()}`, { cache: "no-store" });
+      const json = await res.json().catch(() => null);
+
+      if (!res.ok || !json?.ok) return;
+
+      const apiRows = (json.rows || []) as InventoryRowApi[];
+      if (!Array.isArray(apiRows) || apiRows.length === 0) return;
+
+      const itemSet = new Set(currentItems.map((x) => x.id));
+      const mlItemSet = new Set(currentItems.filter(isMlItem).map((x) => x.id));
+
+      // PZ
+      setQtyPzMap((prev) => {
+        const next = { ...prev };
+        for (const r of apiRows) {
+          if (!r?.item_id || !itemSet.has(r.item_id)) continue;
+          const q = Number(r.qty) || 0;
+          next[r.item_id] = q > 0 ? String(Math.trunc(q)) : "";
+        }
+        return next;
+      });
+
+      // GR
+      setQtyGrMap((prev) => {
+        const next = { ...prev };
+        for (const r of apiRows) {
+          if (!r?.item_id || !itemSet.has(r.item_id)) continue;
+          const g = Number((r as any).qty_gr ?? 0) || 0;
+          const gg = Math.min(9999, Math.max(0, Math.trunc(g)));
+          next[r.item_id] = gg > 0 ? String(gg) : "";
+        }
+        return next;
+      });
+
+      // ML aperti (fixed)
+      setOpenMlMap((prev) => {
+        const next = { ...prev };
+        for (const r of apiRows) {
+          if (!r?.item_id || !itemSet.has(r.item_id)) continue;
+          if (!mlItemSet.has(r.item_id)) continue;
+
+          const mlOpen = Number(r.ml_open ?? 0) || 0;
+          next[r.item_id] = mlOpen > 0 ? String(Math.trunc(mlOpen)) : "";
+        }
+        return next;
+      });
+
+      // Totale ML
+      setTotalMlMap((prev) => {
+        const next = { ...prev };
+        for (const r of apiRows) {
+          if (!r?.item_id || !itemSet.has(r.item_id)) continue;
+          if (!mlItemSet.has(r.item_id)) continue;
+
+          const total = Number(r.qty_ml ?? 0) || 0;
+          next[r.item_id] = total > 0 ? String(Math.trunc(total)) : "";
+        }
+        return next;
+      });
+
+      // Scansionati: righe non-zero (ora include GR)
+      const ids: string[] = [];
+      for (const r of apiRows) {
+        if (!r?.item_id || !itemSet.has(r.item_id)) continue;
+        const q = Number(r.qty) || 0;
+        const qml = Number(r.qty_ml) || 0;
+        const qgr = Number((r as any).qty_gr ?? 0) || 0;
+        if (q > 0 || qml > 0 || qgr > 0) ids.push(r.item_id);
+      }
+      if (ids.length) {
+        const seen = new Set<string>();
+        const dedup = ids.filter((id) => (seen.has(id) ? false : (seen.add(id), true)));
+        setScannedIds(dedup);
+        setShowAllScanned(false);
+        setHighlightScannedId(null);
+      }
+    } finally {
+      setPrefillLoading(false);
+    }
   }
 
   useEffect(() => {
@@ -480,18 +981,61 @@ export default function InventoryClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subcategoryId]);
 
+  // ✅ PREFILL DB -> draft
+  useEffect(() => {
+    if (!pvId || !categoryId || !inventoryDate) return;
+    if (!isIsoDate(inventoryDate)) return;
+    if (!items.length) return;
+
+    const sub = subcategoryId || "null";
+    const key = `prefill:${pvId}:${categoryId}:${sub}:${inventoryDate}`;
+
+    if (lastPrefillKeyRef.current === key) return;
+    lastPrefillKeyRef.current = key;
+
+    (async () => {
+      await prefillFromServer(items);
+      ensureMlDefaults(items);
+      loadDraftIfAny(items);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pvId, categoryId, subcategoryId, inventoryDate, items.length]);
+
   function resetAfterClose() {
     setOperatore("");
     setSearch("");
     setScannedIds([]);
     setShowAllScanned(false);
-    setAddQtyMap({});
+    setAddPzMap({});
+    setAddGrMap({});
+    setAddOpenMlMap({});
+    setAddTotalMlMap({});
     setHighlightScannedId(null);
     setFocusItemId(null);
 
-    setQtyMap((prev) => {
+    setQtyPzMap((prev) => {
       const next: Record<string, string> = { ...prev };
       items.forEach((it) => (next[it.id] = ""));
+      return next;
+    });
+
+    setQtyGrMap((prev) => {
+      const next: Record<string, string> = { ...prev };
+      items.forEach((it) => (next[it.id] = ""));
+      return next;
+    });
+
+    setOpenMlMap((prev) => {
+      const next: Record<string, string> = { ...prev };
+      items.forEach((it) => (next[it.id] = ""));
+      return next;
+    });
+
+    setTotalMlMap((prev) => {
+      const next: Record<string, string> = { ...prev };
+      items.forEach((it) => {
+        if (isMlItem(it)) next[it.id] = "";
+      });
       return next;
     });
 
@@ -512,20 +1056,39 @@ export default function InventoryClient() {
     setError(null);
 
     try {
-      const rows = items.map((it) => {
-        const raw = qtyMap[it.id];
-        const n = raw === "" ? 0 : Number(raw);
+      const rows = items
+        .map((it) => {
+          // ML
+          if (isMlItem(it)) {
+            const m = getMlMode(it.id);
+            if (m === "mixed") {
+              const totalMl = safeIntFromStr(totalMlMap[it.id] ?? "");
+              if (totalMl <= 0) return { item_id: it.id, qty: 0, qty_ml: 0, qty_gr: 0, ml_mode: "mixed" as const };
+              return { item_id: it.id, qty: 0, qty_ml: totalMl, qty_gr: 0, ml_mode: "mixed" as const };
+            }
 
-        if (isMlItem(it)) {
-          const perUnit = Number(it.volume_ml_per_unit) || 0;
-          const qty_ml = Math.max(0, Math.trunc(Number.isFinite(n) ? n : 0));
-          const qty = perUnit > 0 ? Math.floor(qty_ml / perUnit) : 0;
+            const perUnit = Number(it.volume_ml_per_unit) || 0;
+            const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
+            const open = safeIntFromStr(openMlMap[it.id] ?? "");
+            const qty_ml = perUnit > 0 ? pz * perUnit + open : open;
 
-          return { item_id: it.id, qty, qty_ml };
-        }
+            if (qty_ml <= 0) return { item_id: it.id, qty: 0, qty_ml: 0, qty_gr: 0, ml_mode: "fixed" as const };
+            return { item_id: it.id, qty: pz, qty_ml, qty_gr: 0, ml_mode: "fixed" as const };
+          }
 
-        return { item_id: it.id, qty: raw === "" ? 0 : Number(raw), qty_ml: 0 };
-      });
+          // KG (o pezzi normali)
+          const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
+          const gr = isKgItem(it) ? safeGrFromStr(qtyGrMap[it.id] ?? "") : 0;
+
+          if (pz <= 0 && gr <= 0) return { item_id: it.id, qty: 0, qty_ml: 0, qty_gr: 0 };
+          return { item_id: it.id, qty: pz, qty_ml: 0, qty_gr: gr };
+        })
+        .filter((r: any) => (Number(r.qty) || 0) > 0 || (Number(r.qty_ml) || 0) > 0 || (Number(r.qty_gr) || 0) > 0);
+
+      if (rows.length === 0) {
+        setError("Nessuna riga con quantità > 0. Inserisci almeno un valore prima di salvare.");
+        return;
+      }
 
       const res = await fetch("/api/inventories/save", {
         method: "POST",
@@ -566,6 +1129,30 @@ export default function InventoryClient() {
   }
 
   const focusItem = focusItemId ? items.find((x) => x.id === focusItemId) : null;
+
+  function MlModeToggle({ itemId }: { itemId: string }) {
+    const m = getMlMode(itemId);
+    return (
+      <div className="inline-flex rounded-xl border overflow-hidden">
+        <button
+          type="button"
+          className={`px-3 py-1 text-xs ${m === "fixed" ? "bg-slate-900 text-white" : "bg-white hover:bg-gray-50"}`}
+          onClick={() => setMlMode(itemId, "fixed")}
+          title="Formato fisso: PZ + ML aperti"
+        >
+          PZ + ML
+        </button>
+        <button
+          type="button"
+          className={`px-3 py-1 text-xs ${m === "mixed" ? "bg-slate-900 text-white" : "bg-white hover:bg-gray-50"}`}
+          onClick={() => setMlMode(itemId, "mixed")}
+          title="Formati misti: inserisci solo Totale ML"
+        >
+          Solo Tot ML
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">
@@ -622,6 +1209,7 @@ export default function InventoryClient() {
           {items.length ? (
             <>
               Articoli caricati: <b>{items.length}</b>
+              {prefillLoading && <span className="ml-2 text-xs text-gray-500">(Prefill inventario…)</span>}
             </>
           ) : (
             <>Seleziona una categoria per vedere gli articoli.</>
@@ -698,7 +1286,8 @@ export default function InventoryClient() {
           <div>
             <div className="text-sm font-medium">Scansionati</div>
             <div className="text-sm text-gray-600">
-              Articoli: <b>{totScannedDistinct}</b> — Pezzi: <b>{totScannedPieces}</b> — Totale ML: <b>{totScannedMl}</b> ({mlToLitriLabel(totScannedMl)}) — Valore:{" "}
+              Articoli: <b>{totScannedDistinct}</b> — PZ (no-ML): <b>{totScannedPiecesNoMl}</b> — KG tot: <b>{totScannedKg.toFixed(3)}</b> — PZ (ML fixed):{" "}
+              <b>{totScannedPiecesMl}</b> — ML aperti (fixed): <b>{totScannedOpenMl}</b> — Totale ML: <b>{totScannedTotalMl}</b> ({mlToLitriLabel(totScannedTotalMl)}) — Valore:{" "}
               <b>{formatEUR(totScannedValueEur)}</b>
             </div>
             {scannedItems.length > 10 && <div className="text-xs text-gray-500 mt-1">Mostro {showAllScanned ? "tutti" : "gli ultimi 10"}.</div>}
@@ -725,57 +1314,253 @@ export default function InventoryClient() {
                 <tr>
                   <th className="text-left p-3 w-40">Codice</th>
                   <th className="text-left p-3">Descrizione</th>
-                  <th className="text-left p-3 w-48">Totale (PZ / ML)</th>
-                  <th className="text-right p-3 w-56">Aggiungi (PZ / ML)</th>
+                  <th className="text-left p-3 w-[520px]">Input</th>
+                  <th className="text-right p-3 w-[520px]">Aggiungi</th>
                 </tr>
               </thead>
               <tbody>
                 {scannedItemsVisible.map((it) => {
                   const isHi = highlightScannedId === it.id;
-                  const mlMode = isMlItem(it);
-                  const ml = Number(qtyMap[it.id]) || 0;
+                  const ml = isMlItem(it);
+                  const kg = isKgItem(it) && !ml;
+
                   const perUnit = Number(it.volume_ml_per_unit) || 0;
-                  const eq = mlMode && perUnit > 0 ? (ml / perUnit).toFixed(2) : null;
+                  const totalMl = ml ? calcTotalMl(it) : 0;
+
+                  const totalKg = kg ? calcTotalKg(it) : 0;
+                  const pesoKg = Number(it.peso_kg ?? 0) || 0;
+
+                  const mode = ml ? getMlMode(it.id) : null;
 
                   return (
                     <tr key={it.id} className={`border-t ${isHi ? "bg-green-50" : ""}`}>
                       <td className="p-3 font-medium">{it.code}</td>
                       <td className="p-3">
                         {it.description}
-                        {mlMode && eq != null && (
+
+                        {kg && (
                           <div className="text-xs text-gray-500 mt-1">
-                            Bottiglie equivalenti: <b>{eq}</b>
+                            UM: <b>kg</b>
+                            {pesoKg > 0 ? (
+                              <>
+                                {" "}
+                                — peso/unità: <b>{pesoKg}</b> kg — totale: <b>{totalKg.toFixed(3)}</b> kg
+                              </>
+                            ) : (
+                              <>
+                                {" "}
+                                — <b>peso_kg mancante</b> (calcolo totale kg incompleto: conto solo GR/1000)
+                              </>
+                            )}
+                          </div>
+                        )}
+
+                        {ml && (
+                          <div className="mt-2 flex items-center gap-2">
+                            <MlModeToggle itemId={it.id} />
+                            {perUnit > 0 && (
+                              <span className="text-xs text-gray-500">
+                                Formato “tecnico”: <b>{perUnit} ml</b>
+                              </span>
+                            )}
                           </div>
                         )}
                       </td>
+
                       <td className="p-3">
-                        <input
-                          className="w-full rounded-xl border p-2"
-                          inputMode="numeric"
-                          placeholder={mlMode ? "0 (ML)" : "0 (PZ)"}
-                          value={qtyMap[it.id] ?? ""}
-                          onChange={(e) => setQty(it.id, e.target.value)}
-                        />
-                      </td>
-                      <td className="p-3">
-                        <div className="flex justify-end gap-2">
+                        {!ml && !kg ? (
                           <input
-                            className="w-28 rounded-xl border p-2 text-right"
+                            className="w-full rounded-xl border p-2"
                             inputMode="numeric"
-                            placeholder={mlMode ? "+ ml" : "+ pz"}
-                            value={addQtyMap[it.id] ?? ""}
-                            onChange={(e) => setAddQtyMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") {
-                                e.preventDefault();
-                                addQty(it.id);
-                              }
-                            }}
+                            placeholder="0 (PZ)"
+                            value={qtyPzMap[it.id] ?? ""}
+                            onChange={(e) => setPz(it.id, e.target.value)}
                           />
-                          <button className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" type="button" onClick={() => addQty(it.id)}>
-                            Aggiungi
-                          </button>
-                        </div>
+                        ) : kg ? (
+                          <div className="grid grid-cols-3 gap-2">
+                            <div>
+                              <div className="text-[11px] text-gray-500 mb-1">PZ</div>
+                              <input className="w-full rounded-xl border p-2" inputMode="numeric" placeholder="0" value={qtyPzMap[it.id] ?? ""} onChange={(e) => setPz(it.id, e.target.value)} />
+                            </div>
+                            <div>
+                              <div className="text-[11px] text-gray-500 mb-1">GR</div>
+                              <input className="w-full rounded-xl border p-2" inputMode="numeric" placeholder="0–9999" value={qtyGrMap[it.id] ?? ""} onChange={(e) => setGr(it.id, e.target.value)} />
+                            </div>
+                            <div>
+                              <div className="text-[11px] text-gray-500 mb-1">Totale KG</div>
+                              <div className="w-full rounded-xl border p-2 bg-gray-50 text-gray-700">
+                                <b>{totalKg.toFixed(3)}</b> <span className="text-xs text-gray-500">kg</span>
+                              </div>
+                            </div>
+                          </div>
+                        ) : mode === "mixed" ? (
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <div className="text-[11px] text-gray-500 mb-1">Totale ML</div>
+                              <input className="w-full rounded-xl border p-2" inputMode="numeric" placeholder="0" value={totalMlMap[it.id] ?? ""} onChange={(e) => setTotalMl(it.id, e.target.value)} />
+                              <div className="text-xs text-gray-500 mt-1">
+                                {totalMl > 0 ? (
+                                  <>
+                                    Totale: <b>{totalMl}</b> ({mlToLitriLabel(totalMl)})
+                                  </>
+                                ) : (
+                                  <>0 non viene salvato.</>
+                                )}
+                              </div>
+                            </div>
+                            <div className="rounded-xl border p-2 bg-gray-50 text-gray-700 h-fit">
+                              <div className="text-[11px] text-gray-500 mb-1">Nota</div>
+                              <div className="text-xs">
+                                Modalità <b>Formati misti</b>: niente pezzi, conta solo il totale ML.
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="grid grid-cols-3 gap-2">
+                            <div>
+                              <div className="text-[11px] text-gray-500 mb-1">PZ</div>
+                              <input className="w-full rounded-xl border p-2" inputMode="numeric" placeholder="0" value={qtyPzMap[it.id] ?? ""} onChange={(e) => setPz(it.id, e.target.value)} />
+                            </div>
+
+                            <div>
+                              <div className="text-[11px] text-gray-500 mb-1">ML aperti</div>
+                              <input className="w-full rounded-xl border p-2" inputMode="numeric" placeholder="0" value={openMlMap[it.id] ?? ""} onChange={(e) => setOpenMl(it.id, e.target.value)} />
+                            </div>
+
+                            <div>
+                              <div className="text-[11px] text-gray-500 mb-1">Totale ML</div>
+                              <div className="w-full rounded-xl border p-2 bg-gray-50 text-gray-700">
+                                <b>{totalMl}</b> <span className="text-xs text-gray-500">({mlToLitriLabel(totalMl)})</span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </td>
+
+                      <td className="p-3">
+                        {!ml && !kg ? (
+                          <div className="flex justify-end gap-2">
+                            <input
+                              className="w-28 rounded-xl border p-2 text-right"
+                              inputMode="numeric"
+                              placeholder="+ pz"
+                              value={addPzMap[it.id] ?? ""}
+                              onChange={(e) => setAddPzMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  addQty(it.id);
+                                }
+                              }}
+                            />
+                            <button className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" type="button" onClick={() => addQty(it.id)}>
+                              Aggiungi
+                            </button>
+                          </div>
+                        ) : kg ? (
+                          <div className="grid grid-cols-3 gap-2 justify-end">
+                            <div>
+                              <div className="text-[11px] text-gray-500 mb-1 text-right">+ PZ</div>
+                              <input
+                                className="w-full rounded-xl border p-2 text-right"
+                                inputMode="numeric"
+                                placeholder="0"
+                                value={addPzMap[it.id] ?? ""}
+                                onChange={(e) => setAddPzMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    addQty(it.id);
+                                  }
+                                }}
+                              />
+                            </div>
+
+                            <div>
+                              <div className="text-[11px] text-gray-500 mb-1 text-right">+ GR</div>
+                              <input
+                                className="w-full rounded-xl border p-2 text-right"
+                                inputMode="numeric"
+                                placeholder="0–9999"
+                                value={addGrMap[it.id] ?? ""}
+                                onChange={(e) => setAddGrMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    addQty(it.id);
+                                  }
+                                }}
+                              />
+                            </div>
+
+                            <div className="flex items-end justify-end">
+                              <button className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50 w-full" type="button" onClick={() => addQty(it.id)}>
+                                Aggiungi
+                              </button>
+                            </div>
+                          </div>
+                        ) : getMlMode(it.id) === "mixed" ? (
+                          <div className="flex justify-end gap-2">
+                            <input
+                              className="w-40 rounded-xl border p-2 text-right"
+                              inputMode="numeric"
+                              placeholder="+ ML"
+                              value={addTotalMlMap[it.id] ?? ""}
+                              onChange={(e) => setAddTotalMlMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  addQty(it.id);
+                                }
+                              }}
+                            />
+                            <button className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" type="button" onClick={() => addQty(it.id)}>
+                              Aggiungi
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="grid grid-cols-3 gap-2 justify-end">
+                            <div>
+                              <div className="text-[11px] text-gray-500 mb-1 text-right">+ PZ</div>
+                              <input
+                                className="w-full rounded-xl border p-2 text-right"
+                                inputMode="numeric"
+                                placeholder="0"
+                                value={addPzMap[it.id] ?? ""}
+                                onChange={(e) => setAddPzMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    addQty(it.id);
+                                  }
+                                }}
+                              />
+                            </div>
+
+                            <div>
+                              <div className="text-[11px] text-gray-500 mb-1 text-right">+ ML aperti</div>
+                              <input
+                                className="w-full rounded-xl border p-2 text-right"
+                                inputMode="numeric"
+                                placeholder="0"
+                                value={addOpenMlMap[it.id] ?? ""}
+                                onChange={(e) => setAddOpenMlMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    addQty(it.id);
+                                  }
+                                }}
+                              />
+                            </div>
+
+                            <div className="flex items-end justify-end">
+                              <button className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50 w-full" type="button" onClick={() => addQty(it.id)}>
+                                Aggiungi
+                              </button>
+                            </div>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   );
@@ -795,7 +1580,7 @@ export default function InventoryClient() {
             <tr>
               <th className="text-left p-3 w-40">Codice</th>
               <th className="text-left p-3">Descrizione</th>
-              <th className="text-left p-3 w-56">Totale (PZ / ML)</th>
+              <th className="text-left p-3 w-[520px]">Input</th>
             </tr>
           </thead>
           <tbody>
@@ -817,43 +1602,206 @@ export default function InventoryClient() {
 
             {filteredItems.map((it) => {
               const isHi = highlightScannedId === it.id;
-              const mlMode = isMlItem(it);
-              const ml = Number(qtyMap[it.id]) || 0;
+              const ml = isMlItem(it);
+              const kg = isKgItem(it) && !ml;
+
               const perUnit = Number(it.volume_ml_per_unit) || 0;
-              const eq = mlMode && perUnit > 0 ? (ml / perUnit).toFixed(2) : null;
+              const totalMl = ml ? calcTotalMl(it) : 0;
+              const totalKg = kg ? calcTotalKg(it) : 0;
+              const mode = ml ? getMlMode(it.id) : null;
 
               return (
                 <tr key={it.id} className={`border-t ${isHi ? "bg-green-50" : ""}`}>
                   <td className="p-3 font-medium">{it.code}</td>
                   <td className="p-3">
                     {it.description}
-                    {mlMode && eq != null && (
+                    {ml && (
+                      <div className="mt-2 flex items-center gap-2">
+                        <MlModeToggle itemId={it.id} />
+                        {perUnit > 0 && (
+                          <span className="text-xs text-gray-500">
+                            Formato “tecnico”: <b>{perUnit} ml</b>
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {kg && (
                       <div className="text-xs text-gray-500 mt-1">
-                        Bottiglie equivalenti: <b>{eq}</b>
+                        UM: <b>kg</b> — totale: <b>{totalKg.toFixed(3)}</b> kg
                       </div>
                     )}
                   </td>
+
                   <td className="p-3">
-                    <input
-                      ref={(el) => {
-                        qtyInputRefs.current[it.id] = el;
-                      }}
-                      className="w-full rounded-xl border p-2"
-                      inputMode="numeric"
-                      placeholder={mlMode ? "0 (ML)" : "0 (PZ)"}
-                      value={qtyMap[it.id] ?? ""}
-                      onChange={(e) => setQty(it.id, e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.preventDefault();
-                          const el = searchInputRef.current;
-                          if (el) {
-                            el.focus();
-                            el.select();
+                    {!ml && !kg ? (
+                      <input
+                        ref={(el) => {
+                          qtyInputRefs.current[it.id] = el;
+                        }}
+                        className="w-full rounded-xl border p-2"
+                        inputMode="numeric"
+                        placeholder="0 (PZ)"
+                        value={qtyPzMap[it.id] ?? ""}
+                        onChange={(e) => setPz(it.id, e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            const el = searchInputRef.current;
+                            if (el) {
+                              el.focus();
+                              el.select();
+                            }
                           }
-                        }
-                      }}
-                    />
+                        }}
+                      />
+                    ) : kg ? (
+                      <div className="grid grid-cols-3 gap-2">
+                        <div>
+                          <div className="text-[11px] text-gray-500 mb-1">PZ</div>
+                          <input
+                            ref={(el) => {
+                              qtyInputRefs.current[it.id] = el;
+                            }}
+                            className="w-full rounded-xl border p-2"
+                            inputMode="numeric"
+                            placeholder="0"
+                            value={qtyPzMap[it.id] ?? ""}
+                            onChange={(e) => setPz(it.id, e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                const el = searchInputRef.current;
+                                if (el) {
+                                  el.focus();
+                                  el.select();
+                                }
+                              }
+                            }}
+                          />
+                        </div>
+                        <div>
+                          <div className="text-[11px] text-gray-500 mb-1">GR</div>
+                          <input
+                            className="w-full rounded-xl border p-2"
+                            inputMode="numeric"
+                            placeholder="0–9999"
+                            value={qtyGrMap[it.id] ?? ""}
+                            onChange={(e) => setGr(it.id, e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                const el = searchInputRef.current;
+                                if (el) {
+                                  el.focus();
+                                  el.select();
+                                }
+                              }
+                            }}
+                          />
+                        </div>
+                        <div>
+                          <div className="text-[11px] text-gray-500 mb-1">Totale KG</div>
+                          <div className="w-full rounded-xl border p-2 bg-gray-50 text-gray-700">
+                            <b>{totalKg.toFixed(3)}</b> <span className="text-xs text-gray-500">kg</span>
+                          </div>
+                        </div>
+                      </div>
+                    ) : mode === "mixed" ? (
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <div className="text-[11px] text-gray-500 mb-1">Totale ML</div>
+                          <input
+                            ref={(el) => {
+                              qtyInputRefs.current[it.id] = el;
+                            }}
+                            className="w-full rounded-xl border p-2"
+                            inputMode="numeric"
+                            placeholder="0"
+                            value={totalMlMap[it.id] ?? ""}
+                            onChange={(e) => setTotalMl(it.id, e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                const el = searchInputRef.current;
+                                if (el) {
+                                  el.focus();
+                                  el.select();
+                                }
+                              }
+                            }}
+                          />
+                          <div className="text-xs text-gray-500 mt-1">
+                            {totalMl > 0 ? (
+                              <>
+                                Totale: <b>{totalMl}</b> ({mlToLitriLabel(totalMl)})
+                              </>
+                            ) : (
+                              <>0 non viene salvato.</>
+                            )}
+                          </div>
+                        </div>
+                        <div className="rounded-xl border p-2 bg-gray-50 text-gray-700 h-fit">
+                          <div className="text-[11px] text-gray-500 mb-1">Nota</div>
+                          <div className="text-xs">
+                            Modalità <b>Formati misti</b>: niente pezzi, conta solo il totale ML.
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-3 gap-2">
+                        <div>
+                          <div className="text-[11px] text-gray-500 mb-1">PZ</div>
+                          <input
+                            ref={(el) => {
+                              qtyInputRefs.current[it.id] = el;
+                            }}
+                            className="w-full rounded-xl border p-2"
+                            inputMode="numeric"
+                            placeholder="0"
+                            value={qtyPzMap[it.id] ?? ""}
+                            onChange={(e) => setPz(it.id, e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                const el = searchInputRef.current;
+                                if (el) {
+                                  el.focus();
+                                  el.select();
+                                }
+                              }
+                            }}
+                          />
+                        </div>
+
+                        <div>
+                          <div className="text-[11px] text-gray-500 mb-1">ML aperti</div>
+                          <input
+                            className="w-full rounded-xl border p-2"
+                            inputMode="numeric"
+                            placeholder="0"
+                            value={openMlMap[it.id] ?? ""}
+                            onChange={(e) => setOpenMl(it.id, e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                const el = searchInputRef.current;
+                                if (el) {
+                                  el.focus();
+                                  el.select();
+                                }
+                              }
+                            }}
+                          />
+                        </div>
+
+                        <div>
+                          <div className="text-[11px] text-gray-500 mb-1">Totale ML</div>
+                          <div className="w-full rounded-xl border p-2 bg-gray-50 text-gray-700">
+                            <b>{totalMl}</b> <span className="text-xs text-gray-500">({mlToLitriLabel(totalMl)})</span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </td>
                 </tr>
               );
@@ -864,4 +1812,9 @@ export default function InventoryClient() {
     </div>
   );
 }
+
+
+
+
+
 

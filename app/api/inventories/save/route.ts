@@ -5,10 +5,22 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 export const runtime = "nodejs";
 
+type MlMode = "fixed" | "mixed";
+
 type Row = {
   item_id: string;
-  qty: number; // ✅ input unico (oggi arriva qui dalla UI)
-  qty_ml?: number; // ✅ opzionale: se in futuro la UI lo userà, lo trattiamo come input unico alternativo
+
+  // ✅ qty = pezzi (PZ)
+  qty: number;
+
+  // ✅ ML: totale ml
+  qty_ml?: number;
+
+  // ✅ KG: grammi aperti (GR)
+  qty_gr?: number;
+
+  // ✅ opzionale ML mode
+  ml_mode?: MlMode;
 };
 
 type Body = {
@@ -31,6 +43,15 @@ function clampInt(n: any) {
   const x = Number(n);
   if (!Number.isFinite(x)) return 0;
   return Math.max(0, Math.trunc(x));
+}
+
+// ✅ per GR: 0..9999 (come da requisito)
+function clampGr(n: any) {
+  return Math.min(9999, clampInt(n));
+}
+
+function normMlMode(v: any): MlMode | null {
+  return v === "fixed" || v === "mixed" ? v : null;
 }
 
 const USER_TABLE_CANDIDATES = ["app_user", "app_users", "utenti", "users"];
@@ -213,10 +234,7 @@ export async function POST(req: Request) {
   const volumeByItemId = new Map<string, number>();
 
   if (validItemIds.length > 0) {
-    const { data: itemsData, error: itemsErr } = await supabaseAdmin
-      .from("items")
-      .select("id, volume_ml_per_unit")
-      .in("id", validItemIds);
+    const { data: itemsData, error: itemsErr } = await supabaseAdmin.from("items").select("id, volume_ml_per_unit").in("id", validItemIds);
 
     if (itemsErr) {
       console.error("[inventories/save] items volume fetch error:", itemsErr);
@@ -232,50 +250,89 @@ export async function POST(req: Request) {
     }
   }
 
-  // ✅ 3) prepara righe con logica "campo unico" (SCELTA B)
+  // ✅ 3) prepara righe
   const payload = rows
     .filter((r) => isUuid(r.item_id))
     .map((r) => {
       const itemId = r.item_id.trim();
-
-      // input unico:
-      // - se la UI manda qty_ml lo consideriamo preferenziale (futuro)
-      // - altrimenti usiamo qty (stato attuale + bug: 7670 finisce in qty)
-      const inputUnique = clampInt((r as any).qty_ml ?? r.qty ?? 0);
-
       const volume = volumeByItemId.get(itemId) ?? 0;
 
+      const qtyIn = clampInt((r as any).qty ?? 0);
+      const qtyGrIn = clampGr((r as any).qty_gr ?? 0);
+
+      const qtyMlInRaw = (r as any).qty_ml;
+      const hasQtyMl = qtyMlInRaw !== undefined && qtyMlInRaw !== null && Number.isFinite(Number(qtyMlInRaw));
+      const qtyMlIn = hasQtyMl ? clampInt(qtyMlInRaw) : null;
+
+      const ml_mode = normMlMode((r as any).ml_mode);
+
       if (volume > 0) {
-        // ✅ item a ML: input = ML totali
-        const qty_ml = inputUnique;
-        const qty = Math.floor(qty_ml / volume); // bottiglie chiuse equivalenti
+        // ✅ ITEM ML (GR sempre 0 per evitare casino)
+        if (ml_mode === "mixed") {
+          const qty_ml = qtyMlIn ?? 0;
+          return {
+            pv_id,
+            category_id,
+            subcategory_id,
+            item_id: itemId,
+            qty: 0,
+            qty_ml,
+            qty_gr: 0,
+            inventory_date: dateOrNull,
+            created_by_username: session.username,
+          };
+        }
+
+        if (qtyMlIn !== null) {
+          const qty_ml = qtyMlIn;
+          const qty = clampInt(qtyIn);
+          return {
+            pv_id,
+            category_id,
+            subcategory_id,
+            item_id: itemId,
+            qty,
+            qty_ml,
+            qty_gr: 0,
+            inventory_date: dateOrNull,
+            created_by_username: session.username,
+          };
+        }
+
+        // retrocompat: qty conteneva totale ML
+        const totalMl = clampInt(qtyIn);
+        const qty = Math.floor(totalMl / volume);
         return {
           pv_id,
           category_id,
           subcategory_id,
           item_id: itemId,
           qty: clampInt(qty),
-          qty_ml: clampInt(qty_ml),
+          qty_ml: clampInt(totalMl),
+          qty_gr: 0,
           inventory_date: dateOrNull,
           created_by_username: session.username,
         };
       }
 
-      // ✅ item a pezzi: input = qty
+      // ✅ item a pezzi / kg: qty = pezzi, qty_gr = grammi aperti, qty_ml=0
       return {
         pv_id,
         category_id,
         subcategory_id,
         item_id: itemId,
-        qty: clampInt(inputUnique),
+        qty: clampInt(qtyIn),
         qty_ml: 0,
+        qty_gr: qtyGrIn,
         inventory_date: dateOrNull,
         created_by_username: session.username,
       };
-    });
+    })
+    // ✅ 0 = non conta (ora include GR)
+    .filter((r) => (Number((r as any).qty) || 0) > 0 || (Number((r as any).qty_ml) || 0) > 0 || (Number((r as any).qty_gr) || 0) > 0);
 
   if (payload.length === 0) {
-    return NextResponse.json({ ok: false, error: "Nessuna riga valida" }, { status: 400 });
+    return NextResponse.json({ ok: false, error: "Nessuna riga valida (tutte a 0)" }, { status: 400 });
   }
 
   // ✅ 4) insert righe
@@ -295,6 +352,10 @@ export async function POST(req: Request) {
     overwritten: alreadyExists,
   });
 }
+
+
+
+
 
 
 

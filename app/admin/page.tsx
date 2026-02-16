@@ -9,6 +9,17 @@ type CreateRole = "amministrativo" | "punto_vendita";
 type PV = { id: string; code: string; name: string };
 type AppUser = { id: string; username: string; role: string; pv_id: string | null };
 
+// ✅ Timeline: categorie
+type Category = { id: string; name: string };
+
+function todayISO() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
 export default function AdminPage() {
   const router = useRouter();
 
@@ -38,10 +49,17 @@ export default function AdminPage() {
   const [assignMsg, setAssignMsg] = useState<string | null>(null);
   const [assignLoading, setAssignLoading] = useState(false);
 
-  const selectedUser = useMemo(
-    () => pvUsers.find((u) => u.id === assignUserId) || null,
-    [pvUsers, assignUserId]
-  );
+  // ✅ Timeline Giacenze (solo Admin/Amministrativo - UI qui)
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [tlPvId, setTlPvId] = useState<string>("");
+  const [tlCategoryId, setTlCategoryId] = useState<string>("");
+  const [tlDateFrom, setTlDateFrom] = useState<string>("");
+  const [tlDateTo, setTlDateTo] = useState<string>(todayISO());
+  const [tlMsg, setTlMsg] = useState<string | null>(null);
+  const [tlLoading, setTlLoading] = useState(false);
+  const [tlPdfLoading, setTlPdfLoading] = useState(false);
+
+  const selectedUser = useMemo(() => pvUsers.find((u) => u.id === assignUserId) || null, [pvUsers, assignUserId]);
 
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
@@ -56,7 +74,11 @@ export default function AdminPage() {
       const jsonPvs = await resPvs.json().catch(() => null);
 
       const pvList = (jsonPvs?.pvs ?? jsonPvs?.rows) ?? [];
-      setPvs(Array.isArray(pvList) ? pvList : []);
+      const normalizedPvs = Array.isArray(pvList) ? pvList : [];
+      setPvs(normalizedPvs);
+
+      // ✅ se timeline PV non è selezionato, metto il primo (comodo)
+      if (!tlPvId && normalizedPvs?.[0]?.id) setTlPvId(normalizedPvs[0].id);
 
       // Lista utenti PV
       const resUsers = await fetch("/api/users/list?role=punto_vendita", { cache: "no-store" });
@@ -71,8 +93,25 @@ export default function AdminPage() {
     }
   }
 
+  // ✅ carica categorie per timeline
+  async function loadCategories() {
+    try {
+      const res = await fetch("/api/categories/list", { cache: "no-store" });
+      const json = await res.json().catch(() => null);
+      const rows = (json?.rows ?? []) as any[];
+      const normalized = Array.isArray(rows) ? rows : [];
+      setCategories(normalized);
+
+      if (!tlCategoryId && normalized?.[0]?.id) setTlCategoryId(normalized[0].id);
+    } catch {
+      // non blocca admin
+    }
+  }
+
   useEffect(() => {
     loadPvsAndUsers();
+    loadCategories();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Se cambio ruolo e non è PV, pulisco scelta PV
@@ -87,10 +126,7 @@ export default function AdminPage() {
 
     try {
       const body: any = { username, password, role };
-
-      if (role === "punto_vendita") {
-        body.pv_id = pvIdForNewUser || null;
-      }
+      if (role === "punto_vendita") body.pv_id = pvIdForNewUser || null;
 
       const res = await fetch("/api/users/create", {
         method: "POST",
@@ -107,7 +143,6 @@ export default function AdminPage() {
       setUsername("");
       setPassword("");
       setMsg(`Utente creato con successo (${role === "amministrativo" ? "Amministrativo" : "Punto Vendita"})`);
-
       await loadPvsAndUsers();
     } finally {
       setLoading(false);
@@ -135,7 +170,6 @@ export default function AdminPage() {
       setPvCode("");
       setPvName("");
       setPvMsg(`PV creato: ${json.pv.code} - ${json.pv.name}`);
-
       await loadPvsAndUsers();
     } finally {
       setPvLoading(false);
@@ -175,10 +209,87 @@ export default function AdminPage() {
     }
   }
 
+  // ✅ Timeline Excel download
+  async function downloadTimelineExcel() {
+    setTlMsg(null);
+
+    if (!tlPvId) return setTlMsg("Seleziona un PV.");
+    if (!tlCategoryId) return setTlMsg("Seleziona una categoria.");
+    if (!tlDateFrom || !tlDateTo) return setTlMsg("Imposta Data da e Data a.");
+
+    setTlLoading(true);
+    try {
+      const params = new URLSearchParams();
+      params.set("pv_id", tlPvId);
+      params.set("category_id", tlCategoryId);
+      params.set("date_from", tlDateFrom);
+      params.set("date_to", tlDateTo);
+
+      const res = await fetch(`/api/admin/timeline/excel?${params.toString()}`, { method: "GET" });
+      if (!res.ok) {
+        const j = await res.json().catch(() => null);
+        throw new Error(j?.error || "Errore generazione Excel timeline");
+      }
+
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `timeline_giacenze_${tlDateFrom}_${tlDateTo}.xlsx`;
+      a.click();
+
+      window.URL.revokeObjectURL(url);
+      setTlMsg("Download Excel avviato.");
+    } catch (e: any) {
+      setTlMsg(e?.message || "Errore");
+    } finally {
+      setTlLoading(false);
+    }
+  }
+
+  // ✅ PDF Pivot (Δ)
+  async function downloadTimelinePivotPdf() {
+    setTlMsg(null);
+
+    if (!tlPvId) return setTlMsg("Seleziona un PV.");
+    if (!tlCategoryId) return setTlMsg("Seleziona una categoria.");
+    if (!tlDateFrom || !tlDateTo) return setTlMsg("Imposta Data da e Data a.");
+
+    setTlPdfLoading(true);
+    try {
+      const params = new URLSearchParams();
+      params.set("pv_id", tlPvId);
+      params.set("category_id", tlCategoryId);
+      params.set("date_from", tlDateFrom);
+      params.set("date_to", tlDateTo);
+
+      const res = await fetch(`/api/admin/timeline/pivot-pdf?${params.toString()}`, { method: "GET" });
+      if (!res.ok) {
+        const j = await res.json().catch(() => null);
+        throw new Error(j?.error || "Errore generazione PDF pivot");
+      }
+
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `timeline_pivot_${tlDateFrom}_${tlDateTo}.pdf`;
+      a.click();
+
+      window.URL.revokeObjectURL(url);
+      setTlMsg("Download PDF avviato.");
+    } catch (e: any) {
+      setTlMsg(e?.message || "Errore");
+    } finally {
+      setTlPdfLoading(false);
+    }
+  }
+
   return (
     <main className="min-h-screen bg-gray-100">
       <div className="mx-auto max-w-6xl px-6 py-6 space-y-6">
-        {/* header */}
         <div className="flex items-start justify-between">
           <div>
             <h1 className="text-2xl font-semibold">Admin</h1>
@@ -192,14 +303,10 @@ export default function AdminPage() {
 
         {dataMsg && <div className="rounded-xl border bg-white p-3 text-sm text-gray-700">{dataMsg}</div>}
 
-        {/* layout a griglia */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* colonna sinistra */}
           <section className="rounded-2xl border bg-white p-4 lg:col-span-1">
             <h2 className="text-lg font-semibold">Area Operativa</h2>
-            <p className="text-sm text-gray-600 mt-1">
-              Link rapidi alle funzioni operative (resti admin, non perdi nulla).
-            </p>
+            <p className="text-sm text-gray-600 mt-1">Link rapidi alle funzioni operative (resti admin, non perdi nulla).</p>
 
             <div className="mt-4 grid grid-cols-1 gap-2">
               <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/user/order-tab">
@@ -226,71 +333,107 @@ export default function AdminPage() {
                 Storico Inventari
               </Link>
 
-              {/* ✅ NUOVO */}
               <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/admin/deposits">
                 Depositi (Magazzini)
               </Link>
 
-              {/* ✅ SOGLIE NUOVO */}
               <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/admin/alerts">
                 Soglie &amp; Alert
               </Link>
 
-
               <div className="pt-3 border-t mt-2">
-                <p className="text-xs text-gray-500">
-                  Tip: nel menu dell’area operativa aggiungeremo anche il tasto “Admin” per tornare qui.
-                </p>
+                <p className="text-xs text-gray-500">Tip: nel menu dell’area operativa aggiungeremo anche il tasto “Admin” per tornare qui.</p>
               </div>
             </div>
           </section>
 
-          {/* colonna destra: forms */}
           <div className="lg:col-span-2 space-y-6">
+            {/* ✅ Timeline Giacenze */}
+            <section className="rounded-2xl border bg-white p-4">
+              <h2 className="text-lg font-semibold">Timeline Giacenze</h2>
+              <p className="text-sm text-gray-600 mt-1">Scarica Excel (con Δ) o PDF pivot (con Δ dentro le celle) nel periodo selezionato.</p>
+
+              <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium mb-2">Punto Vendita</label>
+                  <select className="w-full rounded-xl border p-3 bg-white" value={tlPvId} onChange={(e) => setTlPvId(e.target.value)}>
+                    <option value="">— Seleziona —</option>
+                    {pvs.map((pv) => (
+                      <option key={pv.id} value={pv.id}>
+                        {pv.code} — {pv.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2">Categoria</label>
+                  <select className="w-full rounded-xl border p-3 bg-white" value={tlCategoryId} onChange={(e) => setTlCategoryId(e.target.value)}>
+                    <option value="">— Seleziona —</option>
+                    {categories.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-gray-500 mt-1">Per ora solo Categoria (la sottocategoria la aggiungiamo dopo).</p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2">Data da</label>
+                  <input type="date" className="w-full rounded-xl border p-3 bg-white" value={tlDateFrom} onChange={(e) => setTlDateFrom(e.target.value)} />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2">Data a</label>
+                  <input type="date" className="w-full rounded-xl border p-3 bg-white" value={tlDateTo} onChange={(e) => setTlDateTo(e.target.value)} />
+                </div>
+              </div>
+
+              <div className="mt-4 flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60"
+                  disabled={tlLoading}
+                  onClick={downloadTimelineExcel}
+                >
+                  {tlLoading ? "Genero..." : "Scarica Excel Timeline (Δ)"}
+                </button>
+
+                <button
+                  type="button"
+                  className="rounded-xl border bg-white px-4 py-2 hover:bg-gray-50 disabled:opacity-60"
+                  disabled={tlPdfLoading}
+                  onClick={downloadTimelinePivotPdf}
+                >
+                  {tlPdfLoading ? "Genero..." : "Scarica PDF Pivot (Δ)"}
+                </button>
+
+                {tlMsg && <div className="text-sm text-gray-700">{tlMsg}</div>}
+              </div>
+            </section>
+
             {/* crea utente */}
             <section className="rounded-2xl border bg-white p-4">
               <h2 className="text-lg font-semibold">Crea nuovo utente</h2>
 
               <form onSubmit={createUser} className="mt-4 space-y-3">
-                <input
-                  className="w-full rounded-xl border p-3"
-                  placeholder="Username"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                />
-
-                <input
-                  className="w-full rounded-xl border p-3"
-                  placeholder="Password"
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                />
+                <input className="w-full rounded-xl border p-3" placeholder="Username" value={username} onChange={(e) => setUsername(e.target.value)} />
+                <input className="w-full rounded-xl border p-3" placeholder="Password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
 
                 <div>
                   <label className="block text-sm font-medium mb-2">Ruolo</label>
-                  <select
-                    className="w-full rounded-xl border p-3 bg-white"
-                    value={role}
-                    onChange={(e) => setRole(e.target.value as CreateRole)}
-                  >
+                  <select className="w-full rounded-xl border p-3 bg-white" value={role} onChange={(e) => setRole(e.target.value as CreateRole)}>
                     <option value="amministrativo">Amministrativo</option>
                     <option value="punto_vendita">Punto Vendita</option>
                   </select>
-                  <p className="text-xs text-gray-500 mt-1">
-                    Amministrativo: riordino e funzioni ufficio. Punto Vendita: giacenze/inventario.
-                  </p>
+                  <p className="text-xs text-gray-500 mt-1">Amministrativo: riordino e funzioni ufficio. Punto Vendita: giacenze/inventario.</p>
                 </div>
 
-                {/* Assegna PV SOLO se ruolo = punto_vendita */}
                 {role === "punto_vendita" && (
                   <div>
                     <label className="block text-sm font-medium mb-2">Assegna PV (opzionale)</label>
-                    <select
-                      className="w-full rounded-xl border p-3 bg-white"
-                      value={pvIdForNewUser}
-                      onChange={(e) => setPvIdForNewUser(e.target.value)}
-                    >
+                    <select className="w-full rounded-xl border p-3 bg-white" value={pvIdForNewUser} onChange={(e) => setPvIdForNewUser(e.target.value)}>
                       <option value="">— Nessuno —</option>
                       {pvs.map((pv) => (
                         <option key={pv.id} value={pv.id}>
@@ -298,9 +441,7 @@ export default function AdminPage() {
                         </option>
                       ))}
                     </select>
-                    <p className="text-xs text-gray-500 mt-1">
-                      Se non lo assegni ora, lo puoi fare sotto in “Assegna utente a PV”.
-                    </p>
+                    <p className="text-xs text-gray-500 mt-1">Se non lo assegni ora, lo puoi fare sotto in “Assegna utente a PV”.</p>
                   </div>
                 )}
 
@@ -319,25 +460,11 @@ export default function AdminPage() {
 
               <form onSubmit={createPV} className="mt-4 space-y-3">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  <input
-                    className="w-full rounded-xl border p-3 md:col-span-1"
-                    placeholder="Codice (es. A1)"
-                    value={pvCode}
-                    onChange={(e) => setPvCode(e.target.value)}
-                  />
-
-                  <input
-                    className="w-full rounded-xl border p-3 md:col-span-2"
-                    placeholder="Nome (es. Diversivo)"
-                    value={pvName}
-                    onChange={(e) => setPvName(e.target.value)}
-                  />
+                  <input className="w-full rounded-xl border p-3 md:col-span-1" placeholder="Codice (es. A1)" value={pvCode} onChange={(e) => setPvCode(e.target.value)} />
+                  <input className="w-full rounded-xl border p-3 md:col-span-2" placeholder="Nome (es. Diversivo)" value={pvName} onChange={(e) => setPvName(e.target.value)} />
                 </div>
 
-                <button
-                  className="w-full rounded-xl bg-slate-900 text-white p-3 disabled:opacity-60"
-                  disabled={pvLoading || !pvCode.trim() || !pvName.trim()}
-                >
+                <button className="w-full rounded-xl bg-slate-900 text-white p-3 disabled:opacity-60" disabled={pvLoading || !pvCode.trim() || !pvName.trim()}>
                   {pvLoading ? "Creazione..." : "Crea PV"}
                 </button>
 
@@ -377,12 +504,7 @@ export default function AdminPage() {
 
                 <div>
                   <label className="block text-sm font-medium mb-2">PV</label>
-                  <select
-                    className="w-full rounded-xl border p-3 bg-white"
-                    value={assignPvId}
-                    onChange={(e) => setAssignPvId(e.target.value)}
-                    disabled={!assignUserId}
-                  >
+                  <select className="w-full rounded-xl border p-3 bg-white" value={assignPvId} onChange={(e) => setAssignPvId(e.target.value)} disabled={!assignUserId}>
                     <option value="">— Nessuno (rimuovi assegnazione) —</option>
                     {pvs.map((pv) => (
                       <option key={pv.id} value={pv.id}>
@@ -398,10 +520,7 @@ export default function AdminPage() {
                   )}
                 </div>
 
-                <button
-                  className="w-full rounded-xl bg-slate-900 text-white p-3 disabled:opacity-60"
-                  disabled={assignLoading || !assignUserId}
-                >
+                <button className="w-full rounded-xl bg-slate-900 text-white p-3 disabled:opacity-60" disabled={assignLoading || !assignUserId}>
                   {assignLoading ? "Salvataggio..." : "Salva assegnazione"}
                 </button>
 
@@ -414,6 +533,8 @@ export default function AdminPage() {
     </main>
   );
 }
+
+
 
 
 

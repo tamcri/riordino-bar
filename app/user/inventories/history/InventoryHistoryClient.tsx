@@ -22,6 +22,13 @@ type InventoryGroup = {
   lines_count: number;
   qty_sum: number;
 
+  // ✅ nuovi totali
+  qty_ml_sum?: number;
+  qty_gr_sum?: number;
+
+  // ✅ totale valore €
+  value_sum?: number;
+
   operatore?: string | null;
 };
 
@@ -33,6 +40,9 @@ type InventoryLine = {
 
   // ✅ PZ (bottiglie chiuse equivalenti se ML)
   qty: number;
+
+  // ✅ GR (peso aperto) — nuovo
+  qty_gr?: number;
 
   // ✅ ML totale (per comparazione/valore)
   qty_ml?: number;
@@ -147,6 +157,16 @@ export default function InventoryHistoryClient() {
   const canUseSubcategories = useMemo(() => !!categoryId, [categoryId]);
   const canCompare = me.role === "admin" || me.role === "amministrativo";
 
+  // ✅ Timeline box state (uguale ad Admin)
+  const canTimeline =
+    (me.role === "admin" || me.role === "amministrativo" || me.role === "punto_vendita") && !!me.role;
+  const [tlPvId, setTlPvId] = useState<string>("");
+  const [tlCategoryId, setTlCategoryId] = useState<string>("");
+  const [tlDateFrom, setTlDateFrom] = useState<string>("");
+  const [tlDateTo, setTlDateTo] = useState<string>(todayISO());
+  const [tlMsg, setTlMsg] = useState<string | null>(null);
+  const [tlLoading, setTlLoading] = useState(false);
+
   const filteredDetail = useMemo(() => {
     const t = searchDetail.trim().toLowerCase();
     if (!t) return detail;
@@ -157,22 +177,30 @@ export default function InventoryHistoryClient() {
     });
   }, [detail, searchDetail]);
 
-  // ✅ Articoli: conta righe con qty>0 oppure qty_ml>0
+  // ✅ Articoli: conta righe con qty>0 oppure qty_ml>0 oppure qty_gr>0
   const detailArticoli = useMemo(() => {
-  return detail.reduce((n, r: any) => {
-    const q = Number(r.qty) || 0;
-    const qml = Number(r.qty_ml) || 0;
-    return n + (q > 0 || qml > 0 ? 1 : 0);
-  }, 0);
-}, [detail]);
+    return detail.reduce((n, r: any) => {
+      const q = Number(r.qty) || 0;
+      const qml = Number(r.qty_ml) || 0;
+      const qgr = Number(r.qty_gr) || 0;
+      return n + (q > 0 || qml > 0 || qgr > 0 ? 1 : 0);
+    }, 0);
+  }, [detail]);
 
   const detailMlOpen = useMemo(() => {
-  return (detail as any[]).reduce((sum, r: any) => {
-    return sum + (Number(r?.ml_open) || 0);
-  }, 0);
-}, [detail]);
+    return (detail as any[]).reduce((sum, r: any) => {
+      return sum + (Number(r?.ml_open) || 0);
+    }, 0);
+  }, [detail]);
+
+  const detailGrSum = useMemo(() => {
+    return (detail as any[]).reduce((sum, r: any) => {
+      return sum + (Number(r?.qty_gr) || 0);
+    }, 0);
+  }, [detail]);
 
   // ✅ Valore: se ML => (qty_ml/volume)*prezzo, altrimenti qty*prezzo
+  // (GR non ha un prezzo unitario coerente qui, quindi NON lo includo nel valore)
   const detailValueEur = useMemo(() => {
     return detail.reduce((sum, r) => {
       const p = Number(r.prezzo_vendita_eur);
@@ -290,8 +318,7 @@ export default function InventoryHistoryClient() {
     setSearchDetail("");
 
     try {
-      if (effectiveMe.isPv && effectiveMe.pv_id && g.pv_id !== effectiveMe.pv_id)
-        throw new Error("Non autorizzato.");
+      if (effectiveMe.isPv && effectiveMe.pv_id && g.pv_id !== effectiveMe.pv_id) throw new Error("Non autorizzato.");
 
       const params = new URLSearchParams();
       params.set("pv_id", g.pv_id);
@@ -306,9 +333,7 @@ export default function InventoryHistoryClient() {
       if (!ok) {
         console.error("[inventories/rows] ERROR", { url, status, rawText, data });
         const snippet = (rawText || "").slice(0, 300);
-        throw new Error(
-          data?.error || `Errore caricamento dettaglio (HTTP ${status}). Risposta: ${snippet || "—"}`
-        );
+        throw new Error(data?.error || `Errore caricamento dettaglio (HTTP ${status}). Risposta: ${snippet || "—"}`);
       }
 
       setDetail(data.rows || []);
@@ -332,6 +357,67 @@ export default function InventoryHistoryClient() {
     if (g.subcategory_id) params.set("subcategory_id", g.subcategory_id);
 
     window.location.href = `/api/inventories/excel?${params.toString()}`;
+  }
+
+  // ✅ Timeline box download (uguale ad Admin)
+  async function downloadTimelineExcel() {
+    setTlMsg(null);
+
+    const pv = me.isPv ? me.pv_id : tlPvId;
+    if (!pv) return setTlMsg("Seleziona un PV.");
+    if (!tlCategoryId) return setTlMsg("Seleziona una categoria.");
+    if (!tlDateFrom || !tlDateTo) return setTlMsg("Imposta Data da e Data a.");
+
+    if (tlDateFrom > tlDateTo) {
+      setTlMsg("Intervallo date non valido: 'Data da' è dopo 'Data a'.");
+      return;
+    }
+
+    setTlLoading(true);
+    try {
+      const params = new URLSearchParams();
+      params.set("pv_id", pv);
+      params.set("category_id", tlCategoryId);
+      params.set("date_from", tlDateFrom);
+      params.set("date_to", tlDateTo);
+
+      window.location.href = `/api/admin/timeline/excel?${params.toString()}`;
+      setTlMsg("Download avviato.");
+    } catch (e: any) {
+      setTlMsg(e?.message || "Errore");
+    } finally {
+      setTlLoading(false);
+    }
+  }
+
+  async function downloadTimelinePdf() {
+    setTlMsg(null);
+
+    const pv = me.isPv ? me.pv_id : tlPvId;
+    if (!pv) return setTlMsg("Seleziona un PV.");
+    if (!tlCategoryId) return setTlMsg("Seleziona una categoria.");
+    if (!tlDateFrom || !tlDateTo) return setTlMsg("Imposta Data da e Data a.");
+
+    if (tlDateFrom > tlDateTo) {
+      setTlMsg("Intervallo date non valido: 'Data da' è dopo 'Data a'.");
+      return;
+    }
+
+    setTlLoading(true);
+    try {
+      const params = new URLSearchParams();
+      params.set("pv_id", pv);
+      params.set("category_id", tlCategoryId);
+      params.set("date_from", tlDateFrom);
+      params.set("date_to", tlDateTo);
+
+      window.location.href = `/api/admin/timeline/pivot-pdf?${params.toString()}`;
+      setTlMsg("Download avviato.");
+    } catch (e: any) {
+      setTlMsg(e?.message || "Errore");
+    } finally {
+      setTlLoading(false);
+    }
   }
 
   function openCompare(g: InventoryGroup) {
@@ -428,7 +514,7 @@ export default function InventoryHistoryClient() {
     if (left < pad) left = pad;
     if (left + width > vw - pad) left = Math.max(pad, vw - pad - width);
 
-    const approxMenuH = 160;
+    const approxMenuH = 200;
     if (top + approxMenuH > vh - pad) {
       top = Math.max(pad, r.top - 8 - approxMenuH);
     }
@@ -548,11 +634,19 @@ export default function InventoryHistoryClient() {
         setMe(meState);
 
         setDateToISO(todayISO());
+        setTlDateTo(todayISO());
 
         await loadCategories();
 
         if (!meState.isPv) {
           await loadPvs();
+        }
+
+        // timeline defaults
+        if (meState.isPv && meState.pv_id) {
+          setTlPvId(meState.pv_id);
+        } else {
+          setTlPvId("");
         }
 
         await loadList(meState);
@@ -590,33 +684,96 @@ export default function InventoryHistoryClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pvId, categoryId, subcategoryId, dateFromISO, dateToISO, me.role]);
 
+  // quando pvs/categorie arrivano, metto i default per timeline se vuoti
+  useEffect(() => {
+    if (!me.role) return;
+
+    if (!me.isPv) {
+      if (!tlPvId && pvs?.[0]?.id) setTlPvId(pvs[0].id);
+    }
+    if (!tlCategoryId && categories?.[0]?.id) setTlCategoryId(categories[0].id);
+  }, [pvs, categories, me.role, me.isPv, tlPvId, tlCategoryId]);
+
   return (
     <div className="space-y-4">
+      {/* ✅ Timeline Giacenze (BOX COME ADMIN) */}
+      {canTimeline && (
+        <div className="rounded-2xl border bg-white p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold">Timeline Giacenze</h2>
+              <p className="text-sm text-gray-600 mt-1">Scarica un Excel o un PDF pivot con Δ nel periodo selezionato.</p>
+            </div>
+            {tlMsg && <div className="text-sm text-gray-700">{tlMsg}</div>}
+          </div>
+
+          <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+            {!me.isPv && (
+              <div>
+                <label className="block text-sm font-medium mb-2">Punto Vendita</label>
+                <select className="w-full rounded-xl border p-3 bg-white" value={tlPvId} onChange={(e) => setTlPvId(e.target.value)}>
+                  <option value="">— Seleziona —</option>
+                  {pvs.map((pv) => (
+                    <option key={pv.id} value={pv.id}>
+                      {pv.code} — {pv.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <div>
+              <label className="block text-sm font-medium mb-2">Categoria</label>
+              <select className="w-full rounded-xl border p-3 bg-white" value={tlCategoryId} onChange={(e) => setTlCategoryId(e.target.value)}>
+                <option value="">— Seleziona —</option>
+                {categories.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-gray-500 mt-1">Per ora solo Categoria (sottocategoria la possiamo aggiungere dopo).</p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-2">Data da</label>
+              <input type="date" className="w-full rounded-xl border p-3 bg-white" value={tlDateFrom} onChange={(e) => setTlDateFrom(e.target.value)} />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-2">Data a</label>
+              <input type="date" className="w-full rounded-xl border p-3 bg-white" value={tlDateTo} onChange={(e) => setTlDateTo(e.target.value)} />
+            </div>
+          </div>
+
+          <div className="mt-4 flex items-center gap-3">
+            <button
+              type="button"
+              className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60"
+              disabled={tlLoading}
+              onClick={downloadTimelineExcel}
+            >
+              {tlLoading ? "Genero..." : "Scarica Excel Timeline"}
+            </button>
+
+            <button type="button" className="rounded-xl border px-4 py-2 hover:bg-gray-50 disabled:opacity-60" disabled={tlLoading} onClick={downloadTimelinePdf}>
+              {tlLoading ? "Genero..." : "Scarica PDF Pivot (Δ)"}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Date (per tutti) */}
       <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
         <div>
           <label className="block text-sm font-medium mb-2">Dal</label>
-          <input
-            type="date"
-            className="w-full rounded-xl border p-3 bg-white"
-            value={dateFromISO}
-            onChange={(e) => setDateFromISO(e.target.value)}
-          />
-          <div className="text-xs text-gray-500 mt-1">
-            Formato mostrato: {dateFromISO ? formatDateIT(dateFromISO) : "—"}
-          </div>
+          <input type="date" className="w-full rounded-xl border p-3 bg-white" value={dateFromISO} onChange={(e) => setDateFromISO(e.target.value)} />
+          <div className="text-xs text-gray-500 mt-1">Formato mostrato: {dateFromISO ? formatDateIT(dateFromISO) : "—"}</div>
         </div>
         <div>
           <label className="block text-sm font-medium mb-2">Al</label>
-          <input
-            type="date"
-            className="w-full rounded-xl border p-3 bg-white"
-            value={dateToISO}
-            onChange={(e) => setDateToISO(e.target.value)}
-          />
-          <div className="text-xs text-gray-500 mt-1">
-            Formato mostrato: {dateToISO ? formatDateIT(dateToISO) : "—"}
-          </div>
+          <input type="date" className="w-full rounded-xl border p-3 bg-white" value={dateToISO} onChange={(e) => setDateToISO(e.target.value)} />
+          <div className="text-xs text-gray-500 mt-1">Formato mostrato: {dateToISO ? formatDateIT(dateToISO) : "—"}</div>
         </div>
       </div>
 
@@ -625,11 +782,7 @@ export default function InventoryHistoryClient() {
         <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-1 gap-3">
           <div>
             <label className="block text-sm font-medium mb-2">Categoria</label>
-            <select
-              className="w-full rounded-xl border p-3 bg-white"
-              value={categoryId}
-              onChange={(e) => setCategoryId(e.target.value)}
-            >
+            <select className="w-full rounded-xl border p-3 bg-white" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
               <option value="">— Tutte le categorie —</option>
               {categories.map((c) => (
                 <option key={c.id} value={c.id}>
@@ -637,9 +790,7 @@ export default function InventoryHistoryClient() {
                 </option>
               ))}
             </select>
-            <p className="text-xs text-gray-500 mt-1">
-              Nel Punto Vendita, nello storico filtriamo per data e (opzionale) categoria.
-            </p>
+            <p className="text-xs text-gray-500 mt-1">Nel Punto Vendita, nello storico filtriamo per data e (opzionale) categoria.</p>
           </div>
         </div>
       )}
@@ -649,11 +800,7 @@ export default function InventoryHistoryClient() {
         <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-3 gap-3">
           <div>
             <label className="block text-sm font-medium mb-2">Punto Vendita (opzionale)</label>
-            <select
-              className="w-full rounded-xl border p-3 bg-white"
-              value={pvId}
-              onChange={(e) => setPvId(e.target.value)}
-            >
+            <select className="w-full rounded-xl border p-3 bg-white" value={pvId} onChange={(e) => setPvId(e.target.value)}>
               <option value="">— Tutti i PV —</option>
               {pvs.map((pv) => (
                 <option key={pv.id} value={pv.id}>
@@ -665,11 +812,7 @@ export default function InventoryHistoryClient() {
 
           <div>
             <label className="block text-sm font-medium mb-2">Categoria</label>
-            <select
-              className="w-full rounded-xl border p-3 bg-white"
-              value={categoryId}
-              onChange={(e) => setCategoryId(e.target.value)}
-            >
+            <select className="w-full rounded-xl border p-3 bg-white" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
               <option value="">— Tutte le categorie —</option>
               {categories.map((c) => (
                 <option key={c.id} value={c.id}>
@@ -710,8 +853,10 @@ export default function InventoryHistoryClient() {
               <th className="text-left p-3">Categoria</th>
               <th className="text-left p-3">Sottocat</th>
               <th className="text-left p-3 w-44">Operatore</th>
-              <th className="text-right p-3 w-28">Righe</th>
-              <th className="text-right p-3 w-28">Pezzi</th>
+              <th className="text-right p-3 w-24">Righe</th>
+              <th className="text-right p-3 w-24">Pezzi</th>
+              <th className="text-right p-3 w-24">GR</th>
+              <th className="text-right p-3 w-32">Valore</th>
               <th className="text-left p-3 w-36">Creato da</th>
               <th className="text-left p-3 w-44">Azioni</th>
             </tr>
@@ -720,7 +865,7 @@ export default function InventoryHistoryClient() {
           <tbody>
             {loading && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={9}>
+                <td className="p-3 text-gray-500" colSpan={11}>
                   Caricamento...
                 </td>
               </tr>
@@ -728,7 +873,7 @@ export default function InventoryHistoryClient() {
 
             {!loading && rows.length === 0 && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={9}>
+                <td className="p-3 text-gray-500" colSpan={11}>
                   Nessun inventario trovato con questi filtri.
                 </td>
               </tr>
@@ -737,6 +882,9 @@ export default function InventoryHistoryClient() {
             {rows.map((r) => {
               const isSel = selected?.key === r.key;
               const menuOpen = actionsOpenKey === r.key;
+
+              const gr = Number(r.qty_gr_sum ?? 0) || 0;
+              const valore = Number(r.value_sum ?? 0) || 0;
 
               return (
                 <tr key={r.key} className={`border-t ${isSel ? "bg-yellow-50" : ""}`}>
@@ -750,14 +898,13 @@ export default function InventoryHistoryClient() {
                   <td className="p-3">{(r.operatore || "").trim() ? r.operatore : "—"}</td>
                   <td className="p-3 text-right">{r.lines_count}</td>
                   <td className="p-3 text-right font-semibold">{r.qty_sum}</td>
+                  <td className="p-3 text-right font-semibold">{gr > 0 ? gr : "—"}</td>
+                  <td className="p-3 text-right font-semibold">{valore > 0 ? formatEUR(valore) : "—"}</td>
                   <td className="p-3">{r.created_by_username ?? "—"}</td>
 
                   <td className="p-3">
                     <div className="inline-flex items-center gap-2 whitespace-nowrap">
-                      <button
-                        className="rounded-lg border px-3 py-1.5 hover:bg-gray-50 text-sm"
-                        onClick={async () => await loadDetail(r, me)}
-                      >
+                      <button className="rounded-lg border px-3 py-1.5 hover:bg-gray-50 text-sm" onClick={async () => await loadDetail(r, me)}>
                         Dettaglio
                       </button>
 
@@ -850,20 +997,24 @@ export default function InventoryHistoryClient() {
           <div className="flex items-start justify-between gap-3">
             <div>
               <div className="font-semibold">
-                Dettaglio inventario — {formatDateIT(selected.inventory_date)} — {selected.pv_code} —{" "}
-                {selected.category_name}
+                Dettaglio inventario — {formatDateIT(selected.inventory_date)} — {selected.pv_code} — {selected.category_name}
               </div>
 
               <div className="text-sm text-gray-600">
-              Operatore: <b>{(selected.operatore || "").trim() ? selected.operatore : "—"}</b> — Righe:{" "}
-              <b>{selected.lines_count}</b> — Articoli: <b>{detailArticoli}</b> — Pezzi: <b>{selected.qty_sum}</b>
-              {detailMlOpen > 0 ? (
-               <>
-               {" "}
-                — Ml: <b>{detailMlOpen}</b>
-               </>
-               ) : null}
-                {" "}
+                Operatore: <b>{(selected.operatore || "").trim() ? selected.operatore : "—"}</b> — Righe: <b>{selected.lines_count}</b> — Articoli:{" "}
+                <b>{detailArticoli}</b> — Pezzi: <b>{selected.qty_sum}</b>
+                {detailGrSum > 0 ? (
+                  <>
+                    {" "}
+                    — GR: <b>{detailGrSum}</b>
+                  </>
+                ) : null}
+                {detailMlOpen > 0 ? (
+                  <>
+                    {" "}
+                    — Ml: <b>{detailMlOpen}</b>
+                  </>
+                ) : null}{" "}
                 — Valore: <b>{hasAnyPriceInDetail ? formatEUR(detailValueEur) : "—"}</b>
               </div>
             </div>
@@ -904,6 +1055,7 @@ export default function InventoryHistoryClient() {
                     <th className="text-left p-3 w-40">Codice</th>
                     <th className="text-left p-3">Descrizione</th>
                     <th className="text-right p-3 w-24">PZ</th>
+                    <th className="text-right p-3 w-24">GR</th>
                     <th className="text-right p-3 w-28">ML</th>
                   </tr>
                 </thead>
@@ -913,6 +1065,7 @@ export default function InventoryHistoryClient() {
                     const isMl = Number.isFinite(volume) && volume > 0;
 
                     const pz = Number(x.qty) || 0;
+                    const gr = Number(x.qty_gr ?? 0) || 0;
                     const mlOpen = isMl ? Number(x.ml_open ?? 0) || 0 : null;
 
                     return (
@@ -920,6 +1073,7 @@ export default function InventoryHistoryClient() {
                         <td className="p-3 font-medium">{x.code}</td>
                         <td className="p-3">{x.description}</td>
                         <td className="p-3 text-right font-semibold">{pz}</td>
+                        <td className="p-3 text-right font-semibold">{gr > 0 ? gr : "—"}</td>
                         <td className="p-3 text-right font-semibold">{isMl ? mlOpen : "—"}</td>
                       </tr>
                     );
@@ -927,7 +1081,7 @@ export default function InventoryHistoryClient() {
 
                   {filteredDetail.length === 0 && (
                     <tr className="border-t">
-                      <td className="p-3 text-gray-500" colSpan={4}>
+                      <td className="p-3 text-gray-500" colSpan={5}>
                         Nessuna riga trovata.
                       </td>
                     </tr>
@@ -936,7 +1090,8 @@ export default function InventoryHistoryClient() {
               </table>
 
               <div className="px-3 py-2 text-xs text-gray-500 border-t">
-                Nota: per articoli a ML, <b>PZ</b> = bottiglie chiuse equivalenti, <b>ML</b> = residuo “aperto”.
+                Nota: per articoli a ML, <b>PZ</b> = bottiglie chiuse equivalenti, <b>ML</b> = residuo “aperto”. Per articoli a grammi,{" "}
+                <b>GR</b> = peso “aperto”.
               </div>
             </div>
           )}
@@ -1003,6 +1158,10 @@ export default function InventoryHistoryClient() {
     </div>
   );
 }
+
+
+
+
 
 
 

@@ -8,9 +8,7 @@ export const runtime = "nodejs";
 
 function isUuid(v: string | null) {
   if (!v) return false;
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    v.trim()
-  );
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v.trim());
 }
 
 function isIsoDate(v: string | null) {
@@ -22,12 +20,7 @@ const USER_TABLE_CANDIDATES = ["app_user", "app_users", "utenti", "users"];
 
 async function lookupPvIdFromUserTables(username: string): Promise<string | null> {
   for (const table of USER_TABLE_CANDIDATES) {
-    const { data, error } = await supabaseAdmin
-      .from(table)
-      .select("pv_id")
-      .eq("username", username)
-      .maybeSingle();
-
+    const { data, error } = await supabaseAdmin.from(table).select("pv_id").eq("username", username).maybeSingle();
     if (error) continue;
     const pv_id = (data as any)?.pv_id ?? null;
     if (pv_id && isUuid(pv_id)) return pv_id;
@@ -88,10 +81,7 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: "subcategory_id non valido" }, { status: 400 });
   }
   if (!isIsoDate(inventory_date)) {
-    return NextResponse.json(
-      { ok: false, error: "inventory_date non valida (YYYY-MM-DD)" },
-      { status: 400 }
-    );
+    return NextResponse.json({ ok: false, error: "inventory_date non valida (YYYY-MM-DD)" }, { status: 400 });
   }
 
   // PV enforcement
@@ -113,15 +103,11 @@ export async function GET(req: Request) {
     let q = supabaseAdmin
       .from("inventories")
       .select(
-        "id, item_id, qty, qty_ml, created_by_username, items:items(code, description, prezzo_vendita_eur, volume_ml_per_unit)"
+        "id, item_id, qty, qty_ml, qty_gr, created_by_username, items:items(code, description, prezzo_vendita_eur, volume_ml_per_unit, peso_kg, um)"
       )
       .eq("pv_id", effectivePvId)
       .eq("category_id", category_id)
       .eq("inventory_date", inventory_date);
-
-    // ✅ IMPORTANTISSIMO:
-    // il PV deve vedere TUTTI gli inventari del suo punto vendita,
-    // quindi NON filtriamo per created_by_username.
 
     if (subcategory_id) q = q.eq("subcategory_id", subcategory_id);
     else q = q.is("subcategory_id", null);
@@ -139,13 +125,20 @@ export async function GET(req: Request) {
       .map((r: any) => {
         const qty = clampInt(r?.qty ?? 0);
         const qty_ml = clampInt(r?.qty_ml ?? 0);
+        const qty_gr = clampInt(r?.qty_gr ?? 0);
 
         const volume = Number(r?.items?.volume_ml_per_unit ?? 0);
-        const volume_ml_per_unit =
-          Number.isFinite(volume) && volume > 0 ? Math.trunc(volume) : null;
+        const volume_ml_per_unit = Number.isFinite(volume) && volume > 0 ? Math.trunc(volume) : null;
+
+        const um = String(r?.items?.um ?? "").toLowerCase();
+        const peso_kg = Number(r?.items?.peso_kg ?? 0);
+        const peso_kg_norm = Number.isFinite(peso_kg) && peso_kg > 0 ? peso_kg : null;
+
+        const ml_mode: "mixed" | "fixed" | null =
+          volume_ml_per_unit && volume_ml_per_unit > 0 ? (qty === 0 && qty_ml > 0 ? "mixed" : "fixed") : null;
 
         let ml_open: number | null = null;
-        if (volume_ml_per_unit && volume_ml_per_unit > 0) {
+        if (ml_mode === "fixed" && volume_ml_per_unit && volume_ml_per_unit > 0) {
           const calc = qty_ml - qty * volume_ml_per_unit;
           ml_open = Math.max(0, Math.trunc(calc));
         }
@@ -156,24 +149,36 @@ export async function GET(req: Request) {
           code: r?.items?.code ?? "",
           description: r?.items?.description ?? "",
           qty,
+          qty_gr,
           qty_ml,
           volume_ml_per_unit,
           ml_open,
+          ml_mode,
           prezzo_vendita_eur: r?.items?.prezzo_vendita_eur ?? null,
+          um,
+          peso_kg: peso_kg_norm,
         };
       })
-      .filter((x) => (Number.isFinite(x.qty) && x.qty > 0) || (Number.isFinite(x.qty_ml) && x.qty_ml > 0))
+      .filter(
+        (x) =>
+          (Number.isFinite(x.qty) && x.qty > 0) ||
+          (Number.isFinite(x.qty_ml) && x.qty_ml > 0) ||
+          (Number.isFinite(x.qty_gr) && x.qty_gr > 0)
+      )
       .sort((a, b) => (a.code || "").localeCompare(b.code || ""));
 
     return NextResponse.json({ ok: true, rows: out });
   } catch (e: any) {
     console.error("[inventories/rows] UNHANDLED ERROR:", e);
-    return NextResponse.json(
-      { ok: false, error: e?.message || "TypeError: fetch failed" },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: e?.message || "TypeError: fetch failed" }, { status: 500 });
   }
 }
+
+
+
+
+
+
 
 
 
