@@ -94,7 +94,7 @@ export async function POST(req: Request) {
   const categoryName = catRes.data?.name ?? "";
   const subcategoryName = subcategory_id ? (subRes.data?.name ?? "") : "—";
 
-  // 3) operatore dalla testata (evita maybeSingle che esplode se hai duplicati)
+  // 3) operatore dalla testata
   let hq = supabaseAdmin
     .from("inventories_headers")
     .select("operatore")
@@ -110,12 +110,10 @@ export async function POST(req: Request) {
 
   const operatore = ((headers?.[0] as any)?.operatore || "").toString().trim() || "—";
 
-  // 4) righe inventario + join items (LEFT JOIN, così NON perdi righe se item mancante)
-  // ✅ aggiungo volume_ml_per_unit per litri
+  // 4) righe inventario + join items (LEFT JOIN)
   let q = supabaseAdmin
-  .from("inventories")
-  .select("item_id, qty, qty_ml, items:items!left(code, description, prezzo_vendita_eur, volume_ml_per_unit)")
-
+    .from("inventories")
+    .select("item_id, qty, qty_ml, items:items!left(code, description, prezzo_vendita_eur, volume_ml_per_unit)")
     .eq("pv_id", pv_id)
     .eq("category_id", category_id)
     .eq("inventory_date", inventory_date);
@@ -127,37 +125,23 @@ export async function POST(req: Request) {
   if (invErr) return NextResponse.json({ ok: false, error: invErr.message }, { status: 500 });
 
   const inventoryLines = ((invRows || []) as any[]).map((r: any) => ({
-  item_id: String(r?.item_id ?? ""),
-  code: r?.items?.code ?? "",
-  description: r?.items?.description ?? "",
-  qty: Number(r?.qty ?? 0),
-  qty_ml: Number(r?.qty_ml ?? 0), // ✅ fondamentale
-  prezzo_vendita_eur: r?.items?.prezzo_vendita_eur ?? null,
-  volume_ml_per_unit: r?.items?.volume_ml_per_unit ?? null,
-}));
-
+    item_id: String(r?.item_id ?? ""),
+    code: r?.items?.code ?? "",
+    description: r?.items?.description ?? "",
+    qty: Number(r?.qty ?? 0),
+    qty_ml: Number(r?.qty_ml ?? 0),
+    prezzo_vendita_eur: r?.items?.prezzo_vendita_eur ?? null,
+    volume_ml_per_unit: r?.items?.volume_ml_per_unit ?? null,
+  }));
 
   // 5) confronto
-  const compareLines = buildCompareLines(inventoryLines, gestionaleMap);
+  // ✅ QUI: solo codici presenti in inventario (niente righe “solo gestionale” tipo DIE2)
+  const isTabacchi = categoryName.toLowerCase().includes("tabacc");
 
-  // ✅ DEBUG (server)
-  try {
-    const missingInGestionale = compareLines.filter(
-      (l) => (l as any)?.foundInInventory && !(l as any)?.foundInGestionale
-    ).length;
-    const onlyGestionale = compareLines.filter(
-      (l) => !(l as any)?.foundInInventory && (l as any)?.foundInGestionale
-    ).length;
+const compareLines = isTabacchi
+  ? buildCompareLines(inventoryLines, gestionaleMap) // confronto completo
+  : buildCompareLines(inventoryLines, gestionaleMap, { onlyInventory: true }); // solo inventariati
 
-    const withMl = compareLines.filter((l: any) => Number(l?.volumeMlPerUnit ?? 0) > 0).length;
-
-    console.log("[inventories/compare] PV:", pvRes.data?.code ?? pv_id, "date:", inventory_date);
-    console.log("[inventories/compare] inventoryLines:", inventoryLines.length);
-    console.log("[inventories/compare] gestionaleCodes:", gestionaleMap.size);
-    console.log("[inventories/compare] compareLines:", compareLines.length);
-    console.log("[inventories/compare] missingInGestionale:", missingInGestionale, "| onlyGestionale:", onlyGestionale);
-    console.log("[inventories/compare] linesWithVolumeMlPerUnit:", withMl);
-  } catch {}
 
   const xlsx = await buildInventoryCompareXlsx(
     { inventoryDate: inventory_date, operatore, pvLabel, categoryName, subcategoryName },
@@ -176,6 +160,9 @@ export async function POST(req: Request) {
     },
   });
 }
+
+
+
 
 
 

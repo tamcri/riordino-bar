@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 
 type Pv = { id: string; code: string; name: string; is_active?: boolean };
 type Category = { id: string; name: string; slug?: string; is_active?: boolean };
@@ -73,9 +74,12 @@ function safeIntFromStr(v: string) {
   return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
 }
 
+// ✅ GR: niente limite “9999” (resto nel range int32 per sicurezza)
+const MAX_GR = 1_000_000_000; // 1 miliardo di grammi = 1.000.000 kg
+
 function safeGrFromStr(v: string) {
   const n = safeIntFromStr(v);
-  return Math.min(9999, n);
+  return Math.min(MAX_GR, n);
 }
 
 type DraftAdmin = {
@@ -111,6 +115,8 @@ type DraftAdmin = {
 };
 
 export default function InventoryClient() {
+  const searchParams = useSearchParams();
+
   const [pvs, setPvs] = useState<Pv[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [subcategories, setSubcategories] = useState<Subcategory[]>([]);
@@ -170,6 +176,41 @@ export default function InventoryClient() {
 
   // ✅ guard prefill
   const lastPrefillKeyRef = useRef<string>("");
+
+  // ✅ init da querystring (riapri da storico)
+  const didInitFromUrlRef = useRef(false);
+  const reopenModeRef = useRef(false);
+
+  // ✅ valori iniziali da URL (per evitare override dei default al primo load)
+  const initFromUrlValuesRef = useRef<{ pvId?: string; categoryId?: string; subcategoryId?: string } | null>(null);
+
+useEffect(() => {
+  if (didInitFromUrlRef.current) return;
+  didInitFromUrlRef.current = true;
+
+  const pv = (searchParams?.get("pv_id") || "").trim();
+  const cat = (searchParams?.get("category_id") || "").trim();
+  const sub = (searchParams?.get("subcategory_id") || "").trim();
+  const date = (searchParams?.get("inventory_date") || "").trim();
+  const op = (searchParams?.get("operatore") || "").trim();
+
+  reopenModeRef.current = !!(pv && cat && date);
+
+  // IMPORTANTISSIMO:
+  // gli effect di load (PV/Categorie) partono nello stesso "tick" e vedono ancora gli state vuoti.
+  // quindi memorizziamo i valori iniziali qui, così non vengono sovrascritti dai default.
+  initFromUrlValuesRef.current = {
+    pvId: pv || undefined,
+    categoryId: cat || undefined,
+    subcategoryId: sub || undefined,
+  };
+
+  if (pv) setPvId(pv);
+  if (cat) setCategoryId(cat);
+  if (sub) setSubcategoryId(sub);
+  if (date && isIsoDate(date)) setInventoryDate(date);
+  if (op) setOperatore(op);
+}, [searchParams]);
 
   const canSave = useMemo(
     () => !!operatore.trim() && !!pvId && !!categoryId && items.length > 0,
@@ -554,7 +595,7 @@ export default function InventoryClient() {
 
   function setGr(itemId: string, v: string) {
     const cleaned = onlyDigits(v);
-    const capped = String(Math.min(9999, Number(cleaned || "0") || 0));
+    const capped = String(Math.min(MAX_GR, Number(cleaned || "0") || 0));
     setQtyGrMap((prev) => ({ ...prev, [itemId]: cleaned ? capped : "" }));
     setHighlightScannedId(itemId);
     requestAnimationFrame(() => syncScannedPresence(itemId));
@@ -606,7 +647,7 @@ export default function InventoryClient() {
 
       setQtyGrMap((prev) => {
         const current = safeGrFromStr(prev[itemId] ?? "");
-        const next = Math.min(9999, Math.max(0, current + deltaGr));
+        const next = Math.min(MAX_GR, Math.max(0, current + deltaGr));
         return { ...prev, [itemId]: next > 0 ? String(next) : "" };
       });
 
@@ -761,7 +802,8 @@ export default function InventoryClient() {
     const json = await res.json().catch(() => null);
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore caricamento PV");
     setPvs(json.rows || []);
-    if (!pvId && (json.rows?.[0]?.id ?? "")) setPvId(json.rows[0].id);
+    const initPv = initFromUrlValuesRef.current?.pvId;
+    if (!initPv && !pvId && (json.rows?.[0]?.id ?? "")) setPvId(json.rows[0].id);
   }
 
   async function loadCategories() {
@@ -769,12 +811,12 @@ export default function InventoryClient() {
     const json = await res.json().catch(() => null);
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore caricamento categorie");
     setCategories(json.rows || []);
-    if (!categoryId && (json.rows?.[0]?.id ?? "")) setCategoryId(json.rows[0].id);
+    const initCat = initFromUrlValuesRef.current?.categoryId;
+    if (!initCat && !categoryId && (json.rows?.[0]?.id ?? "")) setCategoryId(json.rows[0].id);
   }
 
   async function loadSubcategories(nextCategoryId: string) {
     setSubcategories([]);
-    setSubcategoryId("");
     if (!nextCategoryId) return;
 
     const res = await fetch(`/api/subcategories/list?category_id=${encodeURIComponent(nextCategoryId)}`, { cache: "no-store" });
@@ -844,10 +886,10 @@ export default function InventoryClient() {
     setMlModeMap(mode);
   }
 
-  async function prefillFromServer(currentItems: Item[]) {
-    if (!pvId || !categoryId || !inventoryDate) return;
-    if (!isIsoDate(inventoryDate)) return;
-    if (!currentItems?.length) return;
+  async function prefillFromServer(currentItems: Item[]): Promise<number> {
+    if (!pvId || !categoryId || !inventoryDate) return 0;
+    if (!isIsoDate(inventoryDate)) return 0;
+    if (!currentItems?.length) return 0;
 
     setPrefillLoading(true);
 
@@ -861,10 +903,10 @@ export default function InventoryClient() {
       const res = await fetch(`/api/inventories/rows?${params.toString()}`, { cache: "no-store" });
       const json = await res.json().catch(() => null);
 
-      if (!res.ok || !json?.ok) return;
+      if (!res.ok || !json?.ok) return 0;
 
       const apiRows = (json.rows || []) as InventoryRowApi[];
-      if (!Array.isArray(apiRows) || apiRows.length === 0) return;
+      if (!Array.isArray(apiRows) || apiRows.length === 0) return 0;
 
       const itemSet = new Set(currentItems.map((x) => x.id));
       const mlItemSet = new Set(currentItems.filter(isMlItem).map((x) => x.id));
@@ -886,7 +928,7 @@ export default function InventoryClient() {
         for (const r of apiRows) {
           if (!r?.item_id || !itemSet.has(r.item_id)) continue;
           const g = Number((r as any).qty_gr ?? 0) || 0;
-          const gg = Math.min(9999, Math.max(0, Math.trunc(g)));
+          const gg = Math.min(MAX_GR, Math.max(0, Math.trunc(g)));
           next[r.item_id] = gg > 0 ? String(gg) : "";
         }
         return next;
@@ -934,6 +976,8 @@ export default function InventoryClient() {
         setShowAllScanned(false);
         setHighlightScannedId(null);
       }
+      return apiRows.length;
+
     } finally {
       setPrefillLoading(false);
     }
@@ -960,7 +1004,8 @@ export default function InventoryClient() {
       setError(null);
       try {
         await loadSubcategories(categoryId);
-        await loadItems(categoryId, "");
+        // se arrivo da "Riapri (modifica)" potrei avere già una sottocategoria in URL
+        await loadItems(categoryId, subcategoryId || initFromUrlValuesRef.current?.subcategoryId || "");
       } catch (e: any) {
         setError(e?.message || "Errore");
       }
@@ -994,9 +1039,11 @@ export default function InventoryClient() {
     lastPrefillKeyRef.current = key;
 
     (async () => {
-      await prefillFromServer(items);
+      const applied = await prefillFromServer(items);
       ensureMlDefaults(items);
-      loadDraftIfAny(items);
+      if (!(reopenModeRef.current && applied > 0)) {
+        loadDraftIfAny(items);
+      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pvId, categoryId, subcategoryId, inventoryDate, items.length]);
@@ -1170,7 +1217,11 @@ export default function InventoryClient() {
 
         <div>
           <label className="block text-sm font-medium mb-2">Categoria</label>
-          <select className="w-full rounded-xl border p-3 bg-white" value={categoryId} onChange={(e) => setCategoryId(e.target.value)} disabled={loading}>
+          <select className="w-full rounded-xl border p-3 bg-white" value={categoryId} onChange={(e) => {
+                  const next = e.target.value;
+                  setCategoryId(next);
+                  setSubcategoryId("");
+                }} disabled={loading}>
             {categories.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.name}
@@ -1384,7 +1435,7 @@ export default function InventoryClient() {
                             </div>
                             <div>
                               <div className="text-[11px] text-gray-500 mb-1">GR</div>
-                              <input className="w-full rounded-xl border p-2" inputMode="numeric" placeholder="0–9999" value={qtyGrMap[it.id] ?? ""} onChange={(e) => setGr(it.id, e.target.value)} />
+                              <input className="w-full rounded-xl border p-2" inputMode="numeric" placeholder="0+" value={qtyGrMap[it.id] ?? ""} onChange={(e) => setGr(it.id, e.target.value)} />
                             </div>
                             <div>
                               <div className="text-[11px] text-gray-500 mb-1">Totale KG</div>
@@ -1481,7 +1532,7 @@ export default function InventoryClient() {
                               <input
                                 className="w-full rounded-xl border p-2 text-right"
                                 inputMode="numeric"
-                                placeholder="0–9999"
+                                placeholder="0+"
                                 value={addGrMap[it.id] ?? ""}
                                 onChange={(e) => setAddGrMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
                                 onKeyDown={(e) => {
@@ -1684,7 +1735,7 @@ export default function InventoryClient() {
                           <input
                             className="w-full rounded-xl border p-2"
                             inputMode="numeric"
-                            placeholder="0–9999"
+                            placeholder="0+"
                             value={qtyGrMap[it.id] ?? ""}
                             onChange={(e) => setGr(it.id, e.target.value)}
                             onKeyDown={(e) => {

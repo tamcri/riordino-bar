@@ -69,16 +69,29 @@ function normCode(v: unknown): string {
   return firstToken.trim().toUpperCase().replace(/\s+/g, "");
 }
 
+/**
+ * ✅ Codice articolo “valido”:
+ * - NON richiede numeri (esistono codici solo lettere tipo CAFFGRANI)
+ * - filtra comunque spazzatura/righe titolo
+ */
 function looksLikeItemCode(code: string): boolean {
   if (!code) return false;
-  // ✅ evita codici “spazzatura” tipo "6"
+
+  // evita codici troppo corti (spazzatura tipo "A" o "6")
   if (code.length < 2) return false;
 
+  // evita stringhe enormi
   if (code.length > 30) return false;
+
+  // evita pattern palesemente non-codice
   if (code.includes(":")) return false;
   if (/^TOTALE/i.test(code)) return false;
-  if (!/\d/.test(code)) return false;
+
+  // deve essere alfanumerico puro (dopo normCode)
   if (!/^[A-Z0-9]+$/.test(code)) return false;
+
+  // ✅ NOTA: prima qui c’era il vincolo “deve contenere almeno una cifra”.
+  // L’abbiamo rimosso perché codici reali possono essere SOLO lettere (es. CAFFGRANI).
   return true;
 }
 
@@ -126,19 +139,16 @@ function scoreQtyHeader(h: string): number {
   const s0 = normHeader(h);
   if (!s0) return 0;
 
-  const s = s0.replace(/\s+/g, ""); // senza spazi per match robusti
+  const s = s0.replace(/\s+/g, "");
 
-  // target tuo: PRIORITÀ ASSOLUTA
   if (s === "giacenzaqta1") return 200;
 
-  // varianti molto comuni
   if (s === "giacenzaqta01") return 190;
   if (s === "giacenzaqta") return 120;
   if (s === "giacenza") return 80;
 
   if (s === "qta1" || s === "quantita1") return 70;
 
-  // fallback “contiene”
   if (s.includes("giacenza") && s.includes("qta") && s.includes("1")) return 110;
   if (s.includes("giacenza") && s.includes("qta")) return 95;
   if (s.includes("giacenza")) return 60;
@@ -156,7 +166,6 @@ function compositeHeader(ws: ExcelJS.Worksheet, rowA: number, rowB: number, col:
 
 function rowMaxCol(ws: ExcelJS.Worksheet, rowIdx: number): number {
   const r = ws.getRow(rowIdx);
-  // cellCount = ultimo indice “usato” (più affidabile con celle unite)
   return Math.max(1, r?.cellCount || 1);
 }
 
@@ -186,7 +195,6 @@ function findHeaderAt(ws: ExcelJS.Worksheet, r: number): HeaderHit | null {
 
   const maxC = rowMaxCol(ws, r);
 
-  // 1) header su singola riga: scegli MIGLIORI per score
   let bestCode: { col: number; score: number } | null = null;
   let bestQty: { col: number; score: number } | null = null;
 
@@ -204,7 +212,6 @@ function findHeaderAt(ws: ExcelJS.Worksheet, r: number): HeaderHit | null {
     return { codeCol: bestCode.col, qtyCol: bestQty.col, headerRow: r, headerMode: "single" };
   }
 
-  // 2) header su due righe
   if (r < ws.rowCount) {
     const maxC2 = Math.max(maxC, rowMaxCol(ws, r + 1));
     bestCode = null;
@@ -282,7 +289,6 @@ export async function parseGestionaleXlsx(buffer: ArrayBuffer): Promise<Map<stri
       if (qtyNum != null) {
         const code = normCode(cellText(codeRaw));
         if (looksLikeItemCode(code)) {
-          // ✅ SOMMA: se lo stesso codice compare più volte nel gestionale
           const prev = out.get(code) ?? 0;
           out.set(code, prev + qtyNum);
         }
@@ -307,7 +313,6 @@ export async function parseGestionaleXlsx(buffer: ArrayBuffer): Promise<Map<stri
 }
 
 function applyRedRow(ws: ExcelJS.Worksheet, rowNumber: number, colCount: number) {
-  // rosso “chiaro” leggibile
   const fill = { type: "pattern" as const, pattern: "solid" as const, fgColor: { argb: "FFFFC7CE" } };
   for (let c = 1; c <= colCount; c++) {
     ws.getCell(rowNumber, c).fill = fill;
@@ -355,18 +360,14 @@ function mlToLitri(ml: number) {
   return ml / 1000;
 }
 
-export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines: CompareLine[]): Promise<Buffer> {
+export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines: CompareLine[]): Promise<ArrayBuffer> {
   const wb = new ExcelJS.Workbook();
 
-  // ==========================
-  // FOGLIO UNICO: TUTTO INSIEME
-  // ==========================
   const ws = wb.addWorksheet("CONFRONTO");
   writeMeta(ws, meta);
 
   const headerRow = 9;
 
-  // ✅ colonne “manageriali”
   ws.getRow(headerRow).values = [
     "Codice",
     "Descrizione",
@@ -413,10 +414,9 @@ export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines:
   let totLitGes = 0;
   let totLitDiff = 0;
 
-  // ✅ NEW: includo anche righe “solo gestionale” (inv=0, ges>0)
+  // ✅ qui rimangono solo righe con quantità (inv o ges)
   const mergedView = (lines || []).filter((l) => Number(l.qtyInventory || 0) > 0 || Number(l.qtyGestionale || 0) > 0);
 
-  // ✅ ordine alfabetico per descrizione (A→Z), tie-break su codice
   mergedView.sort((a, b) => {
     const da = String(a.description || "").trim();
     const db = String(b.description || "").trim();
@@ -427,7 +427,6 @@ export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines:
     return String(a.code || "").localeCompare(String(b.code || ""), "it", { sensitivity: "base" });
   });
 
-  // ✅ totali SOLO negativi (diff < 0) richiesti
   let totNegPieces = 0;
   let totNegValue = 0;
   let totNegLitri = 0;
@@ -445,8 +444,6 @@ export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines:
 
     const ml = line.volumeMlPerUnit == null ? null : Number(line.volumeMlPerUnit);
 
-    // ✅ Se ml/unità è presente, qi/qg/diff sono ML TOTALI ⇒ litri = mlTotali/1000
-    // ✅ Se ml/unità NON è presente, litri restano vuoti
     const litInv = ml == null ? null : mlToLitri(qi);
     const litGes = ml == null ? null : mlToLitri(qg);
     const litDiff = ml == null ? null : mlToLitri(diff);
@@ -475,7 +472,6 @@ export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines:
       note,
     ];
 
-    // formati
     ws.getCell(rr, 3).numFmt = "0";
     ws.getCell(rr, 4).numFmt = "0";
     ws.getCell(rr, 5).numFmt = "0";
@@ -490,7 +486,6 @@ export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines:
     ws.getCell(rr, 12).numFmt = "0.00";
     ws.getCell(rr, 13).numFmt = "0.00";
 
-    // ✅ evidenzio “mancante” da uno dei due lati
     if (!line.foundInGestionale || !line.foundInInventory) {
       applyRedRow(ws, rr, 14);
     }
@@ -515,7 +510,6 @@ export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines:
     rr++;
   }
 
-  // ====== TOTALI ======
   const totalRow = rr + 1;
   ws.getCell(totalRow, 2).value = "TOTALI";
   ws.getCell(totalRow, 3).value = totInv;
@@ -544,7 +538,6 @@ export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines:
   ws.getCell(totalRow, 12).numFmt = "0.00";
   ws.getCell(totalRow, 13).numFmt = "0.00";
 
-  // ====== TOTALI NEGATIVI (mancanti in inventario) ======
   const negRow1 = totalRow + 2;
   ws.getCell(negRow1, 2).value = "Totale pezzi mancanti (Inv < Ges)";
   ws.getCell(negRow1, 5).value = totNegPieces;
@@ -563,11 +556,11 @@ export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines:
   ws.getRow(negRow3).font = { bold: true };
   ws.getCell(negRow3, 13).numFmt = "0.00";
 
-  // tabella bordata fino ai totali (righe tabella)
   styleTable(ws, headerRow, totalRow, 14);
 
   const outBuf = await wb.xlsx.writeBuffer();
-  return Buffer.from(outBuf as any);
+  return outBuf as ArrayBuffer;
+
 }
 
 /**
@@ -587,8 +580,10 @@ export function buildCompareLines(
     prezzo_vendita_eur?: number | null;
     volume_ml_per_unit?: number | null;
   }[],
-  gestionaleMap: Map<string, number>
+  gestionaleMap: Map<string, number>,
+  opts?: { onlyInventory?: boolean }
 ): CompareLine[] {
+
   const invMap = new Map<
     string,
     {
@@ -617,11 +612,16 @@ export function buildCompareLines(
   }
 
   const codes = new Set<string>();
-  for (const k of invMap.keys()) codes.add(k);
+for (const k of invMap.keys()) codes.add(k);
+
+const onlyInventory = !!opts?.onlyInventory;
+if (!onlyInventory) {
   for (const k of gestionaleMap.keys()) {
     const kk = normCode(k);
     if (looksLikeItemCode(kk)) codes.add(kk);
   }
+}
+
 
   const out: CompareLine[] = [];
   for (const code of codes) {
@@ -632,15 +632,11 @@ export function buildCompareLines(
 
     const isMlItem = inv?.mlPerUnit != null && Number.isFinite(inv.mlPerUnit) && inv.mlPerUnit > 0;
 
-    // ✅ inventario:
     const qtyInv = isMlItem ? Number(inv?.qtyMl ?? 0) : Number(inv?.qtyPieces ?? 0);
 
-    // ✅ gestionale:
-    // - se è item ML, assumiamo che il gestionale dia ML totali (coerente con la tua richiesta)
-    // - altrimenti pezzi
     const qtyGes = Number(gestionaleMap.get(code) ?? 0);
 
-    const diff = qtyInv - qtyGes; // ✅ inventario - gestionale
+    const diff = qtyInv - qtyGes;
 
     out.push({
       code,
@@ -658,6 +654,11 @@ export function buildCompareLines(
   out.sort((a, b) => String(a.code || "").localeCompare(String(b.code || "")));
   return out;
 }
+
+
+
+
+
 
 
 

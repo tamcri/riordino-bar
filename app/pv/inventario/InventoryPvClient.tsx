@@ -91,10 +91,25 @@ export default function InventoryPvClient() {
   const [qtyMap, setQtyMap] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    setInventoryDate(todayISO());
+    if (typeof window === "undefined") return;
+
+    const p = new URLSearchParams(window.location.search);
+
+    const qpCat = (p.get("category_id") || "").trim();
+    const qpSub = (p.get("subcategory_id") || "").trim();
+    const qpDate = (p.get("inventory_date") || "").trim();
+    const qpReopen = (p.get("reopen") || "").trim();
+
+    if (qpCat) setCategoryId(qpCat);
+    if (p.has("subcategory_id")) setSubcategoryId(qpSub);
+    if (qpDate && /^\d{4}-\d{2}-\d{2}$/.test(qpDate)) setInventoryDate(qpDate);
+
+    if (qpReopen === "1") {
+      setMsg("Inventario riaperto: quantità precompilate. Ora puoi aggiungere prodotti mancanti e salvare.");
+    }
   }, []);
 
-  // ✅ operatore
+// ✅ operatore
   const [operatore, setOperatore] = useState("");
 
   // ✅ filtro ricerca (client-side) + scan

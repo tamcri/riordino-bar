@@ -167,6 +167,12 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   // ✅ NEW: ML per pezzo (solo liquidi)
   const [editVolumeMl, setEditVolumeMl] = useState<string>("");
 
+
+  // ✅ NEW: categoria/sottocategoria modificabili nel modal
+  const [editCategoryId, setEditCategoryId] = useState<string>("");
+  const [editSubcategoryId, setEditSubcategoryId] = useState<string>("");
+  const [editSubcategories, setEditSubcategories] = useState<Subcategory[]>([]);
+
   const [savingEdit, setSavingEdit] = useState(false);
 
   // ✅ MULTI-BARCODE (item_barcodes)
@@ -256,6 +262,20 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     });
     const json = await res.json().catch(() => null);
     if (res.ok && json?.ok && Array.isArray(json?.rows)) setSubcategories(json.rows);
+  }
+
+
+  // ✅ Per il modal: sottocategorie legate alla categoria selezionata nel modal
+  async function loadEditSubcategories(catId: string) {
+    if (!catId) {
+      setEditSubcategories([]);
+      return;
+    }
+    const res = await fetch(`/api/subcategories/list?category_id=${encodeURIComponent(catId)}`, {
+      cache: "no-store",
+    });
+    const json = await res.json().catch(() => null);
+    if (res.ok && json?.ok && Array.isArray(json?.rows)) setEditSubcategories(json.rows);
   }
 
   async function loadItems() {
@@ -724,6 +744,13 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     // ✅ NEW
     setEditVolumeMl(item.volume_ml_per_unit == null ? "" : String(item.volume_ml_per_unit));
 
+    // ✅ NEW: categoria/sottocategoria nel modal
+    setEditCategoryId(item.category_id == null ? "" : String(item.category_id));
+    setEditSubcategoryId(item.subcategory_id == null ? "" : String(item.subcategory_id));
+    setEditSubcategories([]);
+    // Carico le sottocategorie della categoria dell'articolo per mostrare subito la selezione
+    if (item.category_id) loadEditSubcategories(String(item.category_id));
+
     setEditBarcodes([]);
     setNewExtraBarcode("");
     setBarcodesError(null);
@@ -795,6 +822,10 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
 
         // ✅ NEW: ml per pezzo (solo liquidi). Vuoto => null
         volume_ml_per_unit: editVolumeMl.trim() === "" ? null : normalizeNullableInt(editVolumeMl),
+
+        // ✅ NEW: categoria/sottocategoria
+        category_id: editCategoryId.trim() === "" ? null : editCategoryId.trim(),
+        subcategory_id: editSubcategoryId.trim() === "" ? null : editSubcategoryId.trim(),
       };
 
       const res = await fetch("/api/items/update", {
@@ -903,6 +934,46 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
                   onChange={(e) => setEditUm(e.target.value)}
                 />
                 <div className="mt-1 text-xs text-gray-500">Lascia vuoto per NULL.</div>
+              </div>
+
+              {/* ✅ NEW: Categoria / Sottocategoria */}
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium mb-2">Categoria</label>
+                <select
+                  className="w-full rounded-xl border p-3 bg-white"
+                  value={editCategoryId}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setEditCategoryId(next);
+                    setEditSubcategoryId("");
+                    setEditSubcategories([]);
+                    if (next) loadEditSubcategories(next);
+                  }}
+                >
+                  <option value="">— Nessuna —</option>
+                  {categories.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium mb-2">Sottocategoria</label>
+                <select
+                  className="w-full rounded-xl border p-3 bg-white"
+                  value={editSubcategoryId}
+                  onChange={(e) => setEditSubcategoryId(e.target.value)}
+                  disabled={!editCategoryId}
+                >
+                  <option value="">— Nessuna —</option>
+                  {editSubcategories.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
               </div>
 
               <div className="md:col-span-4">

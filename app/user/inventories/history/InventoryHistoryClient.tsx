@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useRouter } from "next/navigation";
 
 type Pv = { id: string; code: string; name: string; is_active?: boolean };
 type Category = { id: string; name: string; slug?: string; is_active?: boolean };
@@ -117,6 +118,8 @@ async function fetchJsonSafe<T = any>(
 type MenuPos = { top: number; left: number; width: number };
 
 export default function InventoryHistoryClient() {
+  const router = useRouter();
+
   const [me, setMe] = useState<MeState>({
     role: null,
     username: null,
@@ -943,8 +946,42 @@ export default function InventoryHistoryClient() {
               const g = rows.find((x) => x.key === actionsOpenKey);
               if (!g) return null;
 
+              const canReopenBase = me.role === "admin" || me.role === "amministrativo";
+              const canReopenOwner = !g.created_by_username || (me.username && g.created_by_username === me.username);
+              const canReopen = canReopenBase && canReopenOwner;
+
               return (
                 <div className="flex flex-col">
+                  {(me.role === "admin" || me.role === "amministrativo") && (
+                    <button
+                      className={`text-left rounded-lg px-3 py-2 hover:bg-gray-50 text-sm ${!canReopen ? "opacity-50" : ""}`}
+                      onClick={() => {
+                        setActionsOpenKey(null);
+                        setMenuPos(null);
+
+                        if (!canReopen) {
+                          alert(
+                            "Non puoi modificare questo inventario: è stato creato da un altro utente (vincolo attivo lato server)."
+                          );
+                          return;
+                        }
+
+                        const p = new URLSearchParams();
+                        p.set("pv_id", g.pv_id);
+                        p.set("category_id", g.category_id);
+                        if (g.subcategory_id) p.set("subcategory_id", g.subcategory_id);
+                        p.set("inventory_date", g.inventory_date);
+                        if ((g.operatore || "").trim()) p.set("operatore", String(g.operatore).trim());
+
+                        router.push(`/user/inventories?${p.toString()}`);
+                      }}
+                      role="menuitem"
+                      title={!canReopen ? "Inventario creato da altro utente" : "Riapri l'inventario per modificare"}
+                    >
+                      Riapri (modifica)
+                    </button>
+                  )}
+
                   <button
                     className="text-left rounded-lg px-3 py-2 hover:bg-gray-50 text-sm"
                     onClick={() => {

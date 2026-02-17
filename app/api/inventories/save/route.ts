@@ -45,9 +45,12 @@ function clampInt(n: any) {
   return Math.max(0, Math.trunc(x));
 }
 
-// ✅ per GR: 0..9999 (come da requisito)
+// ✅ GR: niente limite “9999” (resto nel range int32 per sicurezza)
+// int32 max = 2_147_483_647, quindi qui mettiamo un cap molto alto
+// per prevenire input fuori scala/bug UI, ma di fatto non è più un limite pratico.
+const MAX_GR = 1_000_000_000; // 1 miliardo di grammi = 1.000.000 kg
 function clampGr(n: any) {
-  return Math.min(9999, clampInt(n));
+  return Math.min(MAX_GR, clampInt(n));
 }
 
 function normMlMode(v: any): MlMode | null {

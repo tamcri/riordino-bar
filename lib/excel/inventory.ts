@@ -12,7 +12,9 @@ export type InventoryExcelMeta = {
 export type InventoryExcelLine = {
   code: string;
   description: string;
-  qty: number;
+  qty: number; // pezzi
+  qty_gr?: number; // grammi
+  qty_ml?: number; // ml
 };
 
 function isoToIt(iso: string) {
@@ -27,13 +29,12 @@ export async function buildInventoryXlsx(meta: InventoryExcelMeta, lines: Invent
   const ws = wb.addWorksheet("INVENTARIO");
 
   // Titolo
-  ws.mergeCells("A1:C1");
+  ws.mergeCells("A1:E1");
   ws.getCell("A1").value = "INVENTARIO";
   ws.getCell("A1").font = { bold: true, size: 14 };
   ws.getCell("A1").alignment = { vertical: "middle", horizontal: "left" };
 
   // Meta (header richiesto)
-  // data, operatore, PV, categoria, sottocategoria
   ws.getCell("A3").value = "Data";
   ws.getCell("B3").value = isoToIt(meta.inventoryDate);
 
@@ -55,35 +56,52 @@ export async function buildInventoryXlsx(meta: InventoryExcelMeta, lines: Invent
 
   // Tabella
   const headerRow = 9;
-  ws.getRow(headerRow).values = ["Codice", "Descrizione", "Quantità"];
+  ws.getRow(headerRow).values = ["Codice", "Descrizione", "PZ", "GR", "ML"];
   ws.getRow(headerRow).font = { bold: true };
 
   ws.getColumn(1).width = 18;
   ws.getColumn(2).width = 60;
-  ws.getColumn(3).width = 12;
+  ws.getColumn(3).width = 10;
+  ws.getColumn(4).width = 10;
+  ws.getColumn(5).width = 12;
 
   let rr = headerRow + 1;
 
-  let totQty = 0;
+  let totPz = 0;
+  let totGr = 0;
+  let totMl = 0;
 
   for (const line of lines) {
-    const qty = Number(line.qty || 0);
-    ws.getRow(rr).values = [line.code || "", line.description || "", qty];
+    const pz = Number(line.qty || 0);
+    const gr = Number((line as any).qty_gr || 0);
+    const ml = Number((line as any).qty_ml || 0);
+
+    ws.getRow(rr).values = [line.code || "", line.description || "", pz, gr, ml];
     ws.getCell(rr, 3).numFmt = "0";
-    totQty += qty;
+    ws.getCell(rr, 4).numFmt = "0";
+    ws.getCell(rr, 5).numFmt = "0";
+
+    totPz += pz;
+    totGr += gr;
+    totMl += ml;
+
     rr++;
   }
 
   const totalRow = rr + 1;
   ws.getCell(totalRow, 2).value = "TOTALE";
-  ws.getCell(totalRow, 3).value = totQty;
+  ws.getCell(totalRow, 3).value = totPz || "";
+  ws.getCell(totalRow, 4).value = totGr || "";
+  ws.getCell(totalRow, 5).value = totMl || "";
   ws.getRow(totalRow).font = { bold: true };
   ws.getCell(totalRow, 3).numFmt = "0";
+  ws.getCell(totalRow, 4).numFmt = "0";
+  ws.getCell(totalRow, 5).numFmt = "0";
 
   // Bordi (puliti)
   const last = totalRow;
   for (let r = headerRow; r <= last; r++) {
-    for (let c = 1; c <= 3; c++) {
+    for (let c = 1; c <= 5; c++) {
       ws.getCell(r, c).border = {
         top: { style: "thin" },
         left: { style: "thin" },
@@ -96,3 +114,4 @@ export async function buildInventoryXlsx(meta: InventoryExcelMeta, lines: Invent
   const out = await wb.xlsx.writeBuffer();
   return Buffer.from(out as any);
 }
+

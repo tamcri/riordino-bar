@@ -23,7 +23,6 @@ async function lookupPvIdFromUserTables(username: string): Promise<string | null
   for (const table of USER_TABLE_CANDIDATES) {
     const { data, error } = await supabaseAdmin.from(table).select("pv_id").eq("username", username).maybeSingle();
     if (error) continue;
-
     const pv_id = (data as any)?.pv_id ?? null;
     if (pv_id && isUuid(pv_id)) return pv_id;
     return null;
@@ -43,7 +42,7 @@ async function lookupPvIdFromUsernameCode(username: string): Promise<string | nu
     .maybeSingle();
 
   if (error) return null;
-  return data?.id ?? null;
+  return (data as any)?.id ?? null;
 }
 
 async function requirePvIdForPuntoVendita(username: string): Promise<string> {
@@ -58,24 +57,27 @@ async function requirePvIdForPuntoVendita(username: string): Promise<string> {
 
 export async function GET(req: Request) {
   const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
-
   if (!session || !["admin", "amministrativo", "punto_vendita"].includes(session.role)) {
     return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
   }
 
   const url = new URL(req.url);
-
   const pv_id_qs = (url.searchParams.get("pv_id") || "").trim();
   const category_id = (url.searchParams.get("category_id") || "").trim();
   const subcategory_id = (url.searchParams.get("subcategory_id") || "").trim();
   const inventory_date = (url.searchParams.get("inventory_date") || "").trim();
 
   if (!isUuid(category_id)) return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
-  if (subcategory_id && !isUuid(subcategory_id)) return NextResponse.json({ ok: false, error: "subcategory_id non valido" }, { status: 400 });
-  if (!isIsoDate(inventory_date)) return NextResponse.json({ ok: false, error: "inventory_date non valida (YYYY-MM-DD)" }, { status: 400 });
+  if (subcategory_id && !isUuid(subcategory_id)) {
+    return NextResponse.json({ ok: false, error: "subcategory_id non valido" }, { status: 400 });
+  }
+  if (!isIsoDate(inventory_date)) {
+    return NextResponse.json({ ok: false, error: "inventory_date non valida (YYYY-MM-DD)" }, { status: 400 });
+  }
 
   // PV enforcement
   let effectivePvId = pv_id_qs;
+
   if (session.role === "punto_vendita") {
     try {
       effectivePvId = await requirePvIdForPuntoVendita(session.username);
@@ -97,11 +99,11 @@ export async function GET(req: Request) {
 
   if (pvRes.error) return NextResponse.json({ ok: false, error: pvRes.error.message }, { status: 500 });
   if (catRes.error) return NextResponse.json({ ok: false, error: catRes.error.message }, { status: 500 });
-  if (subRes?.error) return NextResponse.json({ ok: false, error: subRes.error.message }, { status: 500 });
+  if ((subRes as any)?.error) return NextResponse.json({ ok: false, error: (subRes as any).error.message }, { status: 500 });
 
-  const pvLabel = pvRes.data ? `${pvRes.data.code} — ${pvRes.data.name}` : effectivePvId;
-  const categoryName = catRes.data?.name ?? "";
-  const subcategoryName = subcategory_id ? (subRes.data?.name ?? "") : "—";
+  const pvLabel = pvRes.data ? `${(pvRes.data as any).code} — ${(pvRes.data as any).name}` : effectivePvId;
+  const categoryName = (catRes.data as any)?.name ?? "";
+  const subcategoryName = subcategory_id ? ((subRes as any).data?.name ?? "") : "—";
 
   // 2) operatore dalla testata (prendo l’ultimo header per id)
   let hq = supabaseAdmin
@@ -117,12 +119,12 @@ export async function GET(req: Request) {
   const { data: header, error: headerErr } = await hq.order("id", { ascending: false }).limit(1).maybeSingle();
   if (headerErr) return NextResponse.json({ ok: false, error: headerErr.message }, { status: 500 });
 
-  const operatore = (header?.operatore || "").toString().trim() || "—";
+  const operatore = ((header as any)?.operatore || "").toString().trim() || "—";
 
   // 3) righe inventario + join items
   let q = supabaseAdmin
     .from("inventories")
-    .select("item_id, qty, created_by_username, items:items(code, description)")
+    .select("item_id, qty, qty_gr, qty_ml, created_by_username, items:items(code, description)")
     .eq("pv_id", effectivePvId)
     .eq("category_id", category_id)
     .eq("inventory_date", inventory_date);
@@ -138,14 +140,21 @@ export async function GET(req: Request) {
   const { data: invRows, error: invErr } = await q;
   if (invErr) return NextResponse.json({ ok: false, error: invErr.message }, { status: 500 });
 
-  // ✅ SOLO QTY > 0
+  // ✅ includo righe se almeno uno tra PZ/GR/ML è > 0
   const lines = ((invRows || []) as any[])
     .map((r: any) => ({
       code: r?.items?.code ?? "",
       description: r?.items?.description ?? "",
       qty: Number(r?.qty ?? 0),
+      qty_gr: Number(r?.qty_gr ?? 0),
+      qty_ml: Number(r?.qty_ml ?? 0),
     }))
-    .filter((x) => Number.isFinite(x.qty) && x.qty > 0);
+    .filter((x) => {
+      const pz = Number(x.qty || 0);
+      const gr = Number((x as any).qty_gr || 0);
+      const ml = Number((x as any).qty_ml || 0);
+      return (Number.isFinite(pz) && pz > 0) || (Number.isFinite(gr) && gr > 0) || (Number.isFinite(ml) && ml > 0);
+    });
 
   lines.sort((a, b) => String(a.code || "").localeCompare(String(b.code || "")));
 
@@ -154,7 +163,7 @@ export async function GET(req: Request) {
     lines
   );
 
-  const filename = `inventario_${pvRes.data?.code ?? "PV"}_${inventory_date}.xlsx`;
+  const filename = `inventario_${(pvRes.data as any)?.code ?? "PV"}_${inventory_date}.xlsx`;
 
   return new NextResponse(new Uint8Array(xlsx), {
     status: 200,
@@ -165,6 +174,7 @@ export async function GET(req: Request) {
     },
   });
 }
+
 
 
 
