@@ -1,4 +1,3 @@
-// app/api/inventories/list/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
@@ -57,7 +56,7 @@ async function requirePvIdForPuntoVendita(username: string): Promise<string> {
 
 type InventoryRow = {
   pv_id: string;
-  category_id: string;
+  category_id: string | null; // ✅ Rapido => NULL
   subcategory_id: string | null;
   inventory_date: string; // YYYY-MM-DD
   item_id: string;
@@ -70,7 +69,7 @@ type InventoryRow = {
 
 type InventoryHeaderRow = {
   pv_id: string;
-  category_id: string;
+  category_id: string | null; // ✅ Rapido => NULL
   subcategory_id: string | null;
   inventory_date: string; // YYYY-MM-DD
   operatore: string | null;
@@ -80,6 +79,12 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
+}
+
+function makeKey(pv_id: string, category_id: string | null, subcategory_id: string | null, inventory_date: string) {
+  const cat = category_id ?? "__NULL__";
+  const sub = subcategory_id ?? "__NULL__";
+  return `${pv_id}|${cat}|${sub}|${inventory_date}`;
 }
 
 export async function GET(req: Request) {
@@ -92,7 +97,19 @@ export async function GET(req: Request) {
 
     const url = new URL(req.url);
 
-    const category_id = (url.searchParams.get("category_id") || "").trim();
+    // ✅ distinzione fondamentale:
+    // - se category_id NON è presente -> nessun filtro
+    // - se category_id è presente ma vuoto -> Rapido (NULL)
+    // - se category_id è UUID -> filtro UUID
+    const hasCategoryParam = url.searchParams.has("category_id");
+    const category_qs_raw = url.searchParams.get("category_id");
+    const categoryTrimmed = (category_qs_raw ?? "").trim();
+    const category_id_filter: string | null | undefined = !hasCategoryParam
+      ? undefined
+      : categoryTrimmed === ""
+      ? null
+      : categoryTrimmed;
+
     const pv_id_qs = (url.searchParams.get("pv_id") || "").trim();
     const subcategory_id = (url.searchParams.get("subcategory_id") || "").trim();
 
@@ -101,7 +118,8 @@ export async function GET(req: Request) {
 
     const limitRows = Math.min(Number(url.searchParams.get("limit") || 20000), 50000);
 
-    if (category_id && !isUuid(category_id)) {
+    // validazioni
+    if (category_id_filter !== undefined && category_id_filter !== null && !isUuid(category_id_filter)) {
       return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
     }
     if (pv_id_qs && !isUuid(pv_id_qs)) {
@@ -111,8 +129,9 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: false, error: "subcategory_id non valido" }, { status: 400 });
     }
 
-    if (subcategory_id && !category_id) {
-      return NextResponse.json({ ok: false, error: "subcategory_id richiede anche category_id" }, { status: 400 });
+    // se chiedi subcategory devi avere category UUID (non Rapido e non "tutte")
+    if (subcategory_id && (!hasCategoryParam || category_id_filter === null || category_id_filter === undefined)) {
+      return NextResponse.json({ ok: false, error: "subcategory_id richiede anche category_id (UUID)" }, { status: 400 });
     }
 
     if (dateFrom && !isIsoDate(dateFrom)) {
@@ -139,7 +158,12 @@ export async function GET(req: Request) {
       .limit(limitRows);
 
     if (effectivePvId) q = q.eq("pv_id", effectivePvId);
-    if (category_id) q = q.eq("category_id", category_id);
+
+    // ✅ filtro categoria SOLO se il parametro è presente
+    if (category_id_filter === null) q = q.is("category_id", null);
+    else if (typeof category_id_filter === "string") q = q.eq("category_id", category_id_filter);
+    // else undefined => nessun filtro
+
     if (subcategory_id) q = q.eq("subcategory_id", subcategory_id);
 
     if (dateFrom) q = q.gte("inventory_date", dateFrom);
@@ -186,7 +210,7 @@ export async function GET(req: Request) {
     type Group = {
       key: string;
       pv_id: string;
-      category_id: string;
+      category_id: string | null;
       subcategory_id: string | null;
       inventory_date: string;
       created_by_username: string | null;
@@ -216,33 +240,22 @@ export async function GET(req: Request) {
       let rowValue = 0;
 
       if (prezzo > 0) {
-        // ML: (ml tot / ml per unità) * prezzo
-        if (qty_ml > 0 && volume > 0) {
-          rowValue = (qty_ml / volume) * prezzo;
-        }
-        // GR con UM=kg: (gr/1000) * prezzo(€/kg)
-        else if (qty_gr > 0 && um === "kg") {
-          rowValue = (qty_gr / 1000) * prezzo;
-        }
-        // GR fallback con peso_kg: (gr / (peso_kg*1000)) * prezzo(€/unità)
+        if (qty_ml > 0 && volume > 0) rowValue = (qty_ml / volume) * prezzo;
+        else if (qty_gr > 0 && um === "kg") rowValue = (qty_gr / 1000) * prezzo;
         else if (qty_gr > 0 && peso_kg > 0) {
           const grPerUnit = peso_kg * 1000;
           if (grPerUnit > 0) rowValue = (qty_gr / grPerUnit) * prezzo;
-        }
-        // default PZ
-        else if (qty > 0) {
-          rowValue = qty * prezzo;
-        }
+        } else if (qty > 0) rowValue = qty * prezzo;
       }
 
-      const key = `${r.pv_id}|${r.category_id}|${r.subcategory_id ?? ""}|${r.inventory_date}`;
+      const key = makeKey(r.pv_id, r.category_id ?? null, r.subcategory_id ?? null, r.inventory_date);
 
       const g = groups.get(key);
       if (!g) {
         groups.set(key, {
           key,
           pv_id: r.pv_id,
-          category_id: r.category_id,
+          category_id: r.category_id ?? null,
           subcategory_id: r.subcategory_id ?? null,
           inventory_date: r.inventory_date,
           created_by_username: r.created_by_username ?? null,
@@ -271,12 +284,14 @@ export async function GET(req: Request) {
     if (list.length === 0) return NextResponse.json({ ok: true, rows: [] });
 
     // headers operatore
-    let hq = supabaseAdmin
-      .from("inventories_headers")
-      .select("pv_id, category_id, subcategory_id, inventory_date, operatore");
+    let hq = supabaseAdmin.from("inventories_headers").select("pv_id, category_id, subcategory_id, inventory_date, operatore");
 
     if (effectivePvId) hq = hq.eq("pv_id", effectivePvId);
-    if (category_id) hq = hq.eq("category_id", category_id);
+
+    // ✅ filtro categoria SOLO se parametro presente
+    if (category_id_filter === null) hq = hq.is("category_id", null);
+    else if (typeof category_id_filter === "string") hq = hq.eq("category_id", category_id_filter);
+
     if (subcategory_id) hq = hq.eq("subcategory_id", subcategory_id);
     if (dateFrom) hq = hq.gte("inventory_date", dateFrom);
     if (dateTo) hq = hq.lte("inventory_date", dateTo);
@@ -290,25 +305,19 @@ export async function GET(req: Request) {
     const headers = (Array.isArray(headersData) ? headersData : []) as InventoryHeaderRow[];
     const headerMap = new Map<string, string | null>();
     for (const h of headers) {
-      const k = `${h.pv_id}|${h.category_id}|${h.subcategory_id ?? ""}|${h.inventory_date}`;
+      const k = makeKey(h.pv_id, h.category_id ?? null, h.subcategory_id ?? null, h.inventory_date);
       headerMap.set(k, (h.operatore ?? "").trim() || null);
     }
 
     // nomi PV/CAT/SUB
     const pvIds = Array.from(new Set(list.map((x) => x.pv_id)));
-    const catIds = Array.from(new Set(list.map((x) => x.category_id)));
-    const subIds = Array.from(new Set(list.map((x) => x.subcategory_id).filter(Boolean))) as string[];
+    const catIds = Array.from(new Set(list.map((x) => x.category_id).filter((x): x is string => !!x)));
+    const subIds = Array.from(new Set(list.map((x) => x.subcategory_id).filter((x): x is string => !!x)));
 
     const [pvsRes, catsRes, subsRes] = await Promise.all([
-      pvIds.length
-        ? supabaseAdmin.from("pvs").select("id, code, name").in("id", pvIds)
-        : Promise.resolve({ data: [], error: null } as any),
-      catIds.length
-        ? supabaseAdmin.from("categories").select("id, name").in("id", catIds)
-        : Promise.resolve({ data: [], error: null } as any),
-      subIds.length
-        ? supabaseAdmin.from("subcategories").select("id, name, category_id").in("id", subIds)
-        : Promise.resolve({ data: [], error: null } as any),
+      pvIds.length ? supabaseAdmin.from("pvs").select("id, code, name").in("id", pvIds) : Promise.resolve({ data: [], error: null } as any),
+      catIds.length ? supabaseAdmin.from("categories").select("id, name").in("id", catIds) : Promise.resolve({ data: [], error: null } as any),
+      subIds.length ? supabaseAdmin.from("subcategories").select("id, name, category_id").in("id", subIds) : Promise.resolve({ data: [], error: null } as any),
     ]);
 
     if (pvsRes.error) return NextResponse.json({ ok: false, error: pvsRes.error.message }, { status: 500 });
@@ -332,25 +341,28 @@ export async function GET(req: Request) {
       return ap.localeCompare(bp);
     });
 
-    const out = list.map((g) => ({
-      key: g.key,
-      pv_id: g.pv_id,
-      pv_code: pvMap.get(g.pv_id)?.code ?? "",
-      pv_name: pvMap.get(g.pv_id)?.name ?? "",
-      category_id: g.category_id,
-      category_name: catMap.get(g.category_id)?.name ?? "",
-      subcategory_id: g.subcategory_id,
-      subcategory_name: g.subcategory_id ? subMap.get(g.subcategory_id)?.name ?? "" : "",
-      inventory_date: g.inventory_date,
-      created_by_username: g.created_by_username,
-      created_at: g.created_at,
-      lines_count: g.lines_count,
-      qty_sum: g.qty_sum,
-      qty_ml_sum: g.qty_ml_sum,
-      qty_gr_sum: g.qty_gr_sum,
-      value_sum: g.value_sum,
-      operatore: headerMap.get(g.key) ?? null,
-    }));
+    const out = list.map((g) => {
+      const isRapid = g.category_id === null;
+      return {
+        key: g.key,
+        pv_id: g.pv_id,
+        pv_code: pvMap.get(g.pv_id)?.code ?? "",
+        pv_name: pvMap.get(g.pv_id)?.name ?? "",
+        category_id: g.category_id,
+        category_name: isRapid ? "Nessuna (Tutte)" : catMap.get(g.category_id!)?.name ?? "",
+        subcategory_id: g.subcategory_id,
+        subcategory_name: g.subcategory_id ? subMap.get(g.subcategory_id)?.name ?? "" : "",
+        inventory_date: g.inventory_date,
+        created_by_username: g.created_by_username,
+        created_at: g.created_at,
+        lines_count: g.lines_count,
+        qty_sum: g.qty_sum,
+        qty_ml_sum: g.qty_ml_sum,
+        qty_gr_sum: g.qty_gr_sum,
+        value_sum: g.value_sum,
+        operatore: headerMap.get(g.key) ?? null,
+      };
+    });
 
     return NextResponse.json({ ok: true, rows: out });
   } catch (e: any) {

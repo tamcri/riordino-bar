@@ -33,13 +33,7 @@ async function lookupPvIdFromUsernameCode(username: string): Promise<string | nu
   const code = (username || "").trim().split(/\s+/)[0]?.toUpperCase();
   if (!code || code.length > 5) return null;
 
-  const { data, error } = await supabaseAdmin
-    .from("pvs")
-    .select("id")
-    .eq("is_active", true)
-    .eq("code", code)
-    .maybeSingle();
-
+  const { data, error } = await supabaseAdmin.from("pvs").select("id").eq("is_active", true).eq("code", code).maybeSingle();
   if (error) return null;
   return data?.id ?? null;
 }
@@ -54,8 +48,11 @@ async function requirePvIdForPuntoVendita(username: string): Promise<string> {
   throw new Error("Utente punto vendita senza PV assegnato (pv_id mancante).");
 }
 
+// ✅ robusto: supporta stringhe e virgole ("3,0")
 function clampInt(n: any) {
-  const x = Number(n);
+  let x: number;
+  if (typeof n === "string") x = Number(n.trim().replace(",", "."));
+  else x = Number(n);
   if (!Number.isFinite(x)) return 0;
   return Math.max(0, Math.trunc(x));
 }
@@ -70,14 +67,30 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
 
   const pv_id_qs = (url.searchParams.get("pv_id") || "").trim();
-  const category_id = (url.searchParams.get("category_id") || "").trim();
-  const subcategory_id = (url.searchParams.get("subcategory_id") || "").trim();
+
+  // ⚠️ IMPORTANTE:
+  // Alcuni client costruiscono l'URL includendo sempre category_id/subcategory_id anche quando vuoti:
+  //   ...&subcategory_id=
+  // In quel caso NON dobbiamo interpretarlo come "IS NULL", ma come "parametro assente".
+  // Invece "subcategory_id=null" significa esplicitamente NULL.
+  const category_raw = (url.searchParams.get("category_id") ?? "").trim();
+  const subcategory_raw = (url.searchParams.get("subcategory_id") ?? "").trim();
+
+  const category_is_explicit_null = url.searchParams.has("category_id") && category_raw.toLowerCase() === "null";
+  const subcategory_is_explicit_null = url.searchParams.has("subcategory_id") && subcategory_raw.toLowerCase() === "null";
+
+  const hasCategory = url.searchParams.has("category_id") && category_raw !== "" && !category_is_explicit_null;
+  const hasSubcategory = url.searchParams.has("subcategory_id") && subcategory_raw !== "" && !subcategory_is_explicit_null;
+
+  const category_id: string | null = category_raw === "" || category_is_explicit_null ? null : category_raw;
+  const subcategory_id: string | null = subcategory_raw === "" || subcategory_is_explicit_null ? null : subcategory_raw;
+
   const inventory_date = (url.searchParams.get("inventory_date") || "").trim(); // YYYY-MM-DD
 
-  if (!isUuid(category_id)) {
+  if (hasCategory && category_id !== null && !isUuid(category_id)) {
     return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
   }
-  if (subcategory_id && !isUuid(subcategory_id)) {
+  if (hasSubcategory && subcategory_id !== null && !isUuid(subcategory_id)) {
     return NextResponse.json({ ok: false, error: "subcategory_id non valido" }, { status: 400 });
   }
   if (!isIsoDate(inventory_date)) {
@@ -106,11 +119,18 @@ export async function GET(req: Request) {
         "id, item_id, qty, qty_ml, qty_gr, created_by_username, items:items(code, description, prezzo_vendita_eur, volume_ml_per_unit, peso_kg, um)"
       )
       .eq("pv_id", effectivePvId)
-      .eq("category_id", category_id)
       .eq("inventory_date", inventory_date);
 
-    if (subcategory_id) q = q.eq("subcategory_id", subcategory_id);
-    else q = q.is("subcategory_id", null);
+    // ✅ categoria:
+    // - category_id=null => IS NULL
+    // - category_id= (vuoto) => ignora filtro
+    // - UUID => EQ
+    if (category_is_explicit_null) q = q.is("category_id", null);
+    else if (hasCategory) q = q.eq("category_id", category_id);
+
+    // ✅ subcategory: stessa logica
+    if (subcategory_is_explicit_null) q = q.is("subcategory_id", null);
+    else if (hasSubcategory) q = q.eq("subcategory_id", subcategory_id);
 
     const { data, error } = await q;
 
@@ -127,11 +147,11 @@ export async function GET(req: Request) {
         const qty_ml = clampInt(r?.qty_ml ?? 0);
         const qty_gr = clampInt(r?.qty_gr ?? 0);
 
-        const volume = Number(r?.items?.volume_ml_per_unit ?? 0);
+        const volume = Number(String(r?.items?.volume_ml_per_unit ?? "0").replace(",", "."));
         const volume_ml_per_unit = Number.isFinite(volume) && volume > 0 ? Math.trunc(volume) : null;
 
         const um = String(r?.items?.um ?? "").toLowerCase();
-        const peso_kg = Number(r?.items?.peso_kg ?? 0);
+        const peso_kg = Number(String(r?.items?.peso_kg ?? "0").replace(",", "."));
         const peso_kg_norm = Number.isFinite(peso_kg) && peso_kg > 0 ? peso_kg : null;
 
         const ml_mode: "mixed" | "fixed" | null =
@@ -159,12 +179,6 @@ export async function GET(req: Request) {
           peso_kg: peso_kg_norm,
         };
       })
-      .filter(
-        (x) =>
-          (Number.isFinite(x.qty) && x.qty > 0) ||
-          (Number.isFinite(x.qty_ml) && x.qty_ml > 0) ||
-          (Number.isFinite(x.qty_gr) && x.qty_gr > 0)
-      )
       .sort((a, b) => (a.code || "").localeCompare(b.code || ""));
 
     return NextResponse.json({ ok: true, rows: out });

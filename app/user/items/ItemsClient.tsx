@@ -18,7 +18,7 @@ type Item = {
   conf_da?: number | null;
   prezzo_vendita_eur?: number | null;
 
-  // ✅ NEW: per liquidi -> ml per pezzo (es. 700, 750, 1000)
+  // ✅ per liquidi -> ml per pezzo (es. 700, 750, 1000)
   volume_ml_per_unit?: number | null;
 };
 
@@ -64,6 +64,18 @@ function formatUm(v: any) {
   const s = String(v ?? "").trim();
   if (!s) return "—";
   return s;
+}
+
+// ✅ NEW: normalizza UM e helpers KG/LT
+function normUm(v: any) {
+  return String(v ?? "").trim().toUpperCase();
+}
+function isUmKg(v: any) {
+  return normUm(v) === "KG";
+}
+function isUmLt(v: any) {
+  const u = normUm(v);
+  return u === "LT" || u === "L";
 }
 
 // ✅ Euro in formato IT: € 1,30 | € 132,50 | € 1.234,56
@@ -164,9 +176,11 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   const [editConfDa, setEditConfDa] = useState<string>("");
   const [editPrezzo, setEditPrezzo] = useState<string>("");
 
-  // ✅ NEW: ML per pezzo (solo liquidi)
+  // ✅ legacy state (manteniamo per compatibilità, ma nel modal useremo un campo unico)
   const [editVolumeMl, setEditVolumeMl] = useState<string>("");
 
+  // ✅ NEW: GR/ML per pezzo (KG => GR, LT/L => ML)
+  const [editGrMlPerPiece, setEditGrMlPerPiece] = useState<string>("");
 
   // ✅ NEW: categoria/sottocategoria modificabili nel modal
   const [editCategoryId, setEditCategoryId] = useState<string>("");
@@ -263,7 +277,6 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     const json = await res.json().catch(() => null);
     if (res.ok && json?.ok && Array.isArray(json?.rows)) setSubcategories(json.rows);
   }
-
 
   // ✅ Per il modal: sottocategorie legate alla categoria selezionata nel modal
   async function loadEditSubcategories(catId: string) {
@@ -741,14 +754,28 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     setEditConfDa(item.conf_da == null ? "" : String(item.conf_da));
     setEditPrezzo(item.prezzo_vendita_eur == null ? "" : String(item.prezzo_vendita_eur));
 
-    // ✅ NEW
+    // legacy (teniamo allineato)
     setEditVolumeMl(item.volume_ml_per_unit == null ? "" : String(item.volume_ml_per_unit));
+
+    // ✅ NEW: GR/ML per pezzo (dipende da UM)
+    const u = normUm(item.um);
+    if (u === "KG") {
+      const kg = item.peso_kg == null ? null : Number(item.peso_kg);
+      if (kg != null && Number.isFinite(kg) && kg > 0) {
+        setEditGrMlPerPiece(String(Math.round(kg * 1000))); // GR per pezzo
+      } else {
+        setEditGrMlPerPiece("");
+      }
+    } else if (u === "LT" || u === "L") {
+      setEditGrMlPerPiece(item.volume_ml_per_unit == null ? "" : String(item.volume_ml_per_unit)); // ML per pezzo
+    } else {
+      setEditGrMlPerPiece("");
+    }
 
     // ✅ NEW: categoria/sottocategoria nel modal
     setEditCategoryId(item.category_id == null ? "" : String(item.category_id));
     setEditSubcategoryId(item.subcategory_id == null ? "" : String(item.subcategory_id));
     setEditSubcategories([]);
-    // Carico le sottocategorie della categoria dell'articolo per mostrare subito la selezione
     if (item.category_id) loadEditSubcategories(String(item.category_id));
 
     setEditBarcodes([]);
@@ -766,6 +793,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     setEditBarcodes([]);
     setNewExtraBarcode("");
     setBarcodesError(null);
+    setEditGrMlPerPiece("");
   }
 
   function normalizeNullableNumber(v: string): number | null {
@@ -810,20 +838,40 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     setMsg(null);
 
     try {
+      const u = normUm(editUm);
+
+      // input GR/ML per pezzo (solo se UM = KG o LT/L)
+      const grmlInt = editGrMlPerPiece.trim() === "" ? null : normalizeNullableInt(editGrMlPerPiece);
+
+      // default: prendo i valori "classici"
+      let nextPesoKg: number | null = editPesoKg.trim() === "" ? null : normalizeNullableNumber(editPesoKg);
+      let nextVolumeMl: number | null = editVolumeMl.trim() === "" ? null : normalizeNullableInt(editVolumeMl);
+
+      // Se UM è KG -> grmlInt sono GR per pezzo: salvo in peso_kg (kg) e azzero volume_ml_per_unit
+      if (u === "KG") {
+        nextPesoKg = grmlInt == null ? null : grmlInt / 1000;
+        nextVolumeMl = null;
+      }
+
+      // Se UM è LT/L -> grmlInt sono ML per pezzo: salvo in volume_ml_per_unit
+      if (u === "LT" || u === "L") {
+        nextVolumeMl = grmlInt;
+      }
+
       const payload: any = {
         id: editItem.id,
         code: nextCode,
         description: nextDesc,
         barcode: normalizeNullableText(editBarcode),
         um: normalizeNullableText(editUm),
-        peso_kg: editPesoKg.trim() === "" ? null : normalizeNullableNumber(editPesoKg),
+        peso_kg: nextPesoKg,
         conf_da: editConfDa.trim() === "" ? null : normalizeNullableInt(editConfDa),
         prezzo_vendita_eur: editPrezzo.trim() === "" ? null : normalizeNullableNumber(editPrezzo),
 
-        // ✅ NEW: ml per pezzo (solo liquidi). Vuoto => null
-        volume_ml_per_unit: editVolumeMl.trim() === "" ? null : normalizeNullableInt(editVolumeMl),
+        // ✅ ML per pezzo (solo liquidi). Vuoto => null
+        volume_ml_per_unit: nextVolumeMl,
 
-        // ✅ NEW: categoria/sottocategoria
+        // ✅ categoria/sottocategoria
         category_id: editCategoryId.trim() === "" ? null : editCategoryId.trim(),
         subcategory_id: editSubcategoryId.trim() === "" ? null : editSubcategoryId.trim(),
       };
@@ -931,7 +979,26 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
                   className="w-full rounded-xl border p-3"
                   placeholder="Es. PZ, KG, LT"
                   value={editUm}
-                  onChange={(e) => setEditUm(e.target.value)}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setEditUm(next);
+
+                    // se cambio UM, preparo il campo GR/ML coerente
+                    const u = normUm(next);
+                    if (u === "KG") {
+                      // se ho già peso_kg, converto in GR per mostrare
+                      const kg = editPesoKg.trim() ? Number(String(editPesoKg).replace(",", ".")) : NaN;
+                      if (Number.isFinite(kg) && kg > 0) setEditGrMlPerPiece(String(Math.round(kg * 1000)));
+                      else setEditGrMlPerPiece("");
+                    } else if (u === "LT" || u === "L") {
+                      // se ho volume ml, lo riuso
+                      const ml = editVolumeMl.trim() ? Number(editVolumeMl) : NaN;
+                      if (Number.isFinite(ml) && ml > 0) setEditGrMlPerPiece(String(Math.trunc(ml)));
+                      else setEditGrMlPerPiece("");
+                    } else {
+                      setEditGrMlPerPiece("");
+                    }
+                  }}
                 />
                 <div className="mt-1 text-xs text-gray-500">Lascia vuoto per NULL.</div>
               </div>
@@ -995,29 +1062,39 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
                 </div>
               </div>
 
-              {/* ✅ NEW: ML per pezzo */}
+              {/* ✅ NEW: GR/ML per pezzo */}
               <div className="md:col-span-2">
-                <label className="block text-sm font-medium mb-2">ML per pezzo (solo liquidi)</label>
+                <label className="block text-sm font-medium mb-2">
+                  {isUmKg(editUm) ? "GR per pezzo (UM=KG)" : isUmLt(editUm) ? "ML per pezzo (UM=LT)" : "GR/ML per pezzo"}
+                </label>
+
                 <input
                   className="w-full rounded-xl border p-3"
                   inputMode="numeric"
-                  placeholder="Es. 700, 750, 1000"
-                  value={editVolumeMl}
-                  onChange={(e) => setEditVolumeMl(e.target.value)}
+                  placeholder={isUmKg(editUm) ? "Es. 1000, 1500" : "Es. 700, 750, 1000"}
+                  value={editGrMlPerPiece}
+                  onChange={(e) => setEditGrMlPerPiece(e.target.value)}
+                  disabled={!(isUmKg(editUm) || isUmLt(editUm))}
                 />
+
                 <div className="mt-1 text-xs text-gray-500">
-                  Se valorizzato, il sistema può lavorare in ML (scarico cocktail, import gestionale coerente).
+                  {isUmKg(editUm)
+                    ? "Per UM=KG inserisci i grammi per pezzo. Es: 1 KG = 1000 • 1,5 KG = 1500. Verrà salvato in peso_kg (kg)."
+                    : isUmLt(editUm)
+                    ? "Per UM=LT inserisci i ml per pezzo. Es: 0,7 LT = 700 • 0,75 LT = 750 • 1 LT = 1000."
+                    : "Disponibile solo se UM è KG o LT."}
                 </div>
               </div>
 
               <div className="md:col-span-2 rounded-xl border bg-slate-50 p-3">
                 <div className="text-sm font-medium">Esempi rapidi</div>
                 <div className="mt-1 text-xs text-gray-600">
-                  Bottiglia 1L → <b>1000</b> • 0,75L → <b>750</b> • 0,70L → <b>700</b>
+                  LT: 1L → <b>1000</b> • 0,75L → <b>750</b> • 0,70L → <b>700</b>
                 </div>
                 <div className="mt-1 text-xs text-gray-600">
-                  Se lasci vuoto: l’articolo resta “a pezzi”.
+                  KG: 1KG → <b>1000</b> • 1,5KG → <b>1500</b>
                 </div>
+                <div className="mt-1 text-xs text-gray-600">Se lasci vuoto: l’articolo resta “a pezzi”.</div>
               </div>
 
               {/* ✅ LISTA BARCODE ASSOCIATI */}
@@ -1069,22 +1146,23 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
                   </button>
                 </div>
 
-                <div className="mt-1 text-xs text-gray-500">
-                  Se provi ad aggiungere un barcode già assegnato a un altro articolo, ti blocca.
-                </div>
+                <div className="mt-1 text-xs text-gray-500">Se provi ad aggiungere un barcode già assegnato a un altro articolo, ti blocca.</div>
               </div>
 
-              <div>
-                <label className="block text-sm font-medium mb-2">Peso (kg)</label>
-                <input
-                  className="w-full rounded-xl border p-3"
-                  inputMode="decimal"
-                  placeholder="Es. 0,032"
-                  value={editPesoKg}
-                  onChange={(e) => setEditPesoKg(e.target.value)}
-                />
-                <div className="mt-1 text-xs text-gray-500">Lascia vuoto per NULL.</div>
-              </div>
+              {/* ✅ Peso (kg) solo se UM NON è KG (evitiamo doppio campo e confusione) */}
+              {!isUmKg(editUm) && (
+                <div>
+                  <label className="block text-sm font-medium mb-2">Peso (kg)</label>
+                  <input
+                    className="w-full rounded-xl border p-3"
+                    inputMode="decimal"
+                    placeholder="Es. 0,032"
+                    value={editPesoKg}
+                    onChange={(e) => setEditPesoKg(e.target.value)}
+                  />
+                  <div className="mt-1 text-xs text-gray-500">Lascia vuoto per NULL.</div>
+                </div>
+              )}
 
               <div>
                 <label className="block text-sm font-medium mb-2">Conf. da</label>
@@ -1212,6 +1290,114 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
         )}
       </div>
 
+      {/* ✅ IMPORT ARTICOLI DA EXCEL (solo admin) */}
+      {isAdmin && (
+        <div className="rounded-2xl border bg-white p-4 space-y-3">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="font-semibold">📥 Importa articoli da Excel</div>
+              <div className="text-sm text-gray-600">
+                Importa nella <b>categoria/sottocategoria selezionata</b>. Puoi anche usare la modalità <b>barcode-map</b> (Codice/Descrizione/Barcode).
+              </div>
+            </div>
+          </div>
+
+          <form onSubmit={doImport} className="space-y-3">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="md:col-span-1">
+                <label className="block text-sm font-medium mb-2">Modalità import</label>
+                <select
+                  className="w-full rounded-xl border p-3 bg-white"
+                  value={importMode}
+                  onChange={(e) => setImportMode(e.target.value as any)}
+                >
+                  <option value="standard">Standard</option>
+                  <option value="barcode-map">Barcode-map (Codice/Descrizione/Barcode)</option>
+                </select>
+              </div>
+
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium mb-2">File Excel</label>
+                <input
+                  type="file"
+                  accept=".xlsx,.xls,.csv"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0] || null;
+                    setFile(f);
+                    loadImportPreview(f);
+                  }}
+                />
+                {file && (
+                  <div className="mt-1 text-xs text-gray-600">
+                    Selezionato: <b>{file.name}</b>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-xs text-gray-500">
+                Categoria: <b>{selectedCategory?.name || "—"}</b>
+                {subcategoryId ? (
+                  <>
+                    {" "}
+                    • Sottocategoria: <b>{selectedSubcategory?.name || "—"}</b>
+                  </>
+                ) : null}
+              </div>
+
+              <button
+                type="submit"
+                className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60"
+                disabled={!file || importing || !categoryId}
+                title={!categoryId ? "Seleziona una categoria" : !file ? "Seleziona un file" : "Importa"}
+              >
+                {importing ? "Importo..." : "Importa"}
+              </button>
+            </div>
+          </form>
+
+          {/* PREVIEW */}
+          <div className="rounded-xl border bg-gray-50 p-3">
+            <div className="font-semibold">Preview (prime righe)</div>
+
+            {previewLoading && <div className="mt-2 text-sm text-gray-600">Carico preview...</div>}
+            {previewError && <div className="mt-2 text-sm text-red-600">{previewError}</div>}
+
+            {!previewLoading && !previewError && previewRows.length === 0 && (
+              <div className="mt-2 text-sm text-gray-600">Seleziona un file per vedere la preview.</div>
+            )}
+
+            {!previewLoading && !previewError && previewRows.length > 0 && (
+              <div className="mt-2 overflow-auto rounded-lg border bg-white">
+                <table className="w-full text-xs">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      {Object.keys(previewRows[0] || {}).map((k) => (
+                        <th key={k} className="text-left p-2">
+                          {k}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {previewRows.map((r, idx) => (
+                      <tr key={idx} className="border-t">
+                        {Object.keys(previewRows[0] || {}).map((k) => (
+                          <td key={k} className="p-2">
+                            {String((r as any)?.[k] ?? "")}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* ✅ IMPORT ML (solo admin) */}
       {isAdmin && (
         <div className="rounded-2xl border bg-white p-4 space-y-3">
@@ -1266,9 +1452,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
                   <button
                     type="button"
                     className="rounded-lg border bg-white px-3 py-1.5 text-xs hover:bg-gray-50"
-                    onClick={() =>
-                      downloadCSV(`ml_updated_${todayISO()}.csv`, volumeResult.updated_codes || [])
-                    }
+                    onClick={() => downloadCSV(`ml_updated_${todayISO()}.csv`, volumeResult.updated_codes || [])}
                     disabled={!volumeResult.updated_codes?.length}
                   >
                     Scarica CSV
@@ -1300,9 +1484,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
                   <button
                     type="button"
                     className="rounded-lg border bg-white px-3 py-1.5 text-xs hover:bg-gray-50"
-                    onClick={() =>
-                      downloadCSV(`ml_skipped_${todayISO()}.csv`, volumeResult.skipped_codes || [])
-                    }
+                    onClick={() => downloadCSV(`ml_skipped_${todayISO()}.csv`, volumeResult.skipped_codes || [])}
                     disabled={!volumeResult.skipped_codes?.length}
                   >
                     Scarica CSV
@@ -1334,9 +1516,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
                   <button
                     type="button"
                     className="rounded-lg border bg-white px-3 py-1.5 text-xs hover:bg-gray-50"
-                    onClick={() =>
-                      downloadCSV(`ml_not_found_${todayISO()}.csv`, volumeResult.not_found_codes || [])
-                    }
+                    onClick={() => downloadCSV(`ml_not_found_${todayISO()}.csv`, volumeResult.not_found_codes || [])}
                     disabled={!volumeResult.not_found_codes?.length}
                   >
                     Scarica CSV
@@ -1426,6 +1606,8 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     </div>
   );
 }
+
+
 
 
 

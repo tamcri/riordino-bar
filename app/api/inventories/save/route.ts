@@ -25,7 +25,7 @@ type Row = {
 
 type Body = {
   pv_id?: string;
-  category_id?: string;
+  category_id?: string; // "" o "null" in Rapido => NULL
   subcategory_id?: string | null;
   inventory_date?: string; // YYYY-MM-DD
   operatore?: string;
@@ -46,8 +46,6 @@ function clampInt(n: any) {
 }
 
 // ✅ GR: niente limite “9999” (resto nel range int32 per sicurezza)
-// int32 max = 2_147_483_647, quindi qui mettiamo un cap molto alto
-// per prevenire input fuori scala/bug UI, ma di fatto non è più un limite pratico.
 const MAX_GR = 1_000_000_000; // 1 miliardo di grammi = 1.000.000 kg
 function clampGr(n: any) {
   return Math.min(MAX_GR, clampInt(n));
@@ -91,6 +89,22 @@ async function requirePvIdForPuntoVendita(username: string): Promise<string> {
   throw new Error("Utente punto vendita senza PV assegnato (pv_id mancante).");
 }
 
+function normalizeCategoryForServer(raw: any): { isRapid: boolean; category_id: string | null } {
+  const s = String(raw ?? "").trim();
+  // ✅ Rapido: ci arrivano tipicamente "" oppure "null"
+  const isRapid = s === "" || s.toLowerCase() === "null";
+  if (isRapid) return { isRapid: true, category_id: null };
+  return { isRapid: false, category_id: s };
+}
+
+function normalizeSubcategoryForServer(raw: any, isRapid: boolean): string | null {
+  if (isRapid) return null;
+  const s = String(raw ?? "").trim();
+  if (!s) return null;
+  if (s.toLowerCase() === "null") return null;
+  return s;
+}
+
 export async function POST(req: Request) {
   const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
 
@@ -101,15 +115,20 @@ export async function POST(req: Request) {
   const body = (await req.json().catch(() => null)) as Body | null;
   if (!body) return NextResponse.json({ ok: false, error: "Body non valido" }, { status: 400 });
 
-  const category_id = body.category_id?.trim();
-  const subcategory_id = (body.subcategory_id ?? null)?.toString().trim() || null;
+  // ✅ Rapido: se category_id è "" oppure "null" (o null), SERVER FORZA NULL
+  const { isRapid, category_id } = normalizeCategoryForServer(body.category_id);
+
+  // ✅ subcategory: in Rapido SEMPRE NULL, altrimenti ""/"null"/null => null
+  const subcategory_id = normalizeSubcategoryForServer(body.subcategory_id, isRapid);
+
   const inventory_date = (body.inventory_date || "").trim();
 
   const operatore = (body.operatore || "").trim();
   if (!operatore) return NextResponse.json({ ok: false, error: "Operatore mancante" }, { status: 400 });
   if (operatore.length > 80) return NextResponse.json({ ok: false, error: "Operatore troppo lungo (max 80)" }, { status: 400 });
 
-  if (!isUuid(category_id)) {
+  // ✅ Standard: UUID obbligatorio; Rapido: NULL ammesso
+  if (category_id !== null && !isUuid(category_id)) {
     return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
   }
   if (subcategory_id && !isUuid(subcategory_id)) {
@@ -153,8 +172,10 @@ export async function POST(req: Request) {
     .from("inventories_headers")
     .select("id, created_by_username")
     .eq("pv_id", pv_id)
-    .eq("category_id", category_id)
     .eq("inventory_date", dateOrNull);
+
+  if (category_id) existsQ = existsQ.eq("category_id", category_id);
+  else existsQ = existsQ.is("category_id", null);
 
   if (subcategory_id) existsQ = existsQ.eq("subcategory_id", subcategory_id);
   else existsQ = existsQ.is("subcategory_id", null);
@@ -184,8 +205,8 @@ export async function POST(req: Request) {
   if (!alreadyExists) {
     const headerPayload = {
       pv_id,
-      category_id,
-      subcategory_id,
+      category_id, // ✅ null per Rapido
+      subcategory_id, // ✅ null per Rapido
       inventory_date: dateOrNull,
       operatore,
       created_by_username: session.username,
@@ -208,12 +229,10 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: updErr.message }, { status: 500 });
     }
 
-    let delQ = supabaseAdmin
-      .from("inventories")
-      .delete()
-      .eq("pv_id", pv_id)
-      .eq("category_id", category_id)
-      .eq("inventory_date", dateOrNull);
+    let delQ = supabaseAdmin.from("inventories").delete().eq("pv_id", pv_id).eq("inventory_date", dateOrNull);
+
+    if (category_id) delQ = delQ.eq("category_id", category_id);
+    else delQ = delQ.is("category_id", null);
 
     if (subcategory_id) delQ = delQ.eq("subcategory_id", subcategory_id);
     else delQ = delQ.is("subcategory_id", null);

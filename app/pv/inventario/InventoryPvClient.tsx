@@ -77,6 +77,9 @@ function itemHasBarcodeLike(it: Item, digits: string): boolean {
   return list.some((b) => b.includes(digits));
 }
 
+type InventoryMode = "standard" | "rapid";
+const MODE_STORAGE_KEY = "riordino-bar:inventory_mode:pv";
+
 export default function InventoryPvClient() {
   const [pvId, setPvId] = useState<string>("");
 
@@ -89,6 +92,30 @@ export default function InventoryPvClient() {
   const [inventoryDate, setInventoryDate] = useState(todayISO()); // ISO per input date
 
   const [qtyMap, setQtyMap] = useState<Record<string, string>>({});
+
+  // ✅ STEP 1: modalità inventario (default: rapido)
+  const [mode, setMode] = useState<InventoryMode>("rapid");
+
+  // ✅ restore mode da localStorage
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const v = window.localStorage.getItem(MODE_STORAGE_KEY);
+      if (v === "standard" || v === "rapid") setMode(v);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // ✅ persist mode su localStorage
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(MODE_STORAGE_KEY, mode);
+    } catch {
+      // ignore
+    }
+  }, [mode]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -109,7 +136,7 @@ export default function InventoryPvClient() {
     }
   }, []);
 
-// ✅ operatore
+  // ✅ operatore
   const [operatore, setOperatore] = useState("");
 
   // ✅ filtro ricerca (client-side) + scan
@@ -604,278 +631,336 @@ export default function InventoryPvClient() {
 
   return (
     <div className="space-y-4">
-      <div className="rounded-2xl border bg-white p-4">
-        <label className="block text-sm font-medium mb-2">Nome Operatore</label>
-        <input className="w-full rounded-xl border p-3" placeholder="Es. Mario Rossi" value={operatore} onChange={(e) => setOperatore(e.target.value)} />
-        <p className="text-xs text-gray-500 mt-1">Obbligatorio per salvare.</p>
-      </div>
-
-      <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-3 gap-3">
-        <div>
-          <label className="block text-sm font-medium mb-2">Categoria</label>
-          <select className="w-full rounded-xl border p-3 bg-white" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
-            {categories.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium mb-2">Sottocategoria</label>
-          <select className="w-full rounded-xl border p-3 bg-white" value={subcategoryId} onChange={(e) => setSubcategoryId(e.target.value)} disabled={subcategories.length === 0}>
-            <option value="">— Nessuna —</option>
-            {subcategories.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium mb-2">Data inventario</label>
-          <input type="date" className="w-full rounded-xl border p-3 bg-white" value={inventoryDate} onChange={(e) => setInventoryDate(e.target.value)} />
-          <div className="text-xs text-gray-500 mt-1">
-            Formato mostrato: <b>{formatDateIT(inventoryDate)}</b>
-          </div>
-        </div>
-      </div>
-
-      <div className="rounded-2xl border bg-white p-4 flex justify-between items-center gap-3">
-        <div className="text-sm text-gray-600">
-          Articoli caricati: <b>{items.length}</b>
+      {/* ✅ STEP 1: barra modalità (toggle in alto a destra) */}
+      <div className="rounded-2xl border bg-white p-3 flex items-center justify-between gap-3">
+        <div className="text-sm text-gray-700">
+          Modalità inventario:{" "}
+          <b>{mode === "rapid" ? "Rapido" : "Standard"}</b>
         </div>
 
         <div className="flex items-center gap-2">
-          <button className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-60" disabled={!canSave || saving} onClick={() => save("continue")} type="button">
-            {saving ? "Salvo..." : "Salva e continua"}
+          <button
+            type="button"
+            className={`rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 ${
+              mode === "standard" ? "bg-slate-900 text-white border-slate-900 hover:bg-slate-900" : ""
+            }`}
+            onClick={() => setMode("standard")}
+            aria-pressed={mode === "standard"}
+          >
+            Standard
           </button>
 
-          <button className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60" disabled={!canSave || saving} onClick={() => save("close")} type="button">
-            {saving ? "Salvo..." : "Salva e chiudi"}
+          <button
+            type="button"
+            className={`rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 ${
+              mode === "rapid" ? "bg-slate-900 text-white border-slate-900 hover:bg-slate-900" : ""
+            }`}
+            onClick={() => setMode("rapid")}
+            aria-pressed={mode === "rapid"}
+          >
+            Rapido
           </button>
         </div>
       </div>
 
-      <div className="rounded-2xl border bg-white p-4">
-        <label className="block text-sm font-medium mb-2">Cerca / Scansiona (Invio)</label>
-        <input
-          ref={searchInputRef}
-          className="w-full rounded-xl border p-3"
-          placeholder="Cerca per codice, descrizione o barcode... (usa Enter dopo scan)"
-          value={search}
-          onChange={(e) => {
-            const v = e.target.value;
-            setSearch(v);
-            if (focusItemId) setFocusItemId(null);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              handleScanEnter();
-            }
-          }}
-        />
-
-        <div className="mt-2 flex items-center justify-between gap-3">
-          <div className="text-sm text-gray-600">
-            Visualizzati: <b>{filteredItems.length}</b> / {items.length}
-          </div>
-
-          {focusItemId && (
-            <button
-              className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
-              type="button"
-              onClick={() => {
-                setFocusItemId(null);
-                setHighlightScannedId(null);
-              }}
-              title="Torna alla lista completa"
-            >
-              Mostra tutti
-            </button>
-          )}
+      {/* ✅ STEP 1: placeholder layout Rapido (Step 2 lo costruiamo) */}
+      {mode === "rapid" ? (
+        <div className="rounded-2xl border bg-white p-6">
+          <div className="text-sm font-medium">Inventario Rapido</div>
+          <p className="text-sm text-gray-600 mt-1">
+            Modalità Rapido attiva. La UI verrà costruita nello Step 2 senza toccare la logica backend.
+          </p>
         </div>
-
-        {focusItem && (
-          <div className="mt-2 text-xs text-gray-600">
-            Stai vedendo solo: <b>{focusItem.code}</b> — {focusItem.description}
+      ) : (
+        <>
+          <div className="rounded-2xl border bg-white p-4">
+            <label className="block text-sm font-medium mb-2">Nome Operatore</label>
+            <input className="w-full rounded-xl border p-3" placeholder="Es. Mario Rossi" value={operatore} onChange={(e) => setOperatore(e.target.value)} />
+            <p className="text-xs text-gray-500 mt-1">Obbligatorio per salvare.</p>
           </div>
-        )}
-      </div>
 
-      {/* SCANSIONATI */}
-      <div className="rounded-2xl border bg-white p-4 space-y-3">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <div className="text-sm font-medium">Scansionati</div>
-            <div className="text-sm text-gray-600">
-              Tot. Scansionati: <b>{totScannedPieces}</b> pezzi (<b>{totScannedDistinct}</b> articoli) — Valore: <b>{formatEUR(totScannedValueEur)}</b>
+          <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div>
+              <label className="block text-sm font-medium mb-2">Categoria</label>
+              <select className="w-full rounded-xl border p-3 bg-white" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
+                {categories.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
             </div>
-            {scannedItems.length > 10 && (
+
+            <div>
+              <label className="block text-sm font-medium mb-2">Sottocategoria</label>
+              <select className="w-full rounded-xl border p-3 bg-white" value={subcategoryId} onChange={(e) => setSubcategoryId(e.target.value)} disabled={subcategories.length === 0}>
+                <option value="">— Nessuna —</option>
+                {subcategories.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-2">Data inventario</label>
+              <input type="date" className="w-full rounded-xl border p-3 bg-white" value={inventoryDate} onChange={(e) => setInventoryDate(e.target.value)} />
               <div className="text-xs text-gray-500 mt-1">
-                Mostro {showAllScanned ? "tutti" : "gli ultimi 10"}.
+                Formato mostrato: <b>{formatDateIT(inventoryDate)}</b>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border bg-white p-4 flex justify-between items-center gap-3">
+            <div className="text-sm text-gray-600">
+              Articoli caricati: <b>{items.length}</b>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-60" disabled={!canSave || saving} onClick={() => save("continue")} type="button">
+                {saving ? "Salvo..." : "Salva e continua"}
+              </button>
+
+              <button className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60" disabled={!canSave || saving} onClick={() => save("close")} type="button">
+                {saving ? "Salvo..." : "Salva e chiudi"}
+              </button>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border bg-white p-4">
+            <label className="block text-sm font-medium mb-2">Cerca / Scansiona (Invio)</label>
+            <input
+              ref={searchInputRef}
+              className="w-full rounded-xl border p-3"
+              placeholder="Cerca per codice, descrizione o barcode... (usa Enter dopo scan)"
+              value={search}
+              onChange={(e) => {
+                const v = e.target.value;
+                setSearch(v);
+                if (focusItemId) setFocusItemId(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  handleScanEnter();
+                }
+              }}
+            />
+
+            <div className="mt-2 flex items-center justify-between gap-3">
+              <div className="text-sm text-gray-600">
+                Visualizzati: <b>{filteredItems.length}</b> / {items.length}
+              </div>
+
+              {focusItemId && (
+                <button
+                  className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
+                  type="button"
+                  onClick={() => {
+                    setFocusItemId(null);
+                    setHighlightScannedId(null);
+                  }}
+                  title="Torna alla lista completa"
+                >
+                  Mostra tutti
+                </button>
+              )}
+            </div>
+
+            {focusItem && (
+              <div className="mt-2 text-xs text-gray-600">
+                Stai vedendo solo: <b>{focusItem.code}</b> — {focusItem.description}
               </div>
             )}
           </div>
 
-          <div className="flex items-center gap-2">
-            {scannedItems.length > 10 && (
-              <button className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" onClick={() => setShowAllScanned((v) => !v)} type="button">
-                {showAllScanned ? "—" : "+"}
-              </button>
-            )}
-            <button className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-60" disabled={scannedIds.length === 0} onClick={() => {
-              setQtyMap((prev) => {
-                const next = { ...prev };
-                scannedIds.forEach((id) => { next[id] = "0"; });
-                return next;
-              });
-              setScannedIds([]);
-              setShowAllScanned(false);
-              setAddQtyMap({});
-              setHighlightScannedId(null);
-            }} type="button">
-              Svuota lista
-            </button>
-          </div>
-        </div>
+          {/* SCANSIONATI */}
+          <div className="rounded-2xl border bg-white p-4 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-medium">Scansionati</div>
+                <div className="text-sm text-gray-600">
+                  Tot. Scansionati: <b>{totScannedPieces}</b> pezzi (<b>{totScannedDistinct}</b> articoli) — Valore: <b>{formatEUR(totScannedValueEur)}</b>
+                </div>
+                {scannedItems.length > 10 && (
+                  <div className="text-xs text-gray-500 mt-1">
+                    Mostro {showAllScanned ? "tutti" : "gli ultimi 10"}.
+                  </div>
+                )}
+              </div>
 
-        {scannedItems.length === 0 ? (
-          <div className="text-sm text-gray-500">Nessun articolo scansionato.</div>
-        ) : (
-          <div className="overflow-auto rounded-xl border">
+              <div className="flex items-center gap-2">
+                {scannedItems.length > 10 && (
+                  <button className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" onClick={() => setShowAllScanned((v) => !v)} type="button">
+                    {showAllScanned ? "—" : "+"}
+                  </button>
+                )}
+                <button
+                  className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-60"
+                  disabled={scannedIds.length === 0}
+                  onClick={() => {
+                    setQtyMap((prev) => {
+                      const next = { ...prev };
+                      scannedIds.forEach((id) => {
+                        next[id] = "0";
+                      });
+                      return next;
+                    });
+                    setScannedIds([]);
+                    setShowAllScanned(false);
+                    setAddQtyMap({});
+                    setHighlightScannedId(null);
+                  }}
+                  type="button"
+                >
+                  Svuota lista
+                </button>
+              </div>
+            </div>
+
+            {scannedItems.length === 0 ? (
+              <div className="text-sm text-gray-500">Nessun articolo scansionato.</div>
+            ) : (
+              <div className="overflow-auto rounded-xl border">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="text-left p-3 w-40">Codice</th>
+                      <th className="text-left p-3">Descrizione</th>
+                      <th className="text-right p-3 w-32">Tot.</th>
+                      <th className="text-right p-3 w-40">Aggiungi</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {scannedItemsVisible.map((it) => {
+                      const isHi = highlightScannedId === it.id;
+                      return (
+                        <tr key={it.id} className={`border-t ${isHi ? "bg-green-50" : ""}`}>
+                          <td className="p-3 font-medium">{it.code}</td>
+                          <td className="p-3">{it.description}</td>
+                          <td className="p-3 text-right">
+                            <input
+                              className="w-24 rounded-xl border p-2 text-right"
+                              inputMode="numeric"
+                              placeholder="0"
+                              value={qtyMap[it.id] ?? ""}
+                              onChange={(e) => {
+                                const cleaned = onlyDigits(e.target.value);
+                                setQtyMap((prev) => ({ ...prev, [it.id]: cleaned }));
+                              }}
+                            />
+                          </td>
+                          <td className="p-3">
+                            <div className="flex justify-end gap-2">
+                              <input
+                                className="w-24 rounded-xl border p-2 text-right"
+                                inputMode="numeric"
+                                placeholder="+ qty"
+                                value={addQtyMap[it.id] ?? ""}
+                                onChange={(e) => setAddQtyMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    const delta = Number(onlyDigits(addQtyMap[it.id] ?? "")) || 0;
+                                    if (delta <= 0) return;
+                                    setQtyMap((prev) => {
+                                      const current = Number(prev[it.id] || "0") || 0;
+                                      return { ...prev, [it.id]: String(Math.max(0, current + delta)) };
+                                    });
+                                    setAddQtyMap((prev) => ({ ...prev, [it.id]: "" }));
+                                    highlightAndMoveToTop(it.id);
+                                  }
+                                }}
+                              />
+                              <button className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" type="button" onClick={() => addQty(it.id)}>
+                                Aggiungi
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {msg && <p className="text-green-700 text-sm">{msg}</p>}
+          {error && <p className="text-red-600 text-sm">{error}</p>}
+
+          <div className="overflow-auto rounded-2xl border bg-white">
             <table className="w-full text-sm">
               <thead className="bg-gray-50">
                 <tr>
                   <th className="text-left p-3 w-40">Codice</th>
                   <th className="text-left p-3">Descrizione</th>
-                  <th className="text-right p-3 w-32">Tot.</th>
-                  <th className="text-right p-3 w-40">Aggiungi</th>
+                  <th className="text-right p-3 w-40">Quantità</th>
                 </tr>
               </thead>
               <tbody>
-                {scannedItemsVisible.map((it) => {
+                {filteredItems.map((it) => {
                   const isHi = highlightScannedId === it.id;
                   return (
                     <tr key={it.id} className={`border-t ${isHi ? "bg-green-50" : ""}`}>
                       <td className="p-3 font-medium">{it.code}</td>
                       <td className="p-3">{it.description}</td>
                       <td className="p-3 text-right">
-                        <input className="w-24 rounded-xl border p-2 text-right" inputMode="numeric" placeholder="0" value={qtyMap[it.id] ?? ""} onChange={(e) => {
-                          const cleaned = onlyDigits(e.target.value);
-                          setQtyMap((prev) => ({ ...prev, [it.id]: cleaned }));
-                        }} />
-                      </td>
-                      <td className="p-3">
-                        <div className="flex justify-end gap-2">
-                          <input
-                            className="w-24 rounded-xl border p-2 text-right"
-                            inputMode="numeric"
-                            placeholder="+ qty"
-                            value={addQtyMap[it.id] ?? ""}
-                            onChange={(e) => setAddQtyMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") {
-                                e.preventDefault();
-                                const delta = Number(onlyDigits(addQtyMap[it.id] ?? "")) || 0;
-                                if (delta <= 0) return;
-                                setQtyMap((prev) => {
-                                  const current = Number(prev[it.id] || "0") || 0;
-                                  return { ...prev, [it.id]: String(Math.max(0, current + delta)) };
-                                });
-                                setAddQtyMap((prev) => ({ ...prev, [it.id]: "" }));
-                                highlightAndMoveToTop(it.id);
+                        <input
+                          ref={(el) => {
+                            qtyInputRefs.current[it.id] = el;
+                          }}
+                          className="w-24 rounded-xl border p-2 text-right"
+                          inputMode="numeric"
+                          placeholder="(vuoto)"
+                          value={qtyMap[it.id] ?? ""}
+                          onChange={(e) => {
+                            const cleaned = onlyDigits(e.target.value);
+                            setQtyMap((prev) => ({ ...prev, [it.id]: cleaned }));
+                            const n = Number(cleaned || "0") || 0;
+
+                            setScannedIds((prev) => {
+                              const has = prev.includes(it.id);
+                              if (n > 0 && !has) return [it.id, ...prev];
+                              if (n > 0 && has) return [it.id, ...prev.filter((id) => id !== it.id)];
+                              if (n <= 0 && has) return prev.filter((id) => id !== it.id);
+                              return prev;
+                            });
+
+                            if (n > 0) setHighlightScannedId(it.id);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              const el = searchInputRef.current;
+                              if (el) {
+                                el.focus();
+                                el.select();
                               }
-                            }}
-                          />
-                          <button className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" type="button" onClick={() => addQty(it.id)}>
-                            Aggiungi
-                          </button>
-                        </div>
+                            }
+                          }}
+                        />
                       </td>
                     </tr>
                   );
                 })}
+                {filteredItems.length === 0 && (
+                  <tr>
+                    <td colSpan={3} className="p-3 text-gray-500">
+                      Nessun articolo
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
-        )}
-      </div>
-
-      {msg && <p className="text-green-700 text-sm">{msg}</p>}
-      {error && <p className="text-red-600 text-sm">{error}</p>}
-
-      <div className="overflow-auto rounded-2xl border bg-white">
-        <table className="w-full text-sm">
-          <thead className="bg-gray-50">
-            <tr>
-              <th className="text-left p-3 w-40">Codice</th>
-              <th className="text-left p-3">Descrizione</th>
-              <th className="text-right p-3 w-40">Quantità</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filteredItems.map((it) => {
-              const isHi = highlightScannedId === it.id;
-              return (
-                <tr key={it.id} className={`border-t ${isHi ? "bg-green-50" : ""}`}>
-                  <td className="p-3 font-medium">{it.code}</td>
-                  <td className="p-3">{it.description}</td>
-                  <td className="p-3 text-right">
-                    <input
-                      ref={(el) => {
-                        qtyInputRefs.current[it.id] = el;
-                      }}
-                      className="w-24 rounded-xl border p-2 text-right"
-                      inputMode="numeric"
-                      placeholder="(vuoto)"
-                      value={qtyMap[it.id] ?? ""}
-                      onChange={(e) => {
-                        const cleaned = onlyDigits(e.target.value);
-                        setQtyMap((prev) => ({ ...prev, [it.id]: cleaned }));
-                        const n = Number(cleaned || "0") || 0;
-
-                        setScannedIds((prev) => {
-                          const has = prev.includes(it.id);
-                          if (n > 0 && !has) return [it.id, ...prev];
-                          if (n > 0 && has) return [it.id, ...prev.filter((id) => id !== it.id)];
-                          if (n <= 0 && has) return prev.filter((id) => id !== it.id);
-                          return prev;
-                        });
-
-                        if (n > 0) setHighlightScannedId(it.id);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.preventDefault();
-                          const el = searchInputRef.current;
-                          if (el) {
-                            el.focus();
-                            el.select();
-                          }
-                        }
-                      }}
-                    />
-                  </td>
-                </tr>
-              );
-            })}
-            {filteredItems.length === 0 && (
-              <tr>
-                <td colSpan={3} className="p-3 text-gray-500">
-                  Nessun articolo
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+        </>
+      )}
     </div>
   );
 }
+
 
 
 

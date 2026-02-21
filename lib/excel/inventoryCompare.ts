@@ -19,6 +19,10 @@ export type CompareLine = {
   // ✅ flags per evidenziare “codice mancante” (match assente)
   foundInInventory: boolean;
   foundInGestionale: boolean;
+
+  // ✅ opzionali (per creare fogli per categoria/sottocategoria)
+  categoryName?: string | null;
+  subcategoryName?: string | null;
 };
 
 function isoToIt(iso: string) {
@@ -62,6 +66,7 @@ function toNumberLoose(v: any): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+// ✅ normalizzazione codice: serve IDENTICA ovunque (inventario + gestionale + set)
 function normCode(v: unknown): string {
   const raw = String(v ?? "").trim();
   if (!raw) return "";
@@ -77,45 +82,17 @@ function normCode(v: unknown): string {
 function looksLikeItemCode(code: string): boolean {
   if (!code) return false;
 
-  // evita codici troppo corti (spazzatura tipo "A" o "6")
   if (code.length < 2) return false;
-
-  // evita stringhe enormi
   if (code.length > 30) return false;
 
-  // evita pattern palesemente non-codice
   if (code.includes(":")) return false;
   if (/^TOTALE/i.test(code)) return false;
 
-  // deve essere alfanumerico puro (dopo normCode)
   if (!/^[A-Z0-9]+$/.test(code)) return false;
 
-  // ✅ NOTA: prima qui c’era il vincolo “deve contenere almeno una cifra”.
-  // L’abbiamo rimosso perché codici reali possono essere SOLO lettere (es. CAFFGRANI).
   return true;
 }
 
-function isCodeHeader(h: string): boolean {
-  const s = normHeader(h);
-  if (!s) return false;
-
-  if (s === "codice") return true;
-  if (s === "cod") return true;
-  if (s === "codice articolo") return true;
-  if (s === "cod articolo") return true;
-  if (s === "codicearticolo") return true;
-  if (s === "codarticolo") return true;
-
-  const noSpaces = s.replace(/\s+/g, "");
-  if (noSpaces.includes("cod") && noSpaces.includes("art")) return true;
-
-  return false;
-}
-
-/**
- * ✅ Valuta quanto un header è “codice articolo”
- * più alto = migliore
- */
 function scoreCodeHeader(h: string): number {
   const s = normHeader(h);
   if (!s) return 0;
@@ -131,10 +108,6 @@ function scoreCodeHeader(h: string): number {
   return 0;
 }
 
-/**
- * ✅ Valuta quanto un header è “Giacenza qta1”
- * più alto = migliore
- */
 function scoreQtyHeader(h: string): number {
   const s0 = normHeader(h);
   if (!s0) return 0;
@@ -360,14 +333,22 @@ function mlToLitri(ml: number) {
   return ml / 1000;
 }
 
-export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines: CompareLine[]): Promise<ArrayBuffer> {
-  const wb = new ExcelJS.Workbook();
+// ✅ excel sheet name max 31 chars + niente caratteri vietati
+function safeSheetName(name: string) {
+  const cleaned = String(name || "")
+    .replace(/[\[\]\*\/\\\?\:]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
-  const ws = wb.addWorksheet("CONFRONTO");
+  const out = cleaned.slice(0, 31) || "FOGLIO";
+  return out;
+}
+
+function addCompareSheet(wb: ExcelJS.Workbook, sheetName: string, meta: InventoryExcelMeta, lines: CompareLine[]) {
+  const ws = wb.addWorksheet(sheetName);
   writeMeta(ws, meta);
 
   const headerRow = 9;
-
   ws.getRow(headerRow).values = [
     "Codice",
     "Descrizione",
@@ -414,7 +395,6 @@ export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines:
   let totLitGes = 0;
   let totLitDiff = 0;
 
-  // ✅ qui rimangono solo righe con quantità (inv o ges)
   const mergedView = (lines || []).filter((l) => Number(l.qtyInventory || 0) > 0 || Number(l.qtyGestionale || 0) > 0);
 
   mergedView.sort((a, b) => {
@@ -557,10 +537,48 @@ export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines:
   ws.getCell(negRow3, 13).numFmt = "0.00";
 
   styleTable(ws, headerRow, totalRow, 14);
+}
+
+export async function buildInventoryCompareXlsx(meta: InventoryExcelMeta, lines: CompareLine[]): Promise<ArrayBuffer> {
+  const wb = new ExcelJS.Workbook();
+
+  // 1) foglio principale (sempre)
+  addCompareSheet(wb, "CONFRONTO", meta, lines);
+
+  // 2) fogli extra per categoria/sottocategoria (solo se presenti)
+  const hasGroups = (lines || []).some((l) => (l.categoryName || "").trim() || (l.subcategoryName || "").trim());
+  if (hasGroups) {
+    const groups = new Map<string, CompareLine[]>();
+
+    for (const l of lines || []) {
+      const cat = (l.categoryName || "Senza categoria").toString().trim() || "Senza categoria";
+      const sub = (l.subcategoryName || "—").toString().trim() || "—";
+      const key = `${cat}||${sub}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(l);
+    }
+
+    const usedNames = new Set<string>();
+    for (const [key, groupLines] of groups.entries()) {
+      const [cat, sub] = key.split("||");
+      let base = sub && sub !== "—" ? `${cat}-${sub}` : `${cat}`;
+      base = safeSheetName(base);
+
+      // evita duplicati (Excel non li vuole)
+      let name = base;
+      let i = 2;
+      while (usedNames.has(name) || wb.getWorksheet(name)) {
+        name = safeSheetName(`${base}-${i}`);
+        i++;
+      }
+      usedNames.add(name);
+
+      addCompareSheet(wb, name, meta, groupLines);
+    }
+  }
 
   const outBuf = await wb.xlsx.writeBuffer();
   return outBuf as ArrayBuffer;
-
 }
 
 /**
@@ -576,13 +594,23 @@ export function buildCompareLines(
     code: string;
     description: string;
     qty: number;
-    qty_ml?: number; // ✅ nuovo
+    qty_ml?: number;
     prezzo_vendita_eur?: number | null;
     volume_ml_per_unit?: number | null;
+
+    // ✅ opzionali (per fogli per categoria/sottocategoria)
+    category_name?: string | null;
+    subcategory_name?: string | null;
   }[],
   gestionaleMap: Map<string, number>,
   opts?: { onlyInventory?: boolean }
 ): CompareLine[] {
+  // ✅ Set dei codici del gestionale normalizzati (sicurezza extra)
+  const gestionaleCodes = new Set<string>();
+  for (const k of gestionaleMap.keys()) {
+    const kk = normCode(k);
+    if (looksLikeItemCode(kk)) gestionaleCodes.add(kk);
+  }
 
   const invMap = new Map<
     string,
@@ -592,6 +620,8 @@ export function buildCompareLines(
       qtyMl: number;
       prezzo: number | null;
       mlPerUnit: number | null;
+      categoryName: string | null;
+      subcategoryName: string | null;
     }
   >();
 
@@ -608,32 +638,33 @@ export function buildCompareLines(
       qtyMl: Number((l as any).qty_ml ?? 0),
       prezzo: l.prezzo_vendita_eur == null ? null : Number(l.prezzo_vendita_eur),
       mlPerUnit,
+      categoryName: (l as any).category_name != null ? String((l as any).category_name) : null,
+      subcategoryName: (l as any).subcategory_name != null ? String((l as any).subcategory_name) : null,
     });
   }
 
   const codes = new Set<string>();
-for (const k of invMap.keys()) codes.add(k);
+  for (const k of invMap.keys()) codes.add(k);
 
-const onlyInventory = !!opts?.onlyInventory;
-if (!onlyInventory) {
-  for (const k of gestionaleMap.keys()) {
-    const kk = normCode(k);
-    if (looksLikeItemCode(kk)) codes.add(kk);
+  const onlyInventory = !!opts?.onlyInventory;
+  if (!onlyInventory) {
+    for (const k of gestionaleCodes) codes.add(k);
   }
-}
-
 
   const out: CompareLine[] = [];
   for (const code of codes) {
     const inv = invMap.get(code);
 
     const foundInInventory = invMap.has(code);
-    const foundInGestionale = gestionaleMap.has(code);
+    const foundInGestionale = gestionaleCodes.has(code);
 
     const isMlItem = inv?.mlPerUnit != null && Number.isFinite(inv.mlPerUnit) && inv.mlPerUnit > 0;
 
     const qtyInv = isMlItem ? Number(inv?.qtyMl ?? 0) : Number(inv?.qtyPieces ?? 0);
 
+    // NB: la Map originale potrebbe avere key non-normalizzate in casi strani,
+    // quindi prendiamo dalla Set normalizzata -> ma il valore lo leggiamo dalla Map originale:
+    // (qui assumiamo che parseGestionaleXlsx normalizzi i key: infatti usa normCode).
     const qtyGes = Number(gestionaleMap.get(code) ?? 0);
 
     const diff = qtyInv - qtyGes;
@@ -648,6 +679,8 @@ if (!onlyInventory) {
       volumeMlPerUnit: isMlItem ? inv?.mlPerUnit ?? null : null,
       foundInInventory,
       foundInGestionale,
+      categoryName: inv?.categoryName ?? null,
+      subcategoryName: inv?.subcategoryName ?? null,
     });
   }
 

@@ -190,11 +190,11 @@ export default function InventoryHistoryClient() {
     }, 0);
   }, [detail]);
 
-  const detailMlOpen = useMemo(() => {
-    return (detail as any[]).reduce((sum, r: any) => {
-      return sum + (Number(r?.ml_open) || 0);
-    }, 0);
-  }, [detail]);
+  const detailMlSum = useMemo(() => {
+  return (detail as any[]).reduce((sum, r: any) => {
+    return sum + (Number(r?.qty_ml) || 0);
+  }, 0);
+}, [detail]);
 
   const detailGrSum = useMemo(() => {
     return (detail as any[]).reduce((sum, r: any) => {
@@ -968,8 +968,35 @@ export default function InventoryHistoryClient() {
 
                         const p = new URLSearchParams();
                         p.set("pv_id", g.pv_id);
-                        p.set("category_id", g.category_id);
-                        if (g.subcategory_id) p.set("subcategory_id", g.subcategory_id);
+
+                        // ⚠️ IMPORTANTE:
+                        // In DB la chiave è (pv_id, category_id, subcategory_id, inventory_date) e subcategory può essere NULL.
+                        // L'endpoint /api/inventories/rows interpreta "null" (stringa) come NULL.
+                        // In riapertura passiamo SEMPRE subcategory_id per evitare mismatch e righe vuote (qty=0 in UI).
+
+                        // ✅ Categoria: UUID oppure NULL (Rapido/Tutte)
+                        if (!g.category_id) {
+                          p.set("category_id", "null");
+                          // Compatibilità legacy lato client
+                          p.set("rapid", "1");
+                          p.set("mode", "rapid");
+                        } else {
+                          p.set("category_id", g.category_id);
+
+                          // ✅ Subcategory:
+                          // - se presente e UUID, la passo
+                          // - se assente/NULL, la OMETTO del tutto
+                          //   (alcuni inventari legacy hanno righe con subcategory valorizzata anche se il gruppo risulta NULL;
+                          //    passare "null" qui provoca righe vuote e qty=0 in UI)
+                          if (g.subcategory_id) {
+                            p.set("subcategory_id", g.subcategory_id);
+                          }
+
+                          // Se l'inventario era stato fatto in modalità rapida ma con categoria (es. Tabacchi),
+                          // forziamo la UI a riaprire in rapid per coerenza UX.
+                          p.set("mode", "rapid");
+                        }
+
                         p.set("inventory_date", g.inventory_date);
                         if ((g.operatore || "").trim()) p.set("operatore", String(g.operatore).trim());
 
@@ -1046,12 +1073,7 @@ export default function InventoryHistoryClient() {
                     — GR: <b>{detailGrSum}</b>
                   </>
                 ) : null}
-                {detailMlOpen > 0 ? (
-                  <>
-                    {" "}
-                    — Ml: <b>{detailMlOpen}</b>
-                  </>
-                ) : null}{" "}
+                {detailMlSum > 0 ? <> — Ml: <b>{detailMlSum}</b></> : null}{" "}
                 — Valore: <b>{hasAnyPriceInDetail ? formatEUR(detailValueEur) : "—"}</b>
               </div>
             </div>
@@ -1103,7 +1125,7 @@ export default function InventoryHistoryClient() {
 
                     const pz = Number(x.qty) || 0;
                     const gr = Number(x.qty_gr ?? 0) || 0;
-                    const mlOpen = isMl ? Number(x.ml_open ?? 0) || 0 : null;
+                    const mlTot = isMl ? Number(x.qty_ml ?? 0) || 0 : null;
 
                     return (
                       <tr key={x.id} className="border-t">
@@ -1111,7 +1133,7 @@ export default function InventoryHistoryClient() {
                         <td className="p-3">{x.description}</td>
                         <td className="p-3 text-right font-semibold">{pz}</td>
                         <td className="p-3 text-right font-semibold">{gr > 0 ? gr : "—"}</td>
-                        <td className="p-3 text-right font-semibold">{isMl ? mlOpen : "—"}</td>
+                        <td className="p-3 text-right font-semibold">{isMl ? mlTot : "—"}</td>
                       </tr>
                     );
                   })}

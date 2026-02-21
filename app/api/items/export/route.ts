@@ -25,6 +25,15 @@ function asText(v: any) {
   return s ? s : "";
 }
 
+function relName(v: any): string {
+  if (!v) return "";
+  // se arriva come array (caso comune)
+  if (Array.isArray(v)) return asText(v?.[0]?.name);
+  // se arriva come oggetto
+  return asText(v?.name);
+}
+
+
 function asNumber(v: any): number | null {
   if (v == null || v === "") return null;
   const n = Number(String(v).replace(",", "."));
@@ -93,10 +102,19 @@ export async function GET(req: Request) {
       categoryName = legacyCategory;
     }
 
-    // 📦 Query items
+    // 📦 Query items con LEFT JOIN categorie
     let query = supabaseAdmin
       .from("items")
-      .select("code, description, barcode, um, prezzo_vendita_eur, is_active");
+      .select(`
+        code,
+        description,
+        barcode,
+        um,
+        prezzo_vendita_eur,
+        is_active,
+        categories:categories!left(name),
+        subcategories:subcategories!left(name)
+      `);
 
     if (usingNewSchema) {
       query = query.eq("category_id", category_id);
@@ -134,19 +152,28 @@ export async function GET(req: Request) {
     ws.getRow(1).font = { size: 14, bold: true };
 
     ws.addRow([]);
-    ws.addRow(["Categoria:", categoryName || "—"]);
-    ws.addRow(["Sottocategoria:", subcategoryName || "—"]);
+    ws.addRow(["Categoria filtro:", categoryName || "—"]);
+    ws.addRow(["Sottocategoria filtro:", subcategoryName || "—"]);
 
     let statoLabel = "Tutti";
     if (active === "1") statoLabel = "Attivi";
     else if (active === "0") statoLabel = "Disattivi";
 
-    ws.addRow(["Stato:", statoLabel]);
+    ws.addRow(["Stato filtro:", statoLabel]);
     ws.addRow(["Ricerca:", q || "—"]);
     ws.addRow([]);
 
     // ====== HEADER TABELLA ======
-    ws.addRow(["Codice", "Descrizione", "Barcode", "UM", "Prezzo"]);
+    ws.addRow([
+      "Codice",
+      "Descrizione",
+      "Categoria",
+      "Sottocategoria",
+      "Barcode",
+      "UM",
+      "Prezzo"
+    ]);
+
     const headerRowIndex = ws.lastRow?.number ?? 1;
     ws.getRow(headerRowIndex).font = { bold: true };
 
@@ -155,6 +182,9 @@ export async function GET(req: Request) {
       ws.addRow([
         asText(r.code),
         asText(r.description),
+        relName((r as any).categories),
+        relName((r as any).subcategories),
+
         r.barcode == null ? "" : asText(r.barcode),
         r.um == null ? "" : asText(r.um),
         asNumber(r.prezzo_vendita_eur) ?? "",
@@ -163,14 +193,15 @@ export async function GET(req: Request) {
 
     ws.views = [{ state: "frozen", ySplit: headerRowIndex }];
 
-    const prezzoCol = ws.getColumn(5);
-    prezzoCol.numFmt = '#,##0.00';
-
     ws.getColumn(1).width = 18;
-    ws.getColumn(2).width = 60;
+    ws.getColumn(2).width = 50;
     ws.getColumn(3).width = 22;
-    ws.getColumn(4).width = 10;
-    ws.getColumn(5).width = 12;
+    ws.getColumn(4).width = 22;
+    ws.getColumn(5).width = 22;
+    ws.getColumn(6).width = 10;
+    ws.getColumn(7).width = 12;
+
+    ws.getColumn(7).numFmt = "#,##0.00";
 
     const buffer = await wb.xlsx.writeBuffer();
     const bin = Buffer.from(buffer as ArrayBuffer);
@@ -188,4 +219,5 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: e?.message || "Errore export" }, { status: 500 });
   }
 }
+
 
