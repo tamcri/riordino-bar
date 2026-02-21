@@ -70,6 +70,19 @@ function isKgItem(it: Item) {
   return String(it.um || "").toLowerCase() === "kg";
 }
 
+function isIOSDevice() {
+  if (typeof navigator === "undefined") return false;
+
+  const ua = navigator.userAgent || "";
+  const iOS = /iPad|iPhone|iPod/.test(ua);
+
+  // iPadOS spesso si presenta come MacIntel con touch
+  const iPadOS = (navigator as any).platform === "MacIntel" && (navigator as any).maxTouchPoints > 1;
+
+  return iOS || iPadOS;
+}
+
+
 function mlToLitriLabel(ml: number) {
   const l = ml / 1000;
   return `${l.toFixed(1)} L`;
@@ -155,6 +168,7 @@ export default function InventoryClient() {
 
   const [search, setSearch] = useState("");
   const [scannerOpen, setScannerOpen] = useState(false);
+  const [suggestionsOpen, setSuggestionsOpen] = useState(false);
 
   // ✅ lista “Scansionati”
   const [scannedIds, setScannedIds] = useState<string[]>([]);
@@ -282,11 +296,35 @@ export default function InventoryClient() {
 
   // ✅ se passo a Rapido “per qualsiasi motivo” => azzero categorie sempre
   useEffect(() => {
-    if (inventoryMode === "rapid") {
-      forceRapidCategoryNull();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [inventoryMode]);
+  if (inventoryMode !== "rapid") return;
+  if (rapidView !== "scan") return;
+  if (!focusItemId) return;
+
+  // ✅ Solo iOS: auto-scroll + focus (su Android evito tastiera che si apre subito)
+  if (!isIOSDevice()) return;
+
+  const it = items.find((x) => x.id === focusItemId);
+  if (!it) return;
+
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      const ml = isMlItem(it);
+      const kg = isKgItem(it) && !ml;
+
+      const target = kg ? rapidGrInputRef.current : ml ? rapidMlInputRef.current : rapidPzInputRef.current;
+      if (!target) return;
+
+      try {
+        target.scrollIntoView({ block: "center", behavior: "smooth" });
+      } catch {}
+
+      window.setTimeout(() => {
+        target.focus();
+        target.select?.();
+      }, 150);
+    });
+  });
+}, [inventoryMode, rapidView, focusItemId, items]);
 
   // ✅ persisto modalità (best-effort)
   useEffect(() => {
@@ -1001,6 +1039,7 @@ export default function InventoryClient() {
     }
 
     setSearch("");
+    setSuggestionsOpen(false);
 
     if (!found) {
       setMsg(null);
@@ -1821,26 +1860,45 @@ export default function InventoryClient() {
 
                 <div className="flex gap-2">
                   <input
-                    ref={searchInputRef}
-                    className="w-full rounded-xl border p-3 text-base"
-                    placeholder="Barcode / codice / descrizione"
-                    value={search}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setSearch(v);
-                      setMsg(null);
-                      setError(null);
-                      if (focusItemId) setFocusItemId(null);
-                      setRapidView("scan");
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        handleScanEnter(undefined, false);
-                        setRapidView("scan");
-                      }
-                    }}
-                  />
+  ref={searchInputRef}
+  className="w-full rounded-xl border p-3 text-base"
+  placeholder="Barcode / codice / descrizione"
+  value={search}
+
+  onChange={(e) => {
+    const v = e.target.value;
+    setSearch(v);
+    setMsg(null);
+    setError(null);
+    if (focusItemId) setFocusItemId(null);
+    setRapidView("scan");
+
+    // ✅ mobile: apri modal risultati
+    if (typeof window !== "undefined") {
+      const isMobile = window.matchMedia?.("(max-width: 767px)")?.matches;
+      if (isMobile) setSuggestionsOpen(true);
+    }
+  }}
+
+  onFocus={() => {
+    // ✅ se rientro nel campo e c’è già testo, riapro modal su mobile
+    if (typeof window !== "undefined") {
+      const isMobile = window.matchMedia?.("(max-width: 767px)")?.matches;
+      if (isMobile && search.trim().length >= 2) {
+        setSuggestionsOpen(true);
+      }
+    }
+  }}
+
+  onKeyDown={(e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      handleScanEnter(undefined, false);
+      setRapidView("scan");
+      setSuggestionsOpen(false); // chiude modal se aperto
+    }
+  }}
+/>
 
                   <button
                     type="button"
@@ -1858,7 +1916,7 @@ export default function InventoryClient() {
 
                 {/* suggestions live */}
                 {rapidSuggestions.length > 0 && (
-                  <div className="absolute z-50 mt-1 w-full rounded-xl border bg-white shadow-sm overflow-hidden">
+                  <div className="hidden md:block absolute z-20 mt-1 w-full rounded-xl border bg-white shadow-sm overflow-hidden">
                     {rapidSuggestions.map((it) => (
                       <button key={it.id} type="button" className="w-full text-left px-3 py-2 hover:bg-gray-50" onClick={() => openItemInRapid(it)}>
                         <div className="text-sm font-medium">{it.code}</div>
@@ -1888,6 +1946,53 @@ export default function InventoryClient() {
               </div>
             </div>
           </div>
+
+          {/* ✅ Mobile suggestions modal */}
+{inventoryMode === "rapid" && suggestionsOpen && (
+  <div className="fixed inset-0 z-[120] bg-black/60 md:hidden">
+    <div className="absolute inset-x-0 bottom-0 max-h-[85vh] rounded-t-3xl bg-white shadow-xl">
+      <div className="p-4 border-b flex items-center justify-between gap-3">
+        <div>
+          <div className="text-sm font-medium">Risultati</div>
+          <div className="text-xs text-gray-500">
+            {search.trim() ? `Ricerca: "${search.trim()}"` : "Digita per cercare"}
+          </div>
+        </div>
+
+        <button
+          type="button"
+          className="rounded-xl border px-3 py-2 text-sm"
+          onClick={() => setSuggestionsOpen(false)}
+        >
+          Chiudi
+        </button>
+      </div>
+
+      <div className="p-2 overflow-auto max-h-[70vh]">
+        {rapidSuggestions.length === 0 ? (
+          <div className="p-4 text-sm text-gray-500">Nessun risultato.</div>
+        ) : (
+          <div className="divide-y">
+            {rapidSuggestions.map((it) => (
+              <button
+                key={it.id}
+                type="button"
+                className="w-full text-left p-3 hover:bg-gray-50"
+                onClick={() => {
+                  setSuggestionsOpen(false);
+                  openItemInRapid(it);
+                }}
+              >
+                <div className="text-sm font-semibold">{it.code}</div>
+                <div className="text-xs text-gray-600 line-clamp-2">{it.description}</div>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  </div>
+)}
 
           {rapidView === "scan" && (
             <div className="rounded-2xl border bg-white p-4">
