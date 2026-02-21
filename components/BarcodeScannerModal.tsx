@@ -6,20 +6,23 @@ type Props = {
   open: boolean;
   onClose: () => void;
   onDetected: (rawValue: string) => void;
-  /** Mostra il bottone torcia (best-effort: dipende da device/browser). */
   enableTorch?: boolean;
-  /** Lista formati preferiti (BarcodeDetector ignora quelli non supportati). */
   formats?: string[];
 };
 
-// Scanner camera “zero dipendenze” (usa Web BarcodeDetector):
-// - Pro: leggero, niente build/npm changes.
-// - Contro: se BarcodeDetector non c’è, lo scanner non può funzionare (mostriamo fallback).
-
-export default function BarcodeScannerModal({ open, onClose, onDetected, enableTorch = true, formats }: Props) {
+export default function BarcodeScannerModal({
+  open,
+  onClose,
+  onDetected,
+  enableTorch = true,
+  formats,
+}: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
+
+  // ZXing stop "pulito"
+  const zxingStopRef = useRef<null | (() => void)>(null);
 
   const [error, setError] = useState<string | null>(null);
   const [torchOn, setTorchOn] = useState(false);
@@ -31,14 +34,26 @@ export default function BarcodeScannerModal({ open, onClose, onDetected, enableT
 
   async function stop() {
     try {
+      // stop loop BarcodeDetector
       if (rafRef.current != null) {
         cancelAnimationFrame(rafRef.current);
         rafRef.current = null;
       }
+
+      // stop ZXing
+      if (zxingStopRef.current) {
+        try {
+          zxingStopRef.current();
+        } catch {}
+        zxingStopRef.current = null;
+      }
+
+      // stop stream
       if (streamRef.current) {
         for (const t of streamRef.current.getTracks()) t.stop();
         streamRef.current = null;
       }
+
       setTorchOn(false);
     } catch {
       // ignore
@@ -64,15 +79,12 @@ export default function BarcodeScannerModal({ open, onClose, onDetected, enableT
 
   async function start() {
     setError(null);
-
-    if (!hasBarcodeDetector) {
-      setError("Scanner non supportato su questo browser. Usa Chrome (Android) o un lettore barcode fisico.");
-      return;
-    }
     if (!videoRef.current) return;
 
     setStarting(true);
+
     try {
+      // ✅ Camera stream (serve HTTPS o localhost)
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
         video: {
@@ -87,35 +99,87 @@ export default function BarcodeScannerModal({ open, onClose, onDetected, enableT
       video.srcObject = stream;
       await video.play();
 
-      const Detector = (window as any).BarcodeDetector;
-      const detector = new Detector(Array.isArray(formats) && formats.length ? { formats } : undefined);
+      // ✅ 1) Se c’è BarcodeDetector, usa quello
+      if (hasBarcodeDetector) {
+        const Detector = (window as any).BarcodeDetector;
+        const detector = new Detector(Array.isArray(formats) && formats.length ? { formats } : undefined);
 
-      const loop = async () => {
-        rafRef.current = requestAnimationFrame(loop);
+        const loop = async () => {
+          rafRef.current = requestAnimationFrame(loop);
 
-        const v = videoRef.current;
-        if (!v || v.readyState < 2) return;
-        if ((loop as any)._busy) return;
-        (loop as any)._busy = true;
+          const v = videoRef.current;
+          if (!v || v.readyState < 2) return;
+          if ((loop as any)._busy) return;
+          (loop as any)._busy = true;
 
-        try {
-          const barcodes = await detector.detect(v);
-          const first = Array.isArray(barcodes) ? barcodes[0] : null;
-          const raw = first?.rawValue ? String(first.rawValue) : "";
-          if (raw) {
-            await stop();
-            onClose();
-            onDetected(raw);
-            return;
+          try {
+            const barcodes = await detector.detect(v);
+            const first = Array.isArray(barcodes) ? barcodes[0] : null;
+            const raw = first?.rawValue ? String(first.rawValue) : "";
+            if (raw) {
+              await stop();
+              onClose();
+              onDetected(raw);
+              return;
+            }
+          } catch {
+            // ok
+          } finally {
+            (loop as any)._busy = false;
           }
-        } catch {
-          // alcuni frame possono dare errori sporadici
-        } finally {
-          (loop as any)._busy = false;
-        }
-      };
+        };
 
-      rafRef.current = requestAnimationFrame(loop);
+        rafRef.current = requestAnimationFrame(loop);
+        return;
+      }
+
+      // ✅ 2) Fallback iOS: ZXing
+      const [{ BrowserMultiFormatReader }, { BarcodeFormat, DecodeHintType }] = await Promise.all([
+        import("@zxing/browser"),
+        import("@zxing/library"),
+      ]);
+
+      const hints = new Map<any, any>();
+
+      // (opzionale) forzare formati comuni per velocizzare un pelo
+      hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+        BarcodeFormat.EAN_13,
+        BarcodeFormat.EAN_8,
+        BarcodeFormat.UPC_A,
+        BarcodeFormat.UPC_E,
+        BarcodeFormat.CODE_128,
+        BarcodeFormat.CODE_39,
+      ]);
+
+      const reader: any = new BrowserMultiFormatReader(hints);
+
+      // alcune versioni ritornano controls, altre no: gestiamo entrambi i casi
+      let controls: any = null;
+
+      try {
+        controls = await reader.decodeFromVideoElement(video, (result: any) => {
+          if (result) {
+            const raw = String(result.getText?.() || result.text || "").trim();
+            if (raw) {
+              stop().then(() => {
+                onClose();
+                onDetected(raw);
+              });
+            }
+          }
+        });
+      } catch {
+        // se qualcosa va storto qui, ci penserà lo stop/reset
+      }
+
+      zxingStopRef.current = () => {
+        try {
+          if (controls?.stop) controls.stop();
+        } catch {}
+        try {
+          if (reader?.reset) reader.reset();
+        } catch {}
+      };
     } catch (e: any) {
       setError(e?.message || "Permesso camera negato o non disponibile.");
     } finally {

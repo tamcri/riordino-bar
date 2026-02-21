@@ -23,6 +23,14 @@ function looksLikeBarcode(digits: string) {
   return digits.length >= 8;
 }
 
+// ✅ interpreta "" / "null" come NULL
+function normNullParam(v: string | null): string | null {
+  const s = String(v ?? "").trim();
+  if (!s) return null;
+  if (s.toLowerCase() === "null") return null;
+  return s;
+}
+
 async function findItemIdsByBarcodeLike(barcodeDigits: string): Promise<string[]> {
   const b = String(barcodeDigits || "").trim();
   if (!b) return [];
@@ -96,8 +104,13 @@ export async function GET(req: Request) {
 
   const url = new URL(req.url);
 
-  const category_id = url.searchParams.get("category_id");
-  const subcategory_id = url.searchParams.get("subcategory_id");
+  // ✅ Rapido: rapid=1 => non forzare TAB di default
+  const rapid = String(url.searchParams.get("rapid") ?? "").trim();
+  const isRapid = rapid === "1" || rapid.toLowerCase() === "true";
+
+  // ✅ category_id/subcategory_id possono essere null/"null"/""
+  const category_id = normNullParam(url.searchParams.get("category_id"));
+  const subcategory_id = normNullParam(url.searchParams.get("subcategory_id"));
 
   const legacyCategory = (url.searchParams.get("category") || "").trim().toUpperCase(); // TAB | GV
 
@@ -127,12 +140,19 @@ export async function GET(req: Request) {
   if (active === "1") query = query.eq("is_active", true);
   else if (active === "0") query = query.eq("is_active", false);
 
+  // ✅ FILTRO CATEGORIA:
+  // 1) se category_id c’è → filtro per UUID (standard “nuovo”)
+  // 2) altrimenti se legacyCategory c’è → filtro TAB/GV (flusso vecchio)
+  // 3) altrimenti:
+  //    - se Rapido (rapid=1) → NESSUN filtro (Tutte)
+  //    - se NON Rapido → default TAB (come prima, zero regressioni)
   if (category_id) {
     query = query.eq("category_id", category_id);
     if (subcategory_id) query = query.eq("subcategory_id", subcategory_id);
-  } else {
-    const cat = legacyCategory || "TAB";
-    query = query.eq("category", cat);
+  } else if (legacyCategory) {
+    query = query.eq("category", legacyCategory);
+  } else if (!isRapid) {
+    query = query.eq("category", "TAB");
   }
 
   if (qRaw) {

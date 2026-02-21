@@ -36,5 +36,13 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
 
-  return NextResponse.json({ ok: true, rows: data || [] });
+  const barcodes = (Array.isArray(data) ? data : [])
+  .map((r: any) => String(r?.barcode ?? "").trim())
+  .filter(Boolean);
+
+return NextResponse.json({
+  ok: true,
+  barcodes,
+  rows: data || [],
+});
 }
