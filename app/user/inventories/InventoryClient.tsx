@@ -1,6 +1,7 @@
 "use client";
 import BarcodeScannerModal from "@/components/BarcodeScannerModal";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { useSearchParams } from "next/navigation";
 
 type Pv = { id: string; code: string; name: string; is_active?: boolean };
@@ -1006,6 +1007,27 @@ export default function InventoryClient() {
       scrollIntoViewById(`inv-item-row-${it.id}`);
     });
   }
+
+  function focusRapidQtyNow(it: Item) {
+  const ml = isMlItem(it);
+  const kg = isKgItem(it) && !ml;
+
+  // IMPORTANTISSIMO iOS: focus deve avvenire subito nel tap
+  requestAnimationFrame(() => {
+    if (kg) {
+      rapidGrInputRef.current?.focus();
+      rapidGrInputRef.current?.select?.();
+      return;
+    }
+    if (ml) {
+      rapidMlInputRef.current?.focus();
+      rapidMlInputRef.current?.select?.();
+      return;
+    }
+    rapidPzInputRef.current?.focus();
+    rapidPzInputRef.current?.select?.();
+  });
+}
 
   function handleScanEnter(rawOverride?: string, fromScanner?: boolean) {
     const raw = String(rawOverride ?? search).trim();
@@ -2325,7 +2347,15 @@ export default function InventoryClient() {
                             <button
                               type="button"
                               className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
-                              onClick={() => openItemInRapid(it)}
+                              onClick={() => {
+                              flushSync(() => {
+                              setSuggestionsOpen(false);
+                              openItemInRapid(it);
+                               });
+
+                              // subito dopo: focus quantità (apre tastiera iOS)
+                               focusRapidQtyNow(it);
+                              }}
                             >
                               Apri
                             </button>
