@@ -2349,13 +2349,12 @@ export default function InventoryClient() {
                               className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
                               onClick={() => {
                               flushSync(() => {
-                              setSuggestionsOpen(false);
-                              openItemInRapid(it);
-                               });
+                             setSuggestionsOpen(false);
+                             openItemInRapid(it);
+                             });
 
-                              // subito dopo: focus quantità (apre tastiera iOS)
-                               focusRapidQtyNow(it);
-                              }}
+                            setTimeout(() => focusRapidQtyNow(it), 0);
+                            }}
                             >
                               Apri
                             </button>
