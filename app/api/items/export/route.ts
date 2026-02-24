@@ -1,4 +1,5 @@
 // app/api/items/export/route.ts
+export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
