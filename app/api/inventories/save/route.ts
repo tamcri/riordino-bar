@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { syncPvStockFromInventory } from "@/lib/deposits/syncPvStockFromInventory";
 
 export const runtime = "nodejs";
 
@@ -254,9 +255,13 @@ export async function POST(req: Request) {
   );
 
   const volumeByItemId = new Map<string, number>();
+  const itemsMeta: { id: string; code: string; volume_ml_per_unit: number | null; peso_kg: number | null; um: string | null }[] = [];
 
   if (validItemIds.length > 0) {
-    const { data: itemsData, error: itemsErr } = await supabaseAdmin.from("items").select("id, volume_ml_per_unit").in("id", validItemIds);
+    const { data: itemsData, error: itemsErr } = await supabaseAdmin
+      .from("items")
+      .select("id, code, volume_ml_per_unit, peso_kg, um")
+      .in("id", validItemIds);
 
     if (itemsErr) {
       console.error("[inventories/save] items volume fetch error:", itemsErr);
@@ -265,9 +270,21 @@ export async function POST(req: Request) {
 
     for (const it of itemsData || []) {
       const id = (it as any)?.id as string | undefined;
+      const code = String((it as any)?.code ?? "").trim();
       const v = Number((it as any)?.volume_ml_per_unit ?? 0);
-      if (id && isUuid(id) && Number.isFinite(v) && v > 0) {
-        volumeByItemId.set(id, v);
+      const pk = Number(String((it as any)?.peso_kg ?? "0").replace(",", "."));
+      const um = String((it as any)?.um ?? "").trim() || null;
+
+      if (id && isUuid(id)) {
+        if (Number.isFinite(v) && v > 0) volumeByItemId.set(id, v);
+
+        itemsMeta.push({
+          id,
+          code,
+          volume_ml_per_unit: Number.isFinite(v) && v > 0 ? v : null,
+          peso_kg: Number.isFinite(pk) && pk > 0 ? pk : null,
+          um,
+        });
       }
     }
   }
@@ -365,6 +382,27 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: insRowsErr.message }, { status: 500 });
   }
 
+  // ✅ 5) Sync deposito tecnico PV-STOCK (senza azzerare il resto)
+  // Importante: questo NON deve bloccare il salvataggio inventario (altrimenti rischi regressioni).
+  // Se fallisce, restituiamo un warning: l’inventario è comunque salvato.
+  let deposit_sync: any = null;
+  let warning: string | null = null;
+  try {
+    deposit_sync = await syncPvStockFromInventory({
+      pv_id,
+      items_meta: itemsMeta,
+      inventory_rows: payload.map((r: any) => ({
+        item_id: String(r.item_id),
+        qty: Number(r.qty) || 0,
+        qty_ml: Number(r.qty_ml) || 0,
+        qty_gr: Number(r.qty_gr) || 0,
+      })),
+    });
+  } catch (e: any) {
+    console.error("[inventories/save] PV-STOCK sync error:", e);
+    warning = `Inventario salvato, ma aggiornamento deposito PV-STOCK fallito: ${e?.message || "errore"}`;
+  }
+
   return NextResponse.json({
     ok: true,
     saved: payload.length,
@@ -372,6 +410,8 @@ export async function POST(req: Request) {
     operatore,
     enforced_pv: session.role === "punto_vendita",
     overwritten: alreadyExists,
+    ...(deposit_sync ? { deposit_sync } : {}),
+    ...(warning ? { warning } : {}),
   });
 }
 

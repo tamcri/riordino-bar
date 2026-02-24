@@ -476,23 +476,42 @@ export default function InventoryPvClient() {
 
     if (!catId) return;
 
-    const params = new URLSearchParams();
-    params.set("category_id", catId);
-    if (subId) params.set("subcategory_id", subId);
-    params.set("limit", "1000");
+    const pageSize = 1000;
+    let offset = 0;
+    let total: number | null = null;
+    const all: Item[] = [];
 
-    const res = await fetch(`/api/items/list?${params.toString()}`, { cache: "no-store" });
-    const json = await res.json();
-    if (!json.ok) throw new Error(json.error || "Errore articoli");
+    // ✅ Caricamento completo (niente limite a 1000)
+    // Si ferma quando offset >= total_count oppure quando una pagina torna vuota.
+    for (let guard = 0; guard < 100; guard++) {
+      const params = new URLSearchParams();
+      params.set("category_id", catId);
+      if (subId) params.set("subcategory_id", subId);
+      params.set("limit", String(pageSize));
+      params.set("offset", String(offset));
 
-    const rows: Item[] = json.rows || [];
-    setItems(rows);
+      const res = await fetch(`/api/items/list?${params.toString()}`, { cache: "no-store" });
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error || "Errore articoli");
+
+      const rows: Item[] = Array.isArray(json.rows) ? json.rows : [];
+      if (typeof json.total_count === "number") total = json.total_count;
+
+      all.push(...rows);
+
+      offset += rows.length;
+      if (rows.length === 0) break;
+      if (total !== null && offset >= total) break;
+      if (rows.length < pageSize && total === null) break;
+    }
+
+    setItems(all);
 
     const m: Record<string, string> = {};
-    rows.forEach((it) => (m[it.id] = "0"));
+    all.forEach((it) => (m[it.id] = "0"));
     setQtyMap(m);
 
-    loadDraftIfAny(rows);
+    loadDraftIfAny(all);
   }
 
   useEffect(() => {
@@ -960,7 +979,6 @@ export default function InventoryPvClient() {
     </div>
   );
 }
-
 
 
 

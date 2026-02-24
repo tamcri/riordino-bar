@@ -58,6 +58,14 @@ function onlyDigits(v: string) {
   return v.replace(/[^\d]/g, "");
 }
 
+function normText(v: any) {
+  return String(v ?? "")
+    .replace(/[\u0000-\u001F\u007F]/g, "") // control chars
+    .replace(/\s+/g, " ")                 // spazi multipli
+    .trim()
+    .toLowerCase();
+}
+
 function formatEUR(n: number) {
   return new Intl.NumberFormat("it-IT", { style: "currency", currency: "EUR" }).format(n);
 }
@@ -1030,53 +1038,72 @@ export default function InventoryClient() {
 }
 
   function handleScanEnter(rawOverride?: string, fromScanner?: boolean) {
-    const raw = String(rawOverride ?? search).trim();
-    if (!raw) return;
+  const raw = String(rawOverride ?? search);
+  const qNorm = normText(raw);
 
-    const q = raw.toLowerCase();
-    const digits = onlyDigits(raw);
-    const isLikelyBarcode = digits.length >= 8;
+  if (!qNorm) return;
 
-    let found: Item | undefined;
+  console.log("[SEARCH DEBUG]", {
+  qNorm,
+  itemsLen: items.length,
+  hasTwix: items.some((x) => normText(x.code) === "twix"),
+});
 
-    if (isLikelyBarcode) {
-      found = items.find((it) => {
-        const bcDigits = onlyDigits(String(it.barcode ?? ""));
-        const codeDigits = onlyDigits(String(it.code ?? ""));
-        return (bcDigits && bcDigits === digits) || (codeDigits && codeDigits === digits);
-      });
+  const digits = onlyDigits(qNorm);
+  const isLikelyBarcode = digits.length >= 8;
 
-      if (!found) {
-        found = items.find((it) => {
-          const bcDigits = onlyDigits(String(it.barcode ?? ""));
-          return digits && bcDigits.includes(digits);
-        });
-      }
-    } else {
-      found = items.find((it) => String(it.code || "").toLowerCase() === q);
+  let found: Item | undefined;
 
-      if (!found) {
-        found = items.find((it) => String(it.description || "").toLowerCase().includes(q));
-      }
-    }
-
-    setSearch("");
-    setSuggestionsOpen(false);
+  if (isLikelyBarcode) {
+    found = items.find((it) => {
+      const bcDigits = onlyDigits(normText(it.barcode));
+      const codeDigits = onlyDigits(normText(it.code));
+      return (bcDigits && bcDigits === digits) || (codeDigits && codeDigits === digits);
+    });
 
     if (!found) {
-      setMsg(null);
-      setError("Articolo non trovato.");
-      requestAnimationFrame(() => focusSearchSoon());
-      return;
+      found = items.find((it) => {
+        const bcDigits = onlyDigits(normText(it.barcode));
+        return digits && bcDigits.includes(digits);
+      });
+    }
+  } else {
+    // 1) match esatto su CODE
+    found = items.find((it) => normText(it.code) === qNorm);
+
+    // 2) startsWith su CODE
+    if (!found) {
+      found = items.find((it) => normText(it.code).startsWith(qNorm));
     }
 
-    setError(null);
-    setMsg(null);
+    // 3) includes su DESCRIZIONE
+    if (!found) {
+      found = items.find((it) => normText(it.description).includes(qNorm));
+    }
 
-    if (fromScanner) vibrateOk();
-
-    openItemInRapid(found);
+    // 4) includes su CODE (fallback)
+    if (!found) {
+      found = items.find((it) => normText(it.code).includes(qNorm));
+    }
   }
+
+  setSearch("");
+  setSuggestionsOpen(false);
+
+  if (!found) {
+    setMsg(null);
+    setError("Articolo non trovato.");
+    requestAnimationFrame(() => focusSearchSoon());
+    return;
+  }
+
+  setError(null);
+  setMsg(null);
+
+  if (fromScanner) vibrateOk();
+
+  openItemInRapid(found);
+}
 
   function onScannerDetected(rawValue: string) {
     const v = String(rawValue || "").trim();
@@ -1913,13 +1940,16 @@ export default function InventoryClient() {
   }}
 
   onKeyDown={(e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      handleScanEnter(undefined, false);
-      setRapidView("scan");
-      setSuggestionsOpen(false); // chiude modal se aperto
-    }
-  }}
+  if (e.key === "Enter") {
+    e.preventDefault();
+
+    const v = (e.currentTarget as HTMLInputElement).value; // ✅ valore reale input
+    handleScanEnter(v, false);
+
+    setRapidView("scan");
+    setSuggestionsOpen(false); // chiude modal se aperto
+  }
+}}
 />
 
                   <button
@@ -1936,17 +1966,22 @@ export default function InventoryClient() {
                   </button>
                 </div>
 
-                {/* suggestions live */}
-                {rapidSuggestions.length > 0 && (
-                  <div className="hidden md:block absolute z-20 mt-1 w-full rounded-xl border bg-white shadow-sm overflow-hidden">
-                    {rapidSuggestions.map((it) => (
-                      <button key={it.id} type="button" className="w-full text-left px-3 py-2 hover:bg-gray-50" onClick={() => openItemInRapid(it)}>
-                        <div className="text-sm font-medium">{it.code}</div>
-                        <div className="text-xs text-gray-600 line-clamp-1">{it.description}</div>
-                      </button>
-                    ))}
-                  </div>
-                )}
+                {/* risultati live (desktop) */}
+{search.trim().length >= 2 && filteredItems.length > 0 && (
+  <div className="hidden md:block absolute z-20 mt-1 w-full rounded-xl border bg-white shadow-sm overflow-hidden">
+    {filteredItems.slice(0, 12).map((it) => (
+      <button
+        key={it.id}
+        type="button"
+        className="w-full text-left px-3 py-2 hover:bg-gray-50"
+        onClick={() => openItemInRapid(it)}
+      >
+        <div className="text-sm font-medium">{it.code}</div>
+        <div className="text-xs text-gray-600 line-clamp-1">{it.description}</div>
+      </button>
+    ))}
+  </div>
+)}
 
                 {!isRapidMobileBar && (
                   <div className="mt-2 text-xs text-gray-500">
@@ -1991,26 +2026,26 @@ export default function InventoryClient() {
       </div>
 
       <div className="p-2 overflow-auto max-h-[70vh]">
-        {rapidSuggestions.length === 0 ? (
-          <div className="p-4 text-sm text-gray-500">Nessun risultato.</div>
-        ) : (
-          <div className="divide-y">
-            {rapidSuggestions.map((it) => (
-              <button
-                key={it.id}
-                type="button"
-                className="w-full text-left p-3 hover:bg-gray-50"
-                onClick={() => {
-                  setSuggestionsOpen(false);
-                  openItemInRapid(it);
-                }}
-              >
-                <div className="text-sm font-semibold">{it.code}</div>
-                <div className="text-xs text-gray-600 line-clamp-2">{it.description}</div>
-              </button>
-            ))}
-          </div>
-        )}
+    {filteredItems.length === 0 ? (
+  <div className="p-4 text-sm text-gray-500">Nessun risultato.</div>
+) : (
+  <div className="divide-y">
+    {filteredItems.slice(0, 30).map((it) => (
+      <button
+        key={it.id}
+        type="button"
+        className="w-full text-left p-3 hover:bg-gray-50"
+        onClick={() => {
+          setSuggestionsOpen(false);
+          openItemInRapid(it);
+        }}
+      >
+        <div className="text-sm font-semibold">{it.code}</div>
+        <div className="text-xs text-gray-600 line-clamp-2">{it.description}</div>
+      </button>
+    ))}
+  </div>
+)}
       </div>
     </div>
   </div>

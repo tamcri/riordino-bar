@@ -475,6 +475,7 @@ export default function AdminDepositInventoryPage() {
                     <th className="p-2 border-b text-left sticky top-0 z-20 bg-gray-50">Descrizione</th>
                     <th className="p-2 border-b text-left sticky top-0 z-20 bg-gray-50">Barcode</th>
                     <th className="p-2 border-b text-right sticky top-0 z-20 bg-gray-50">Quantità</th>
+                    <th className="p-2 border-b text-left sticky top-0 z-20 bg-gray-50">Storico</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -527,6 +528,16 @@ export default function AdminDepositInventoryPage() {
                               }
                             />
                           </div>
+                        </td>
+                        <td className="p-2 border-b">
+                          <Link
+                            className="rounded-lg border px-2 py-1 text-xs hover:bg-gray-50"
+                            href={`/admin/deposits/item-history?pv_id=${encodeURIComponent(pvId)}&item_id=${encodeURIComponent(
+                              r.item_id
+                            )}`}
+                          >
+                            Apri
+                          </Link>
                         </td>
                       </tr>
                     );

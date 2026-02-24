@@ -118,6 +118,7 @@ export async function GET(req: Request) {
   const active = (url.searchParams.get("active") || "1").toLowerCase(); // 1 | 0 | all
 
   const limit = Math.min(Number(url.searchParams.get("limit") || 200), 1000);
+  const offset = Math.max(0, Number(url.searchParams.get("offset") || 0));
 
   if (category_id && !isUuid(category_id)) {
     return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
@@ -132,10 +133,11 @@ export async function GET(req: Request) {
   let query = supabaseAdmin
     .from("items")
     .select(
-      "id, category, category_id, subcategory_id, code, description, barcode, um, peso_kg, conf_da, prezzo_vendita_eur, volume_ml_per_unit, is_active, created_at, updated_at"
+      "id, category, category_id, subcategory_id, code, description, barcode, um, peso_kg, conf_da, prezzo_vendita_eur, volume_ml_per_unit, is_active, created_at, updated_at",
+      { count: "exact" }
     )
     .order("code", { ascending: true })
-    .limit(limit);
+    .range(offset, offset + limit - 1);
 
   if (active === "1") query = query.eq("is_active", true);
   else if (active === "0") query = query.eq("is_active", false);
@@ -183,7 +185,7 @@ export async function GET(req: Request) {
     }
   }
 
-  const { data, error } = await query;
+  const { data, error, count } = await query;
 
   if (error) {
     console.error("[items/list] error:", error);
@@ -206,9 +208,8 @@ export async function GET(req: Request) {
     };
   });
 
-  return NextResponse.json({ ok: true, rows: enriched });
+  return NextResponse.json({ ok: true, rows: enriched, total_count: count ?? null, offset, limit });
 }
-
 
 
 

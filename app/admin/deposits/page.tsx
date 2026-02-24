@@ -31,6 +31,35 @@ function todayISO() {
   return d.toISOString().slice(0, 10);
 }
 
+function formatEUR(n: any) {
+  const x = Number(n);
+  const v = Number.isFinite(x) ? x : 0;
+  return new Intl.NumberFormat("it-IT", { style: "currency", currency: "EUR" }).format(v);
+}
+
+function normUm(v: any) {
+  return String(v ?? "")
+    .trim()
+    .toUpperCase();
+}
+
+function computeRowValueEUR(r: DepositItemRow) {
+  const price = Number(r.items?.prezzo_vendita_eur ?? 0);
+  if (!Number.isFinite(price) || price <= 0) return 0;
+
+  const qty = Number(r.stock_qty ?? 0);
+  if (!Number.isFinite(qty) || qty <= 0) return 0;
+
+  // ✅ Regola coerente col resto del progetto:
+  // - UM=KG => stock_qty è in grammi => converto a kg
+  // - altrimenti => stock_qty “vale” come unità base (PZ / CL / ecc.)
+  const um = normUm(r.items?.um);
+  if (um === "KG") {
+    return (qty / 1000) * price;
+  }
+  return qty * price;
+}
+
 export default function AdminDepositsPage() {
   const [pvs, setPvs] = useState<PV[]>([]);
   const [pvId, setPvId] = useState<string>("");
@@ -53,6 +82,17 @@ export default function AdminDepositsPage() {
 
   const selectedPV = useMemo(() => pvs.find((p) => p.id === pvId) || null, [pvs, pvId]);
   const selectedDeposit = useMemo(() => deposits.find((d) => d.id === depositId) || null, [deposits, depositId]);
+
+  const itemsTotals = useMemo(() => {
+    let totQty = 0;
+    let totValue = 0;
+    for (const r of items) {
+      const q = Number(r.stock_qty ?? 0);
+      totQty += Number.isFinite(q) ? q : 0;
+      totValue += computeRowValueEUR(r);
+    }
+    return { totQty, totValue };
+  }, [items]);
 
   async function loadPvs() {
     const res = await fetch("/api/pvs/list", { cache: "no-store" });
@@ -350,8 +390,19 @@ export default function AdminDepositsPage() {
         <section className="rounded-2xl border bg-white p-4">
           <h2 className="text-lg font-semibold">Articoli nel deposito</h2>
           <p className="text-sm text-gray-600 mt-1">
-            Dopo l’import, qui vedi i mapping su Anagrafica. (Stock attuale: <b>stock_qty</b>)
+            Qui vedi i mapping su Anagrafica e lo stock attuale. Mostriamo anche prezzo e valore (quando disponibili).
           </p>
+
+          {items.length > 0 && !itemsLoading && (
+            <div className="mt-2 text-sm text-gray-700 flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+              <div>
+                Righe: <b>{items.length}</b>
+              </div>
+              <div>
+                Totale quantità: <b>{itemsTotals.totQty}</b> — Totale valore: <b>{formatEUR(itemsTotals.totValue)}</b>
+              </div>
+            </div>
+          )}
 
           {itemsMsg && <div className="mt-3 rounded-xl border bg-white p-3 text-sm">{itemsMsg}</div>}
 
@@ -370,6 +421,9 @@ export default function AdminDepositsPage() {
                       <th className="text-left p-2 border-b">Anagrafica code</th>
                       <th className="text-left p-2 border-b">Descrizione</th>
                       <th className="text-right p-2 border-b">Stock</th>
+                      <th className="text-right p-2 border-b">Prezzo</th>
+                      <th className="text-right p-2 border-b">Valore</th>
+                      <th className="text-left p-2 border-b">Storico</th>
                       <th className="text-left p-2 border-b">Categoria</th>
                     </tr>
                   </thead>
@@ -381,6 +435,20 @@ export default function AdminDepositsPage() {
                         <td className="p-2 border-b font-mono">{r.items?.code ?? ""}</td>
                         <td className="p-2 border-b">{r.items?.description ?? ""}</td>
                         <td className="p-2 border-b text-right">{Number(r.stock_qty ?? 0)}</td>
+                        <td className="p-2 border-b text-right font-mono">{formatEUR(r.items?.prezzo_vendita_eur ?? 0)}</td>
+                        <td className="p-2 border-b text-right font-mono">{formatEUR(computeRowValueEUR(r))}</td>
+                        <td className="p-2 border-b">
+                          {r.item_id ? (
+                            <Link
+                              className="rounded-lg border px-2 py-1 text-xs hover:bg-gray-50"
+                              href={`/admin/deposits/item-history?pv_id=${encodeURIComponent(pvId)}&item_id=${encodeURIComponent(r.item_id)}`}
+                            >
+                              Apri
+                            </Link>
+                          ) : (
+                            ""
+                          )}
+                        </td>
                         <td className="p-2 border-b">{r.items?.category ?? ""}</td>
                       </tr>
                     ))}
