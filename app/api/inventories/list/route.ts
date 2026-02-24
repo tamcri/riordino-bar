@@ -4,6 +4,8 @@ import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 function isUuid(v: string | null) {
   if (!v) return false;
