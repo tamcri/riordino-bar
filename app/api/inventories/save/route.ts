@@ -30,6 +30,10 @@ type Body = {
   subcategory_id?: string | null;
   inventory_date?: string; // YYYY-MM-DD
   operatore?: string;
+
+  // ✅ Etichetta libera (es. "Tabacchi", "Banco 1", "Bevande")
+  label?: string;
+
   rows?: Row[];
   force_overwrite?: boolean; // (compat)
   mode?: "close" | "continue"; // (UI) non cambia la logica server
@@ -99,11 +103,30 @@ function normalizeCategoryForServer(raw: any): { isRapid: boolean; category_id: 
 }
 
 function normalizeSubcategoryForServer(raw: any, isRapid: boolean): string | null {
+  // ✅ Rapido: subcategory_id deve essere SEMPRE NULL (la sessione è rapid_session_id)
   if (isRapid) return null;
+
   const s = String(raw ?? "").trim();
   if (!s) return null;
   if (s.toLowerCase() === "null") return null;
+
   return s;
+}
+
+function normalizeRapidSessionIdForServer(raw: any, isRapid: boolean): string | null {
+  if (!isRapid) return null;
+
+  const s = String(raw ?? "").trim();
+  if (!s) return null;
+  if (s.toLowerCase() === "null") return null;
+
+  return isUuid(s) ? s : null;
+}
+
+function requireRapidSessionId(rapid_session_id: string | null) {
+  if (!rapid_session_id) {
+    throw new Error("Rapido: rapid_session_id mancante o non valido (UUID).");
+  }
 }
 
 export async function POST(req: Request) {
@@ -117,16 +140,31 @@ export async function POST(req: Request) {
   if (!body) return NextResponse.json({ ok: false, error: "Body non valido" }, { status: 400 });
 
   // ✅ Rapido: se category_id è "" oppure "null" (o null), SERVER FORZA NULL
-  const { isRapid, category_id } = normalizeCategoryForServer(body.category_id);
+const { isRapid, category_id } = normalizeCategoryForServer(body.category_id);
 
-  // ✅ subcategory: in Rapido SEMPRE NULL, altrimenti ""/"null"/null => null
-  const subcategory_id = normalizeSubcategoryForServer(body.subcategory_id, isRapid);
+// ✅ subcategory: in Rapido SEMPRE NULL, altrimenti ""/"null"/null => null
+const subcategory_id = normalizeSubcategoryForServer(body.subcategory_id, isRapid);
+
+
+// ✅ Rapido: serve un rapid_session_id valido (UUID) per NON sovrascrivere
+const rapid_session_id = normalizeRapidSessionIdForServer((body as any)?.rapid_session_id, isRapid);
+
+if (isRapid && !rapid_session_id) {
+  return NextResponse.json({ ok: false, error: "Rapido: rapid_session_id mancante o non valido (UUID)." }, { status: 400 });
+}
 
   const inventory_date = (body.inventory_date || "").trim();
 
   const operatore = (body.operatore || "").trim();
   if (!operatore) return NextResponse.json({ ok: false, error: "Operatore mancante" }, { status: 400 });
   if (operatore.length > 80) return NextResponse.json({ ok: false, error: "Operatore troppo lungo (max 80)" }, { status: 400 });
+
+  const label_raw = String((body as any).label ?? "").trim();
+const label = label_raw ? label_raw : null;
+
+if (label && label.length > 80) {
+  return NextResponse.json({ ok: false, error: "Etichetta troppo lunga (max 80)" }, { status: 400 });
+}
 
   // ✅ Standard: UUID obbligatorio; Rapido: NULL ammesso
   if (category_id !== null && !isUuid(category_id)) {
@@ -135,6 +173,22 @@ export async function POST(req: Request) {
   if (subcategory_id && !isUuid(subcategory_id)) {
     return NextResponse.json({ ok: false, error: "subcategory_id non valido" }, { status: 400 });
   }
+
+  // ✅ FK safety: se subcategory_id è valorizzato, deve esistere davvero
+if (subcategory_id) {
+  const { data: subRow, error: subErr } = await supabaseAdmin
+    .from("subcategories")
+    .select("id")
+    .eq("id", subcategory_id)
+    .maybeSingle();
+
+  if (subErr) {
+    return NextResponse.json({ ok: false, error: subErr.message }, { status: 500 });
+  }
+  if (!subRow?.id) {
+    return NextResponse.json({ ok: false, error: "subcategory_id non esiste (FK)" }, { status: 400 });
+  }
+}
 
   const rows = Array.isArray(body.rows) ? body.rows : [];
   if (rows.length === 0) {
@@ -170,16 +224,20 @@ export async function POST(req: Request) {
 
   // ✅ 0) verifica header esistente (chiave logica)
   let existsQ = supabaseAdmin
-    .from("inventories_headers")
-    .select("id, created_by_username")
-    .eq("pv_id", pv_id)
-    .eq("inventory_date", dateOrNull);
+  .from("inventories_headers")
+  .select("id, created_by_username")
+  .eq("pv_id", pv_id)
+  .eq("inventory_date", dateOrNull);
 
-  if (category_id) existsQ = existsQ.eq("category_id", category_id);
-  else existsQ = existsQ.is("category_id", null);
+if (category_id) existsQ = existsQ.eq("category_id", category_id);
+else existsQ = existsQ.is("category_id", null);
 
-  if (subcategory_id) existsQ = existsQ.eq("subcategory_id", subcategory_id);
-  else existsQ = existsQ.is("subcategory_id", null);
+if (subcategory_id) existsQ = existsQ.eq("subcategory_id", subcategory_id);
+else existsQ = existsQ.is("subcategory_id", null);
+
+// ✅ Rapido: distinguo le sessioni. Standard: rapid_session_id deve essere NULL
+if (isRapid) existsQ = existsQ.eq("rapid_session_id", rapid_session_id);
+else existsQ = existsQ.is("rapid_session_id", null);
 
   const { data: existing, error: existsErr } = await existsQ.limit(1);
   if (existsErr) return NextResponse.json({ ok: false, error: existsErr.message }, { status: 500 });
@@ -190,19 +248,20 @@ export async function POST(req: Request) {
 
   const alreadyExists = !!existingId;
 
-  if (alreadyExists && existingCreatedBy && existingCreatedBy !== session.username) {
-    return NextResponse.json(
-      {
-        ok: false,
-        error:
-          "Esiste già un inventario per questa combinazione (PV/Categoria/Sottocategoria/Data) creato da un altro utente. Non puoi modificarlo.",
-        code: "INVENTORY_ALREADY_EXISTS",
-      },
-      { status: 409 }
-    );
-  }
+  // ✅ admin può modificare/sovrascrivere anche se creato da altri
+if (alreadyExists && existingCreatedBy && existingCreatedBy !== session.username && session.role !== "admin") {
+  return NextResponse.json(
+    {
+      ok: false,
+      error:
+        "Esiste già un inventario per questa combinazione (PV/Categoria/Sottocategoria/Data) creato da un altro utente. Non puoi modificarlo.",
+      code: "INVENTORY_ALREADY_EXISTS",
+    },
+    { status: 409 }
+  );
+}
 
-  // ✅ 1) header: insert se non esiste, update se esiste (stesso utente)
+    // ✅ 1) header: insert se non esiste, update+overwrite SOLO se richiesto esplicitamente
   if (!alreadyExists) {
     const headerPayload = {
       pv_id,
@@ -210,8 +269,10 @@ export async function POST(req: Request) {
       subcategory_id, // ✅ null per Rapido
       inventory_date: dateOrNull,
       operatore,
+      label: label || null,
       created_by_username: session.username,
       updated_at: new Date().toISOString(),
+      rapid_session_id, // ✅
     };
 
     const { error: insErr } = await supabaseAdmin.from("inventories_headers").insert(headerPayload as any);
@@ -220,9 +281,24 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: insErr.message }, { status: 500 });
     }
   } else {
+    // ✅ BLOCCO ANTI-SOVRASCRITTURA:
+    // se esiste già un inventario (anche tuo), NON sovrascrivo a meno che la UI non mandi force_overwrite=true
+    if (!body.force_overwrite) {
+      return NextResponse.json(
+        {
+          ok: false,
+          code: "INVENTORY_ALREADY_EXISTS",
+          error:
+            "Esiste già un inventario per questa combinazione (PV/Categoria/Sottocategoria/Data). Per sovrascriverlo devi confermare esplicitamente.",
+          existing_id: existingId,
+        },
+        { status: 409 }
+      );
+    }
+
     const { error: updErr } = await supabaseAdmin
       .from("inventories_headers")
-      .update({ operatore, updated_at: new Date().toISOString() } as any)
+            .update({ operatore, label: label || null, updated_at: new Date().toISOString() } as any)
       .eq("id", existingId);
 
     if (updErr) {
@@ -230,13 +306,20 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: updErr.message }, { status: 500 });
     }
 
-    let delQ = supabaseAdmin.from("inventories").delete().eq("pv_id", pv_id).eq("inventory_date", dateOrNull);
+    let delQ = supabaseAdmin
+  .from("inventories")
+  .delete()
+  .eq("pv_id", pv_id)
+  .eq("inventory_date", dateOrNull);
 
-    if (category_id) delQ = delQ.eq("category_id", category_id);
-    else delQ = delQ.is("category_id", null);
+if (isRapid) delQ = delQ.eq("rapid_session_id", rapid_session_id);
+else delQ = delQ.is("rapid_session_id", null);
 
-    if (subcategory_id) delQ = delQ.eq("subcategory_id", subcategory_id);
-    else delQ = delQ.is("subcategory_id", null);
+if (category_id) delQ = delQ.eq("category_id", category_id);
+else delQ = delQ.is("category_id", null);
+
+if (subcategory_id) delQ = delQ.eq("subcategory_id", subcategory_id);
+else delQ = delQ.is("subcategory_id", null);
 
     const { error: delErr } = await delQ;
     if (delErr) {
@@ -313,6 +396,7 @@ export async function POST(req: Request) {
             pv_id,
             category_id,
             subcategory_id,
+            rapid_session_id: isRapid ? rapid_session_id : null,
             item_id: itemId,
             qty: 0,
             qty_ml,
@@ -329,6 +413,7 @@ export async function POST(req: Request) {
             pv_id,
             category_id,
             subcategory_id,
+            rapid_session_id: isRapid ? rapid_session_id : null,
             item_id: itemId,
             qty,
             qty_ml,
@@ -345,6 +430,7 @@ export async function POST(req: Request) {
           pv_id,
           category_id,
           subcategory_id,
+          rapid_session_id: isRapid ? rapid_session_id : null,
           item_id: itemId,
           qty: clampInt(qty),
           qty_ml: clampInt(totalMl),
@@ -359,6 +445,7 @@ export async function POST(req: Request) {
         pv_id,
         category_id,
         subcategory_id,
+        rapid_session_id: isRapid ? rapid_session_id : null,
         item_id: itemId,
         qty: clampInt(qtyIn),
         qty_ml: 0,

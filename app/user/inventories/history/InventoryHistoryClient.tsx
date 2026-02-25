@@ -1,3 +1,4 @@
+// app/user/inventories/InventoryHistoryClient.tsx
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -13,24 +14,32 @@ type InventoryGroup = {
   pv_id: string;
   pv_code: string;
   pv_name: string;
-  category_id: string;
+
+  // ✅ Rapido => null
+  category_id: string | null;
   category_name: string;
+
   subcategory_id: string | null;
   subcategory_name: string;
+
   inventory_date: string; // YYYY-MM-DD
   created_by_username: string | null;
   created_at: string | null;
+
   lines_count: number;
   qty_sum: number;
 
-  // ✅ nuovi totali
   qty_ml_sum?: number;
   qty_gr_sum?: number;
-
-  // ✅ totale valore €
   value_sum?: number;
 
   operatore?: string | null;
+
+  // ✅ serve per riaprire Rapido senza aprire "vuoto"
+  rapid_session_id?: string | null;
+
+  // ✅ nota/etichetta
+  label?: string | null;
 };
 
 type InventoryLine = {
@@ -42,16 +51,16 @@ type InventoryLine = {
   // ✅ PZ (bottiglie chiuse equivalenti se ML)
   qty: number;
 
-  // ✅ GR (peso aperto) — nuovo
+  // ✅ GR (peso aperto)
   qty_gr?: number;
 
-  // ✅ ML totale (per comparazione/valore)
+  // ✅ ML totale
   qty_ml?: number;
 
   // ✅ volume per unità (se item ML)
   volume_ml_per_unit?: number | null;
 
-  // ✅ ML "aperto" da mostrare nel dettaglio
+  // ✅ ML "aperto"
   ml_open?: number | null;
 
   prezzo_vendita_eur?: number | null;
@@ -115,6 +124,90 @@ async function fetchJsonSafe<T = any>(
   return { ok, data, status, rawText };
 }
 
+/** =========================
+ *  Helpers querystring / formdata (UNICI)
+ *  ========================= */
+function normStr(v: unknown): string {
+  return String(v ?? "").trim();
+}
+
+function setParam(p: URLSearchParams, key: string, value: string | null | undefined) {
+  const s = normStr(value);
+  if (!s) return;
+  p.set(key, s);
+}
+
+/** Categoria: UUID oppure NULL (Rapido). In querystring usiamo "null" stringa per NULL */
+function setCategoryParam(p: URLSearchParams, category_id: string | null) {
+  if (category_id === null) p.set("category_id", "null");
+  else setParam(p, "category_id", category_id);
+}
+
+/** FormData categoria coerente con querystring */
+function appendCategoryFd(fd: FormData, category_id: string | null) {
+  if (category_id === null) fd.append("category_id", "null");
+  else {
+    const s = normStr(category_id);
+    if (s) fd.append("category_id", s);
+  }
+}
+
+/** Params per /api/inventories/rows (dettaglio) — coerenti e senza duplicati */
+function buildRowsParamsFromGroup(g: InventoryGroup) {
+  const p = new URLSearchParams();
+  p.set("pv_id", g.pv_id);
+  p.set("inventory_date", g.inventory_date);
+
+  const isRapid = g.category_id === null;
+
+  if (isRapid) {
+    // Rapido: category_id NULL + rapid_session_id obbligatoria
+    p.set("category_id", "null");
+
+    const rs = normStr(g.rapid_session_id);
+    if (rs) p.set("rapid_session_id", rs);
+    // in rapido subcategory_id NON va passata (in DB è NULL)
+  } else {
+    // Standard
+    setCategoryParam(p, g.category_id);
+    if (g.subcategory_id) setParam(p, "subcategory_id", g.subcategory_id);
+  }
+
+  return p;
+}
+
+/** URL riapertura inventario (modifica) */
+function buildReopenUrl(g: InventoryGroup) {
+  const p = new URLSearchParams();
+  p.set("pv_id", g.pv_id);
+  p.set("inventory_date", g.inventory_date);
+
+  const isRapid = g.category_id === null;
+
+  if (isRapid) {
+    // IMPORTANTISSIMO: per attivare il ramo Rapido server-side e per /rows
+    p.set("category_id", "null");
+    p.set("rapid", "1");
+    p.set("mode", "rapid");
+
+    const rs = normStr(g.rapid_session_id);
+    if (rs) p.set("rapid_session_id", rs);
+  } else {
+    setCategoryParam(p, g.category_id);
+    if (g.subcategory_id) setParam(p, "subcategory_id", g.subcategory_id);
+    // NON forzo mode=rapid per lo standard: niente stravolgimenti UX
+  }
+
+  // operatore/label per prefill UI (e per non “sparire”)
+  const op = normStr(g.operatore);
+  if (op) p.set("operatore", op);
+
+  const lbl = normStr(g.label);
+  if (lbl) p.set("label", lbl);
+
+  return `/user/inventories?${p.toString()}`;
+}
+
 type MenuPos = { top: number; left: number; width: number };
 
 export default function InventoryHistoryClient() {
@@ -160,7 +253,7 @@ export default function InventoryHistoryClient() {
   const canUseSubcategories = useMemo(() => !!categoryId, [categoryId]);
   const canCompare = me.role === "admin" || me.role === "amministrativo";
 
-  // ✅ Timeline box state (uguale ad Admin)
+  // ✅ Timeline box state
   const canTimeline =
     (me.role === "admin" || me.role === "amministrativo" || me.role === "punto_vendita") && !!me.role;
   const [tlPvId, setTlPvId] = useState<string>("");
@@ -191,10 +284,10 @@ export default function InventoryHistoryClient() {
   }, [detail]);
 
   const detailMlSum = useMemo(() => {
-  return (detail as any[]).reduce((sum, r: any) => {
-    return sum + (Number(r?.qty_ml) || 0);
-  }, 0);
-}, [detail]);
+    return (detail as any[]).reduce((sum, r: any) => {
+      return sum + (Number(r?.qty_ml) || 0);
+    }, 0);
+  }, [detail]);
 
   const detailGrSum = useMemo(() => {
     return (detail as any[]).reduce((sum, r: any) => {
@@ -203,7 +296,6 @@ export default function InventoryHistoryClient() {
   }, [detail]);
 
   // ✅ Valore: se ML => (qty_ml/volume)*prezzo, altrimenti qty*prezzo
-  // (GR non ha un prezzo unitario coerente qui, quindi NON lo includo nel valore)
   const detailValueEur = useMemo(() => {
     return detail.reduce((sum, r) => {
       const p = Number(r.prezzo_vendita_eur);
@@ -323,14 +415,9 @@ export default function InventoryHistoryClient() {
     try {
       if (effectiveMe.isPv && effectiveMe.pv_id && g.pv_id !== effectiveMe.pv_id) throw new Error("Non autorizzato.");
 
-      const params = new URLSearchParams();
-      params.set("pv_id", g.pv_id);
-      params.set("category_id", g.category_id);
-      params.set("inventory_date", g.inventory_date);
-      if (g.subcategory_id) params.set("subcategory_id", g.subcategory_id);
+      const params = buildRowsParamsFromGroup(g);
 
       const url = `/api/inventories/rows?${params.toString()}`;
-
       const { ok, data, status, rawText } = await fetchJsonSafe<any>(url);
 
       if (!ok) {
@@ -355,14 +442,14 @@ export default function InventoryHistoryClient() {
 
     const params = new URLSearchParams();
     params.set("pv_id", g.pv_id);
-    params.set("category_id", g.category_id);
+    setCategoryParam(params, g.category_id);
     params.set("inventory_date", g.inventory_date);
     if (g.subcategory_id) params.set("subcategory_id", g.subcategory_id);
 
     window.location.href = `/api/inventories/excel?${params.toString()}`;
   }
 
-  // ✅ Timeline box download (uguale ad Admin)
+  // ✅ Timeline box download
   async function downloadTimelineExcel() {
     setTlMsg(null);
 
@@ -465,7 +552,7 @@ export default function InventoryHistoryClient() {
       const fd = new FormData();
       fd.append("file", compareFile);
       fd.append("pv_id", compareTarget.pv_id);
-      fd.append("category_id", compareTarget.category_id);
+      appendCategoryFd(fd, compareTarget.category_id);
       fd.append("inventory_date", compareTarget.inventory_date);
       if (compareTarget.subcategory_id) fd.append("subcategory_id", compareTarget.subcategory_id);
 
@@ -588,7 +675,7 @@ export default function InventoryHistoryClient() {
       setError(null);
       const params = new URLSearchParams();
       params.set("pv_id", g.pv_id);
-      params.set("category_id", g.category_id);
+      setCategoryParam(params, g.category_id);
       params.set("inventory_date", g.inventory_date);
       if (g.subcategory_id) params.set("subcategory_id", g.subcategory_id);
 
@@ -898,7 +985,16 @@ export default function InventoryHistoryClient() {
                   </td>
                   <td className="p-3">{r.category_name || r.category_id}</td>
                   <td className="p-3">{r.subcategory_name || (r.subcategory_id ? r.subcategory_id : "—")}</td>
-                  <td className="p-3">{(r.operatore || "").trim() ? r.operatore : "—"}</td>
+
+                  <td className="p-3">
+                    <div className="leading-tight">
+                      <div className="font-medium">{normStr(r.operatore) ? normStr(r.operatore) : "—"}</div>
+                      {normStr((r as any).label) ? (
+                        <div className="text-xs text-gray-500 mt-0.5">{normStr((r as any).label)}</div>
+                      ) : null}
+                    </div>
+                  </td>
+
                   <td className="p-3 text-right">{r.lines_count}</td>
                   <td className="p-3 text-right font-semibold">{r.qty_sum}</td>
                   <td className="p-3 text-right font-semibold">{gr > 0 ? gr : "—"}</td>
@@ -947,8 +1043,15 @@ export default function InventoryHistoryClient() {
               if (!g) return null;
 
               const canReopenBase = me.role === "admin" || me.role === "amministrativo";
-              const canReopenOwner = !g.created_by_username || (me.username && g.created_by_username === me.username);
+
+              // ✅ admin può sempre riaprire/modificare
+              const canReopenOwner =
+              me.role === "admin" ? true : !g.created_by_username || (me.username && g.created_by_username === me.username);
+
               const canReopen = canReopenBase && canReopenOwner;
+
+              const isRapid = g.category_id === null;
+              const rs = normStr(g.rapid_session_id);
 
               return (
                 <div className="flex flex-col">
@@ -960,47 +1063,17 @@ export default function InventoryHistoryClient() {
                         setMenuPos(null);
 
                         if (!canReopen) {
-                          alert(
-                            "Non puoi modificare questo inventario: è stato creato da un altro utente (vincolo attivo lato server)."
-                          );
+                          alert("Non puoi modificare questo inventario: è stato creato da un altro utente (vincolo attivo lato server).");
                           return;
                         }
 
-                        const p = new URLSearchParams();
-                        p.set("pv_id", g.pv_id);
-
-                        // ⚠️ IMPORTANTE:
-                        // In DB la chiave è (pv_id, category_id, subcategory_id, inventory_date) e subcategory può essere NULL.
-                        // L'endpoint /api/inventories/rows interpreta "null" (stringa) come NULL.
-                        // In riapertura passiamo SEMPRE subcategory_id per evitare mismatch e righe vuote (qty=0 in UI).
-
-                        // ✅ Categoria: UUID oppure NULL (Rapido/Tutte)
-                        if (!g.category_id) {
-                          p.set("category_id", "null");
-                          // Compatibilità legacy lato client
-                          p.set("rapid", "1");
-                          p.set("mode", "rapid");
-                        } else {
-                          p.set("category_id", g.category_id);
-
-                          // ✅ Subcategory:
-                          // - se presente e UUID, la passo
-                          // - se assente/NULL, la OMETTO del tutto
-                          //   (alcuni inventari legacy hanno righe con subcategory valorizzata anche se il gruppo risulta NULL;
-                          //    passare "null" qui provoca righe vuote e qty=0 in UI)
-                          if (g.subcategory_id) {
-                            p.set("subcategory_id", g.subcategory_id);
-                          }
-
-                          // Se l'inventario era stato fatto in modalità rapida ma con categoria (es. Tabacchi),
-                          // forziamo la UI a riaprire in rapid per coerenza UX.
-                          p.set("mode", "rapid");
+                        // ✅ blocco duro: in rapido senza sessione non riapri (altrimenti “vuoto” sicuro)
+                        if (isRapid && !rs) {
+                          alert("Questo inventario è in modalità Rapido ma non ha rapid_session_id: non posso riaprirlo correttamente (scansionati).");
+                          return;
                         }
 
-                        p.set("inventory_date", g.inventory_date);
-                        if ((g.operatore || "").trim()) p.set("operatore", String(g.operatore).trim());
-
-                        router.push(`/user/inventories?${p.toString()}`);
+                        router.push(buildReopenUrl(g));
                       }}
                       role="menuitem"
                       title={!canReopen ? "Inventario creato da altro utente" : "Riapri l'inventario per modificare"}
@@ -1065,7 +1138,7 @@ export default function InventoryHistoryClient() {
               </div>
 
               <div className="text-sm text-gray-600">
-                Operatore: <b>{(selected.operatore || "").trim() ? selected.operatore : "—"}</b> — Righe: <b>{selected.lines_count}</b> — Articoli:{" "}
+                Operatore: <b>{normStr(selected.operatore) ? normStr(selected.operatore) : "—"}</b> — Righe: <b>{selected.lines_count}</b> — Articoli:{" "}
                 <b>{detailArticoli}</b> — Pezzi: <b>{selected.qty_sum}</b>
                 {detailGrSum > 0 ? (
                   <>
@@ -1073,8 +1146,7 @@ export default function InventoryHistoryClient() {
                     — GR: <b>{detailGrSum}</b>
                   </>
                 ) : null}
-                {detailMlSum > 0 ? <> — Ml: <b>{detailMlSum}</b></> : null}{" "}
-                — Valore: <b>{hasAnyPriceInDetail ? formatEUR(detailValueEur) : "—"}</b>
+                {detailMlSum > 0 ? <> — Ml: <b>{detailMlSum}</b></> : null} — Valore: <b>{hasAnyPriceInDetail ? formatEUR(detailValueEur) : "—"}</b>
               </div>
             </div>
 

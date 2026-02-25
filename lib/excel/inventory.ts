@@ -52,6 +52,15 @@ function uniqueSheetName(wb: ExcelJS.Workbook, baseName: string) {
   return sanitizeSheetName(`${name}_${Date.now()}`);
 }
 
+// ✅ confronto robusto IT, ignorando maiuscole/minuscole (e con fallback su codice)
+function compareByDescriptionThenCode(a: InventoryExcelLine, b: InventoryExcelLine) {
+  const da = String(a.description ?? "").trim();
+  const db = String(b.description ?? "").trim();
+  const cmp = da.localeCompare(db, "it", { sensitivity: "base" });
+  if (cmp !== 0) return cmp;
+  return String(a.code ?? "").localeCompare(String(b.code ?? ""), "it", { sensitivity: "base" });
+}
+
 function addInventorySheet(
   wb: ExcelJS.Workbook,
   sheetName: string,
@@ -150,30 +159,20 @@ export async function buildInventoryXlsx(
 ): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
 
-  // Ordino sempre per codice
-  const sorted = [...(lines || [])].sort((a, b) =>
-    String(a.code || "").localeCompare(String(b.code || ""))
-  );
+  // ✅ Ordino sempre per DESCRIZIONE (come richiesto)
+  const sorted = [...(lines || [])].sort(compareByDescriptionThenCode);
 
   const hasGroupingData =
     meta.categoryName?.toLowerCase() === "tutte" ||
     sorted.some((l) => (l.category_name || "").toString().trim().length > 0);
 
-  // ✅ 1) Foglio principale: TUTTO (sempre)
-  addInventorySheet(
-    wb,
-    uniqueSheetName(wb, hasGroupingData ? "TUTTO" : "INVENTARIO"),
-    {
-      ...meta,
-      // se è "Tutte" ok, se è standard resta com'è
-      subcategoryName: meta.subcategoryName || "—",
-    },
-    sorted
-  );
+  // ✅ 1) Foglio "TUTTO" RIMOSSO
+  // Niente foglio generale.
 
-  // ✅ 2) Se ho i dati per raggruppare, creo fogli extra
+  // ✅ 2) Creo fogli per categoria/sottocategoria:
+  // - se ho grouping data => tanti fogli
+  // - altrimenti => un unico foglio "INVENTARIO" con le righe ordinate per descrizione
   if (hasGroupingData) {
-    // Raggruppo per (Categoria - Sottocategoria) se c'è sottocategoria, altrimenti solo Categoria
     const groups = new Map<string, { cat: string; sub: string; rows: InventoryExcelLine[] }>();
 
     for (const l of sorted) {
@@ -182,19 +181,16 @@ export async function buildInventoryXlsx(
       const key = sub ? `${cat} — ${sub}` : cat;
 
       const g = groups.get(key);
-      if (!g) {
-        groups.set(key, { cat, sub: sub || "—", rows: [l] });
-      } else {
-        g.rows.push(l);
-      }
+      if (!g) groups.set(key, { cat, sub: sub || "—", rows: [l] });
+      else g.rows.push(l);
     }
 
     // Creo i fogli in ordine alfabetico
-    const keys = Array.from(groups.keys()).sort((a, b) => a.localeCompare(b));
+    const keys = Array.from(groups.keys()).sort((a, b) => a.localeCompare(b, "it", { sensitivity: "base" }));
+
     for (const key of keys) {
       const g = groups.get(key)!;
 
-      // Nome foglio: se sub è presente, meglio qualcosa di compatto
       const sheetLabel = g.sub && g.sub !== "—" ? `${g.cat}-${g.sub}` : g.cat;
       const sheetName = uniqueSheetName(wb, sheetLabel);
 
@@ -204,13 +200,22 @@ export async function buildInventoryXlsx(
         subcategoryName: g.sub || "—",
       };
 
-      // dentro al foglio, ordino per codice
-      const rowsSorted = [...g.rows].sort((a, b) =>
-        String(a.code || "").localeCompare(String(b.code || ""))
-      );
+      // ✅ dentro al foglio: ORDINE PER DESCRIZIONE
+      const rowsSorted = [...g.rows].sort(compareByDescriptionThenCode);
 
       addInventorySheet(wb, sheetName, sheetMeta, rowsSorted);
     }
+  } else {
+    // caso standard: una sola categoria, niente grouping → un foglio solo
+    addInventorySheet(
+      wb,
+      uniqueSheetName(wb, "INVENTARIO"),
+      {
+        ...meta,
+        subcategoryName: meta.subcategoryName || "—",
+      },
+      sorted
+    );
   }
 
   const out = await wb.xlsx.writeBuffer();

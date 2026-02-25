@@ -54,6 +54,11 @@ function isIsoDate(s: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test((s || "").trim());
 }
 
+function isUuid(v: string | null | undefined) {
+  if (!v) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(v).trim());
+}
+
 function onlyDigits(v: string) {
   return v.replace(/[^\d]/g, "");
 }
@@ -91,6 +96,20 @@ function isIOSDevice() {
   return iOS || iPadOS;
 }
 
+// ✅ Rapido: id sessione (UUID) per evitare sovrascrittura nello stesso PV + giorno
+function newRapidSessionId() {
+  // browser moderni
+  try {
+    const anyCrypto = (globalThis as any).crypto;
+    if (anyCrypto?.randomUUID) return anyCrypto.randomUUID();
+  } catch {
+    // ignore
+  }
+
+  // fallback (non perfetto ma ok per id "sessione")
+  const s4 = () => Math.floor((1 + Math.random()) * 0x10000).toString(16).substring(1);
+  return `${s4()}${s4()}-${s4()}-${s4()}-${s4()}-${s4()}${s4()}${s4()}`;
+}
 
 function mlToLitriLabel(ml: number) {
   const l = ml / 1000;
@@ -113,6 +132,7 @@ function safeGrFromStr(v: string) {
 
 type DraftAdmin = {
   operatore: string;
+  categoryNote: string;
 
   qtyPzMap: Record<string, string>;
   qtyGrMap: Record<string, string>;
@@ -141,6 +161,7 @@ export default function InventoryClient() {
 
   // ✅ Modalità inventario (Standard / Rapido)
   const [inventoryMode, setInventoryMode] = useState<InventoryMode>("rapid");
+  const [rapidSessionId, setRapidSessionId] = useState<string>(() => newRapidSessionId());
 
   // ✅ Rapido: vista "scan" (focus su singolo articolo) oppure "list" (lista scansionati full)
   const [rapidView, setRapidView] = useState<"scan" | "list">("scan");
@@ -153,9 +174,14 @@ export default function InventoryClient() {
   const [pvId, setPvId] = useState("");
   const [categoryId, setCategoryId] = useState("");
   const [subcategoryId, setSubcategoryId] = useState<string>("");
+
+  // ✅ Rapido: id sessione (UUID) per evitare sovrascrittura nello stesso PV + giorno
   const [inventoryDate, setInventoryDate] = useState(todayISO());
 
   const [operatore, setOperatore] = useState("");
+
+// ✅ Nota categoria (solo testo libero, per colpo d’occhio)
+const [categoryNote, setCategoryNote] = useState("");
 
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -239,6 +265,54 @@ export default function InventoryClient() {
     mlModeRef.current = mlModeMap;
   }, [mlModeMap]);
 
+    // ✅ in RAPIDO calcolo “attivo” usando gli STATE (non i ref),
+  // così la lista Scansionati si aggiorna immediatamente (senza lag/race)
+  function isActiveFromState(it: Item) {
+    const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
+    const gr = safeGrFromStr(qtyGrMap[it.id] ?? "");
+    const open = safeIntFromStr(openMlMap[it.id] ?? "");
+    const total = safeIntFromStr(totalMlMap[it.id] ?? "");
+    const mode = mlModeMap[it.id] || "fixed";
+
+    const ml = isMlItem(it);
+    const kg = isKgItem(it) && !ml;
+
+    if (kg) return pz > 0 || gr > 0;
+    if (!ml) return pz > 0;
+
+    if (mode === "mixed") return total > 0;
+
+    const perUnit = Number(it.volume_ml_per_unit) || 0;
+    const qty_ml = perUnit > 0 ? pz * perUnit + open : open;
+    return qty_ml > 0;
+  }
+
+// ✅ FAILSAFE: in RAPIDO ricostruisco sempre "Scansionati" dagli articoli con quantità > 0
+// Serve per evitare che scannedIds vada perso/reset (bug, refresh, draft, reopen, ecc.)
+useEffect(() => {
+  if (inventoryMode !== "rapid") return;
+  if (!items.length) return;
+
+    // calcolo gli id "attivi" (qty>0 / gr>0 / ml>0) usando gli STATE
+  const activeIds = items.filter((it) => isActiveFromState(it)).map((it) => it.id);
+
+  setScannedIds((prev) => {
+    const activeSet = new Set(activeIds);
+
+    // tengo l'ordine esistente, ma butto fuori quelli non più attivi
+    const keep = prev.filter((id) => activeSet.has(id));
+
+    // aggiungo quelli attivi che mancano (in cima, così li vedi subito)
+    const keepSet = new Set(keep);
+    const missing = activeIds.filter((id) => !keepSet.has(id));
+
+    // se non cambia niente, non aggiorno (evito re-render inutili)
+    if (missing.length === 0 && keep.length === prev.length) return prev;
+
+    return [...missing, ...keep];
+  });
+}, [inventoryMode, items, qtyPzMap, qtyGrMap, openMlMap, totalMlMap, mlModeMap]);
+
   const isRapidMobileBar = inventoryMode === "rapid" && rapidView === "scan";
 
   function vibrateOk() {
@@ -263,10 +337,13 @@ export default function InventoryClient() {
   }
 
   // ✅ HARD RULE: in Rapido non esistono categorie/sottocategorie
-  function forceRapidCategoryNull() {
-    setCategoryId("");
-    setSubcategoryId("");
-  }
+ function forceRapidCategoryNull() {
+  // UI: in Rapido la categoria resta “Nessuna (Tutte)”
+  setCategoryId("");
+
+  // ✅ In Rapido NON usiamo subcategoryId (nel DB resta NULL)
+  setSubcategoryId("");
+}
 
   useEffect(() => {
     if (didInitFromUrlRef.current) return;
@@ -279,6 +356,16 @@ export default function InventoryClient() {
     // ✅ supporto riapertura Rapido esplicita
     const m = (searchParams?.get("mode") || "").trim().toLowerCase();
     const isRapidUrl = m === "rapid";
+// ✅ supporto riapertura Rapido
+const rapidFromQs = (searchParams?.get("rapid_session_id") || "").trim();
+// compat vecchia: alcuni link mettono la sessione in subcategory_id
+const rapidLegacy = (searchParams?.get("subcategory_id") || "").trim();
+
+const rapidId = isUuid(rapidFromQs) ? rapidFromQs : isUuid(rapidLegacy) ? rapidLegacy : "";
+
+if (isRapidUrl && rapidId) {
+  setRapidSessionId(rapidId);
+}
 
     // ✅ Reopen: Standard richiede pv+cat+date, Rapido richiede pv+date
     reopenModeRef.current = isRapidUrl ? !!(pv && date) : false;
@@ -351,11 +438,14 @@ export default function InventoryClient() {
     return !!operatore.trim() && !!pvId && catOk && items.length > 0;
   }, [operatore, pvId, categoryId, items.length, inventoryMode]);
 
-  const draftKey = useMemo(() => {
+    const draftKey = useMemo(() => {
+    if (inventoryMode === "rapid") {
+      return `inv_draft_admin:${pvId}:RAPID:${rapidSessionId}:${inventoryDate}`;
+    }
     const sub = subcategoryId || "null";
     const cat = categoryId || "ALL";
     return `inv_draft_admin:${pvId}:${cat}:${sub}:${inventoryDate}`;
-  }, [pvId, categoryId, subcategoryId, inventoryDate]);
+  }, [pvId, categoryId, subcategoryId, inventoryDate, inventoryMode, rapidSessionId]);
 
   function getMlMode(itemId: string): MlInputMode {
     return mlModeMap[itemId] || "fixed";
@@ -449,6 +539,7 @@ export default function InventoryClient() {
       if (!d || typeof d !== "object") return;
 
       if (typeof d.operatore === "string") setOperatore(d.operatore);
+      if (typeof (d as any).categoryNote === "string") setCategoryNote((d as any).categoryNote);
 
       if (d.qtyPzMap && typeof d.qtyPzMap === "object") {
         setQtyPzMap((prev) => {
@@ -549,6 +640,7 @@ export default function InventoryClient() {
       if (!draftKey) return;
       const draft: DraftAdmin = {
         operatore,
+        categoryNote,
         qtyPzMap,
         qtyGrMap,
         openMlMap,
@@ -691,9 +783,24 @@ export default function InventoryClient() {
   }, [items, search, focusItemId]);
 
   const scannedItems = useMemo(() => {
-    const byId = new Map(items.map((it) => [it.id, it]));
-    return scannedIds.map((id) => byId.get(id)).filter(Boolean) as Item[];
-  }, [items, scannedIds]);
+  // ✅ In RAPIDO: non mi fido di scannedIds (può svuotarsi per reset/draft/reopen).
+  // La lista "Scansionati" la ricavo SEMPRE dagli item con quantità > 0.
+  if (inventoryMode === "rapid") {
+        const active = items.filter((it) => isActiveFromState(it));
+
+    // se ho anche scannedIds, lo uso solo per mantenere un ordine "umano"
+    const order = new Map<string, number>();
+    scannedIds.forEach((id, idx) => order.set(id, idx));
+
+    active.sort((a, b) => (order.get(a.id) ?? 1e9) - (order.get(b.id) ?? 1e9));
+
+    return active;
+  }
+
+  // ✅ Standard: come prima (dipende da scannedIds)
+  const byId = new Map(items.map((it) => [it.id, it]));
+  return scannedIds.map((id) => byId.get(id)).filter(Boolean) as Item[];
+}, [items, scannedIds, inventoryMode, qtyPzMap, qtyGrMap, openMlMap, totalMlMap, mlModeMap]);
 
   const scannedItemsVisible = useMemo(() => {
     if (showAllScanned) return scannedItems;
@@ -953,6 +1060,30 @@ export default function InventoryClient() {
     highlightAndMoveToTop(itemId);
   }
 
+   // ✅ RIMUOVI un singolo articolo dalla lista scansionati + azzera tutto
+  function removeFromScanned(itemId: string) {
+    // azzero quantità
+    setQtyPzMap((prev) => ({ ...prev, [itemId]: "" }));
+    setQtyGrMap((prev) => ({ ...prev, [itemId]: "" }));
+    setOpenMlMap((prev) => ({ ...prev, [itemId]: "" }));
+    setTotalMlMap((prev) => ({ ...prev, [itemId]: "" }));
+
+    // azzero anche i campi "da aggiungere"
+    setAddPzMap((prev) => ({ ...prev, [itemId]: "" }));
+    setAddGrMap((prev) => ({ ...prev, [itemId]: "" }));
+    setAddOpenMlMap((prev) => ({ ...prev, [itemId]: "" }));
+    setAddTotalMlMap((prev) => ({ ...prev, [itemId]: "" }));
+
+    // tolgo dalla lista
+    setScannedIds((prev) => prev.filter((id) => id !== itemId));
+
+    // se era evidenziato, pulisco
+    setHighlightScannedId((prev) => (prev === itemId ? null : prev));
+
+    // se era in focus, lo chiudo
+    setFocusItemId((prev) => (prev === itemId ? null : prev));
+  }
+
   function clearScannedList() {
     setQtyPzMap((prev) => {
       const next = { ...prev };
@@ -991,6 +1122,7 @@ export default function InventoryClient() {
     setSearch("");
     setMsg(null);
     setError(null);
+    setCategoryNote("");
 
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
@@ -1001,20 +1133,35 @@ export default function InventoryClient() {
   }
 
   function openItemInRapid(it: Item) {
-    setMsg(null);
-    setError(null);
-    setFocusItemId(it.id);
-    setRapidView("scan");
-    setSearch("");
+  setMsg(null);
+  setError(null);
+  setFocusItemId(it.id);
+  setRapidView("scan");
+  setSearch("");
 
-    setScannedIds((prev) => (prev.includes(it.id) ? [it.id, ...prev.filter((x) => x !== it.id)] : [it.id, ...prev]));
-    setHighlightScannedId(it.id);
+  // ✅ NON aggiungere automaticamente agli scansionati se non ha quantità
+  // Se è già "attivo" (qty > 0 / ml > 0 / gr > 0) allora lo metto in cima.
+  const activeNow = isActiveWithOverrides(it);
 
-    requestAnimationFrame(() => {
-      scrollIntoViewById(`inv-scanned-row-${it.id}`);
-      scrollIntoViewById(`inv-item-row-${it.id}`);
-    });
-  }
+  setScannedIds((prev) => {
+    const has = prev.includes(it.id);
+
+    if (activeNow) {
+      // metti in cima (o aggiungi se manca)
+      return has ? [it.id, ...prev.filter((x) => x !== it.id)] : [it.id, ...prev];
+    }
+
+    // se non è attivo NON deve stare in lista (e se c'era per sbaglio lo tolgo)
+    return has ? prev.filter((x) => x !== it.id) : prev;
+  });
+
+  setHighlightScannedId(it.id);
+
+  requestAnimationFrame(() => {
+    scrollIntoViewById(`inv-scanned-row-${it.id}`);
+    scrollIntoViewById(`inv-item-row-${it.id}`);
+  });
+}
 
   function focusRapidQtyNow(it: Item) {
   const ml = isMlItem(it);
@@ -1266,14 +1413,15 @@ export default function InventoryClient() {
       params.set("pv_id", pvId);
       params.set("inventory_date", inventoryDate);
 
-      if (inventoryMode === "rapid") {
-        params.set("category_id", "null");
-        params.set("subcategory_id", "null");
-      } else {
-        params.set("category_id", categoryId);
-        if (subcategoryId) params.set("subcategory_id", subcategoryId);
-        else params.set("subcategory_id", "null");
-      }
+  if (inventoryMode === "rapid") {
+  params.set("category_id", "null");
+  params.set("subcategory_id", "null");
+  params.set("rapid_session_id", rapidSessionId);
+} else {
+  params.set("category_id", categoryId);
+  if (subcategoryId) params.set("subcategory_id", subcategoryId);
+  else params.set("subcategory_id", "null");
+}
 
       const res = await fetch(`/api/inventories/rows?${params.toString()}`, { cache: "no-store" });
       const json = await res.json().catch(() => null);
@@ -1282,6 +1430,9 @@ export default function InventoryClient() {
 
       if (!operatore.trim() && typeof json?.operatore === "string" && json.operatore.trim()) {
         setOperatore(json.operatore.trim());
+      }
+      if (!categoryNote.trim() && typeof json?.label === "string" && json.label.trim()) {
+       setCategoryNote(json.label.trim());
       }
 
       const apiRows = (json.rows || []) as InventoryRowApi[];
@@ -1424,31 +1575,34 @@ export default function InventoryClient() {
   }, [subcategoryId]);
 
   useEffect(() => {
-    if (!pvId || !inventoryDate) return;
-    if (!isIsoDate(inventoryDate)) return;
-    if (!items.length) return;
+  if (!pvId || !inventoryDate) return;
+  if (!isIsoDate(inventoryDate)) return;
+  if (!items.length) return;
 
-    const effCat = inventoryMode === "rapid" ? "null" : categoryId || "";
-    if (!effCat) return;
-    const effSub = inventoryMode === "rapid" ? "null" : subcategoryId || "null";
+  const effCat = inventoryMode === "rapid" ? "null" : categoryId || "";
+  if (!effCat) return;
 
-    const key = `prefill:${pvId}:${effCat}:${effSub}:${inventoryDate}`;
-    if (lastPrefillKeyRef.current === key) return;
-    lastPrefillKeyRef.current = key;
+  // ✅ IMPORTANTISSIMO: in Rapido la chiave deve includere la sessione
+  const effSub = inventoryMode === "rapid" ? (rapidSessionId || "null") : subcategoryId || "null";
 
-    (async () => {
-      const applied = await prefillFromServer(items);
-      ensureMlDefaults(items);
+  const key = `prefill:${pvId}:${effCat}:${effSub}:${inventoryDate}`;
+  if (lastPrefillKeyRef.current === key) return;
+  lastPrefillKeyRef.current = key;
 
-      if (!(reopenModeRef.current && applied > 0)) {
-        loadDraftIfAny(items);
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pvId, categoryId, subcategoryId, inventoryDate, items.length, inventoryMode]);
+  (async () => {
+    const applied = await prefillFromServer(items);
+    ensureMlDefaults(items);
+
+    if (!(reopenModeRef.current && applied > 0)) {
+      loadDraftIfAny(items);
+    }
+  })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [pvId, categoryId, subcategoryId, rapidSessionId, inventoryDate, items.length, inventoryMode]);
 
   function resetAfterClose() {
     setOperatore("");
+    setCategoryNote("");
     setSearch("");
     setScannedIds([]);
     setShowAllScanned(false);
@@ -1534,26 +1688,67 @@ export default function InventoryClient() {
         return;
       }
 
-      const res = await fetch("/api/inventories/save", {
+const basePayload = {
+  pv_id: pvId,
+  category_id: inventoryMode === "rapid" ? null : categoryId,
+  subcategory_id: inventoryMode === "rapid" ? null : subcategoryId || null,
+  inventory_date: dateToUse,
+  operatore: operatore.trim(),
+
+  // ✅ Nota rapida (salvata in inventories_headers.label)
+  label: inventoryMode === "rapid" ? (categoryNote.trim() || null) : null,
+
+  rows,
+  mode,
+
+  // ✅ Rapido: chiave anti-sovrascrittura (UUID)
+  rapid_session_id: inventoryMode === "rapid" ? rapidSessionId : null,
+};
+
+if (inventoryMode === "rapid" && !isUuid(rapidSessionId)) {
+  setError("Rapido: rapid_session_id non valido. Premi Nuovo/Pulisci e riprova.");
+  return;
+}
+
+console.log(
+  "SAVE DEBUG → rapidSessionId(state):",
+  rapidSessionId,
+  "| inventoryMode:",
+  inventoryMode,
+  "| payload rapid_session_id:",
+  (basePayload as any).rapid_session_id,
+  "| payload keys:",
+  Object.keys(basePayload as any)
+);
+
+      let res = await fetch("/api/inventories/save", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          pv_id: pvId,
-          category_id: inventoryMode === "rapid" ? null : categoryId,
-          subcategory_id: inventoryMode === "rapid" ? null : subcategoryId || null,
-          inventory_date: dateToUse,
-          operatore: operatore.trim(),
-          rows,
-          mode,
-        }),
+        body: JSON.stringify(basePayload),
       });
 
-      const json = await res.json().catch(() => null);
+      let json = await res.json().catch(() => null);
 
+      // ✅ Se esiste già: chiedi conferma e, SOLO se ok, ritenta con force_overwrite=true
       if (res.status === 409 || json?.code === "INVENTORY_ALREADY_EXISTS") {
-        setMsg(null);
-        setError(json?.error || "Esiste già un inventario: non è consentito sovrascrivere.");
-        return;
+        const ok = window.confirm(
+          (json?.error || "Esiste già un inventario per questa combinazione.") +
+            "\n\nVuoi SOVRASCRIVERLO? (attenzione: perdi i dati precedenti)"
+        );
+
+        if (!ok) {
+          setMsg(null);
+          setError("Salvataggio annullato. Inventario precedente lasciato intatto.");
+          return;
+        }
+
+        res = await fetch("/api/inventories/save", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ ...basePayload, force_overwrite: true }),
+        });
+
+        json = await res.json().catch(() => null);
       }
 
       if (!res.ok || !json?.ok) throw new Error(json?.error || "Salvataggio fallito");
@@ -1605,17 +1800,17 @@ export default function InventoryClient() {
           type="button"
           className={`flex-1 px-3 py-2 text-sm ${inventoryMode === "standard" ? "bg-slate-900 text-white" : "bg-white hover:bg-gray-50"}`}
           onClick={() => {
-            setInventoryMode("standard");
-            setRapidView("scan");
-            setFocusItemId(null);
-            setMsg(null);
-            setError(null);
+  setInventoryMode("rapid");
+  setRapidView("scan");
+  forceRapidCategoryNull();
 
-            if (!categoryId && categories.length > 0) {
-              setCategoryId(categories[0].id);
-              setSubcategoryId("");
-            }
-          }}
+  // ✅ nuova sessione rapida (se fai più inventari stesso PV+giorno non sovrascrive)
+  setRapidSessionId(newRapidSessionId());
+
+  setFocusItemId(null);
+  setMsg(null);
+  setError(null);
+}}
           title="Modalità Standard"
         >
           Standard
@@ -1848,11 +2043,35 @@ export default function InventoryClient() {
         </div>
       </div>
 
-      {/* Operatore */}
-      <div className="rounded-2xl border bg-white p-4">
-        <label className="block text-sm font-medium mb-2">Nome Operatore</label>
-        <input className="w-full rounded-xl border p-3" placeholder="Es. Mario Rossi" value={operatore} onChange={(e) => setOperatore(e.target.value)} />
-        <p className="text-xs text-gray-500 mt-1">Obbligatorio per salvare lo storico e generare l’Excel.</p>
+            {/* Operatore + Nota categoria */}
+      <div className="rounded-2xl border bg-white p-4 space-y-3">
+        <div>
+          <label className="block text-sm font-medium mb-2">Nome Operatore</label>
+          <input
+            className="w-full rounded-xl border p-3"
+            placeholder="Es. Mario Rossi"
+            value={operatore}
+            onChange={(e) => setOperatore(e.target.value)}
+          />
+          <p className="text-xs text-gray-500 mt-1">Obbligatorio per salvare lo storico e generare l’Excel.</p>
+
+          <div className="mt-2 text-xs text-gray-600">
+            Nome categoria (nota):{" "}
+            <b className={categoryNote.trim() ? "" : "text-gray-400"}>
+              {categoryNote.trim() ? categoryNote.trim() : "—"}
+            </b>
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium text-gray-700">Nome categoria (nota)</label>
+          <input
+            className="mt-1 w-full rounded-xl border px-3 py-2 text-sm"
+            placeholder="Es: Tabacchi / Bar / Banco frigo..."
+            value={categoryNote}
+            onChange={(e) => setCategoryNote(e.target.value)}
+          />
+        </div>
       </div>
 
       {/* Header azioni - mobile stack */}
@@ -1871,25 +2090,55 @@ export default function InventoryClient() {
         <div className="flex flex-col md:flex-row md:items-center gap-2 w-full md:w-auto">
           <InventoryModeToggle />
 
-          <div className="grid grid-cols-2 gap-2 w-full md:w-auto">
-            <button
-              className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-60 w-full"
-              disabled={!canSave || saving}
-              onClick={() => save("continue")}
-              type="button"
-            >
-              {saving ? "Salvo..." : "Salva e continua"}
-            </button>
+          <div className="grid grid-cols-3 gap-2 w-full md:w-auto">
+  <button
+    className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-60 w-full"
+    disabled={!canSave || saving}
+    onClick={() => save("continue")}
+    type="button"
+  >
+    {saving ? "Salvo..." : "Salva e continua"}
+  </button>
 
-            <button
-              className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60 w-full"
-              disabled={!canSave || saving}
-              onClick={() => save("close")}
-              type="button"
-            >
-              {saving ? "Salvo..." : "Salva e chiudi"}
-            </button>
-          </div>
+  <button
+    className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60 w-full"
+    disabled={!canSave || saving}
+    onClick={() => save("close")}
+    type="button"
+  >
+    {saving ? "Salvo..." : "Salva e chiudi"}
+  </button>
+
+  <button
+    type="button"
+    className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 w-full"
+    disabled={saving}
+    onClick={() => {
+      const ok = window.confirm(
+        "Vuoi ripartire da zero?\n\nQuesto NON salva e cancella la bozza in memoria (scansionati/quantità)."
+      );
+      if (!ok) return;
+
+      // reset totale (come dopo 'Salva e chiudi' ma senza salvare)
+      resetAfterClose();
+
+      // importantissimo: evita che il prefill/draft “rientri” subito
+      lastPrefillKeyRef.current = "";
+      setMsg("Bozza pulita. Riparti da zero.");
+      setError(null);
+
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          searchInputRef.current?.focus();
+          searchInputRef.current?.select?.();
+        });
+      });
+    }}
+    title="Pulisci tutto e riparti"
+  >
+    Nuovo / Pulisci
+  </button>
+</div>
         </div>
       </div>
 
@@ -2149,34 +2398,62 @@ export default function InventoryClient() {
                               </button>
                             ))}
                           </div>
-                          <div className="mt-3 flex gap-2">
-                            <input
-                              ref={rapidPzInputRef}
-                              className="w-full rounded-xl border p-2"
-                              inputMode="numeric"
-                              placeholder="+ pz (manuale)"
-                              value={addPzMap[it.id] ?? ""}
-                              onChange={(e) => setAddPzMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") {
-                                  e.preventDefault();
-                                  addQty(it.id);
-                                  afterRapidAction();
-                                }
-                              }}
-                            />
-                            <button
-                              type="button"
-                              className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60"
-                              disabled={safeIntFromStr(addPzMap[it.id] ?? "") <= 0}
-                              onClick={() => {
-                                addQty(it.id);
-                                afterRapidAction();
-                              }}
-                            >
-                              Aggiungi
-                            </button>
-                          </div>
+                     <div className="mt-3 space-y-2">
+  {/* ✅ AGGIUNGI (delta) */}
+  <div className="flex gap-2">
+    <input
+      className="w-full rounded-xl border p-2"
+      inputMode="numeric"
+      placeholder="+ pz (aggiungi)"
+      value={addPzMap[it.id] ?? ""}
+      onChange={(e) => setAddPzMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          addQty(it.id);        // ✅ somma
+          afterRapidAction();
+        }
+      }}
+    />
+    <button
+      type="button"
+      className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60"
+      disabled={safeIntFromStr(addPzMap[it.id] ?? "") <= 0}
+      onClick={() => {
+        addQty(it.id);          // ✅ somma
+        afterRapidAction();
+      }}
+    >
+      Aggiungi
+    </button>
+  </div>
+
+  {/* ✅ IMPOSTA (override) */}
+  <div className="flex gap-2">
+    <input
+      ref={rapidPzInputRef}
+      className="w-full rounded-xl border p-2"
+      inputMode="numeric"
+      placeholder="Imposta totale PZ (correzione)"
+      value={qtyPzMap[it.id] ?? ""}
+      onChange={(e) => setPz(it.id, e.target.value)} // ✅ sovrascrive (correzione)
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          afterRapidAction();
+        }
+      }}
+    />
+    <button
+      type="button"
+      className="rounded-xl border px-4 py-2"
+      onClick={() => afterRapidAction()}
+      title="Conferma correzione"
+    >
+      OK
+    </button>
+  </div>
+</div>
                         </div>
 
                         <div className="rounded-xl border p-3">
@@ -2184,6 +2461,24 @@ export default function InventoryClient() {
 
                           {kg ? (
                             <>
+                            
+                            <div className="mt-3">
+  <label className="block text-xs text-gray-500 mb-1">Totale GR (correzione)</label>
+  <input
+    ref={rapidGrInputRef}
+    className="w-full rounded-xl border p-2"
+    inputMode="numeric"
+    placeholder="Es. 470"
+    value={qtyGrMap[it.id] ?? ""}
+    onChange={(e) => setGr(it.id, e.target.value)}
+    onKeyDown={(e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        afterRapidAction();
+      }
+    }}
+  />
+</div>
                               <div className="flex flex-wrap gap-2">
                                 {quickSmall.map((n) => (
                                   <button
@@ -2393,6 +2688,13 @@ export default function InventoryClient() {
                             >
                               Apri
                             </button>
+                            <button
+                            type="button"
+                             className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
+                             onClick={() => removeFromScanned(it.id)}
+                            >
+                            Rimuovi
+                            </button>
                           </div>
 
                           <div className="mt-2 text-sm">
@@ -2478,6 +2780,13 @@ export default function InventoryClient() {
                                 <button type="button" className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" onClick={() => openItemInRapid(it)}>
                                   Apri
                                 </button>
+                                  <button
+                                  type="button"
+                                  className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
+                                  onClick={() => removeFromScanned(it.id)}
+                                 >
+                                   Rimuovi
+                                 </button>
                               </td>
                             </tr>
                           );

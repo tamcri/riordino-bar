@@ -33,7 +33,12 @@ async function lookupPvIdFromUsernameCode(username: string): Promise<string | nu
   const code = (username || "").trim().split(/\s+/)[0]?.toUpperCase();
   if (!code || code.length > 5) return null;
 
-  const { data, error } = await supabaseAdmin.from("pvs").select("id").eq("is_active", true).eq("code", code).maybeSingle();
+  const { data, error } = await supabaseAdmin
+    .from("pvs")
+    .select("id")
+    .eq("is_active", true)
+    .eq("code", code)
+    .maybeSingle();
   if (error) return null;
   return data?.id ?? null;
 }
@@ -68,31 +73,52 @@ export async function GET(req: Request) {
 
   const pv_id_qs = (url.searchParams.get("pv_id") || "").trim();
 
-  // ⚠️ IMPORTANTE:
-  // Alcuni client costruiscono l'URL includendo sempre category_id/subcategory_id anche quando vuoti:
-  //   ...&subcategory_id=
-  // In quel caso NON dobbiamo interpretarlo come "IS NULL", ma come "parametro assente".
-  // Invece "subcategory_id=null" significa esplicitamente NULL.
+  // ⚠️ Alcuni client passano category_id= (vuoto) per Rapido.
+  // Altri passano category_id=null.
+  // Qui li trattiamo entrambi come NULL.
   const category_raw = (url.searchParams.get("category_id") ?? "").trim();
   const subcategory_raw = (url.searchParams.get("subcategory_id") ?? "").trim();
+  const rapid_session_raw = (url.searchParams.get("rapid_session_id") ?? "").trim();
 
-  const category_is_explicit_null = url.searchParams.has("category_id") && category_raw.toLowerCase() === "null";
-  const subcategory_is_explicit_null = url.searchParams.has("subcategory_id") && subcategory_raw.toLowerCase() === "null";
+  const category_param_present = url.searchParams.has("category_id");
+  const subcategory_param_present = url.searchParams.has("subcategory_id");
 
-  const hasCategory = url.searchParams.has("category_id") && category_raw !== "" && !category_is_explicit_null;
-  const hasSubcategory = url.searchParams.has("subcategory_id") && subcategory_raw !== "" && !subcategory_is_explicit_null;
+  const category_is_explicit_null = category_param_present && category_raw.toLowerCase() === "null";
+  const category_is_empty = category_param_present && category_raw === "";
 
-  const category_id: string | null = category_raw === "" || category_is_explicit_null ? null : category_raw;
+  // ✅ Rapido quando category_id è "null" OR quando è vuoto ma presente.
+  const isRapidRequest = category_is_explicit_null || category_is_empty;
+
+  const subcategory_is_explicit_null = subcategory_param_present && subcategory_raw.toLowerCase() === "null";
+
+  const hasCategory = category_param_present && category_raw !== "" && !category_is_explicit_null && !category_is_empty;
+  const hasSubcategory = subcategory_param_present && subcategory_raw !== "" && !subcategory_is_explicit_null;
+
+  const category_id: string | null = isRapidRequest ? null : category_raw;
   const subcategory_id: string | null = subcategory_raw === "" || subcategory_is_explicit_null ? null : subcategory_raw;
+
+  // ✅ risolvo rapid_session_id:
+  // - preferisco rapid_session_id (solo se UUID)
+  // - compat: se non c'è, e siamo in rapido, uso subcategory_id come sessione (solo se UUID)
+  // - se NON è UUID => lo tratto come assente (legacy), NON 400
+  const rapid_session_id: string | null =
+    (rapid_session_raw && isUuid(rapid_session_raw) ? rapid_session_raw : null) ||
+    (isRapidRequest && subcategory_id && isUuid(subcategory_id) ? subcategory_id : null);
 
   const inventory_date = (url.searchParams.get("inventory_date") || "").trim(); // YYYY-MM-DD
 
   if (hasCategory && category_id !== null && !isUuid(category_id)) {
     return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
   }
-  if (hasSubcategory && subcategory_id !== null && !isUuid(subcategory_id)) {
-    return NextResponse.json({ ok: false, error: "subcategory_id non valido" }, { status: 400 });
+
+  // ✅ In rapido subcategory_id NON è una subcategory: nel DB è NULL.
+  // ✅ Legacy: se manca rapid_session_id NON blocco il dettaglio.
+  if (!isRapidRequest) {
+    if (hasSubcategory && subcategory_id !== null && !isUuid(subcategory_id)) {
+      return NextResponse.json({ ok: false, error: "subcategory_id non valido" }, { status: 400 });
+    }
   }
+
   if (!isIsoDate(inventory_date)) {
     return NextResponse.json({ ok: false, error: "inventory_date non valida (YYYY-MM-DD)" }, { status: 400 });
   }
@@ -122,15 +148,35 @@ export async function GET(req: Request) {
       .eq("inventory_date", inventory_date);
 
     // ✅ categoria:
-    // - category_id=null => IS NULL
-    // - category_id= (vuoto) => ignora filtro
-    // - UUID => EQ
-    if (category_is_explicit_null) q = q.is("category_id", null);
-    else if (hasCategory) q = q.eq("category_id", category_id);
+    // - Rapido => category_id IS NULL
+    // - Standard: UUID => EQ
+    if (isRapidRequest) {
+      q = q.is("category_id", null);
+    } else {
+      if (hasCategory) q = q.eq("category_id", category_id);
+    }
 
-    // ✅ subcategory: stessa logica
-    if (subcategory_is_explicit_null) q = q.is("subcategory_id", null);
-    else if (hasSubcategory) q = q.eq("subcategory_id", subcategory_id);
+    // ✅ subcategory:
+    // - RAPIDO: subcategory_id deve essere NULL
+    //   se ho rapid_session_id filtro per quella,
+    //   altrimenti (legacy) filtro rapid_session_id IS NULL
+    // - STANDARD: filtro classico
+    if (isRapidRequest) {
+      q = q.is("subcategory_id", null);
+
+      if (rapid_session_id) {
+        q = q.eq("rapid_session_id", rapid_session_id);
+      } else {
+        // ✅ fallback legacy
+        q = q.is("rapid_session_id", null);
+      }
+    } else {
+      if (subcategory_is_explicit_null) q = q.is("subcategory_id", null);
+      else if (hasSubcategory) q = q.eq("subcategory_id", subcategory_id);
+
+      // standard: mai sessione
+      q = q.is("rapid_session_id", null);
+    }
 
     const { data, error } = await q;
 
@@ -181,7 +227,42 @@ export async function GET(req: Request) {
       })
       .sort((a, b) => (a.code || "").localeCompare(b.code || ""));
 
-    return NextResponse.json({ ok: true, rows: out });
+    // ✅ header (operatore / label) coerente con le stesse regole
+    let operatore_header: string | null = null;
+    let label_header: string | null = null;
+
+    try {
+      let hq = supabaseAdmin
+        .from("inventories_headers")
+        .select("operatore, label")
+        .eq("pv_id", effectivePvId)
+        .eq("inventory_date", inventory_date);
+
+      if (isRapidRequest) {
+        hq = hq.is("category_id", null).is("subcategory_id", null);
+
+        if (rapid_session_id) {
+          hq = hq.eq("rapid_session_id", rapid_session_id);
+        } else {
+          // ✅ legacy
+          hq = hq.is("rapid_session_id", null);
+        }
+      } else {
+        if (hasCategory) hq = hq.eq("category_id", category_id);
+        if (subcategory_is_explicit_null) hq = hq.is("subcategory_id", null);
+        else if (hasSubcategory) hq = hq.eq("subcategory_id", subcategory_id);
+
+        hq = hq.is("rapid_session_id", null);
+      }
+
+      const { data: hdata } = await hq.maybeSingle();
+      operatore_header = (hdata as any)?.operatore ?? null;
+      label_header = (hdata as any)?.label ?? null;
+    } catch {
+      // ignore (best-effort)
+    }
+
+    return NextResponse.json({ ok: true, rows: out, operatore: operatore_header, label: label_header });
   } catch (e: any) {
     console.error("[inventories/rows] UNHANDLED ERROR:", e);
     return NextResponse.json({ ok: false, error: e?.message || "TypeError: fetch failed" }, { status: 500 });

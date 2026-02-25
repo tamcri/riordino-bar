@@ -205,7 +205,7 @@ export async function GET(req: Request) {
     }
   }
 
-  // 5) risolvo nomi categoria/sottocategoria per i fogli (solo se siamo in "Tutte" oppure se vogliamo comunque popolare)
+  // 5) risolvo nomi categoria/sottocategoria per i fogli
   const catIds = Array.from(
     new Set(
       Array.from(itemsMap.values())
@@ -282,7 +282,15 @@ export async function GET(req: Request) {
       return (Number.isFinite(pz) && pz > 0) || (Number.isFinite(gr) && gr > 0) || (Number.isFinite(ml) && ml > 0);
     });
 
-  lines.sort((a: any, b: any) => String(a.code || "").localeCompare(String(b.code || "")));
+  // ✅ ORDINAMENTO RICHIESTO: alfabetico per descrizione (case-insensitive, it)
+  lines.sort((a: any, b: any) => {
+    const da = String(a.description ?? "").trim();
+    const db = String(b.description ?? "").trim();
+    const cmp = da.localeCompare(db, "it", { sensitivity: "base" });
+    if (cmp !== 0) return cmp;
+    // fallback stabile: per codice
+    return String(a.code ?? "").localeCompare(String(b.code ?? ""), "it", { sensitivity: "base" });
+  });
 
   const xlsx = await buildInventoryXlsx(
     { inventoryDate: inventory_date, operatore, pvLabel, categoryName, subcategoryName },
