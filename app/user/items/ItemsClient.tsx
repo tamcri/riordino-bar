@@ -225,6 +225,11 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   const [assigning, setAssigning] = useState(false);
   const [assignError, setAssignError] = useState<string | null>(null);
 
+  // ✅ CREA ARTICOLO MINIMAL (admin)
+  const [newItemCode, setNewItemCode] = useState("");
+  const [newItemDescription, setNewItemDescription] = useState("");
+  const [creatingItem, setCreatingItem] = useState(false);
+
   // ✅ PREVIEW articolo per assegnazione barcode
   const [assignPreviewLoading, setAssignPreviewLoading] = useState(false);
   const [assignPreviewError, setAssignPreviewError] = useState<string | null>(null);
@@ -322,6 +327,45 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     loadItems();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [qs]);
+
+  // ✅ Nuovo articolo “minimal”: solo codice + descrizione (categoria presa dai filtri)
+  async function createMinimalItem() {
+    setMsg(null);
+    setError(null);
+
+    const code = newItemCode.trim();
+    const description = newItemDescription.trim();
+    if (!code) return setError("Codice obbligatorio.");
+    if (!description) return setError("Descrizione obbligatoria.");
+    if (!categoryId) return setError("Seleziona una categoria prima di creare l'articolo.");
+
+    setCreatingItem(true);
+    try {
+      const res = await fetch("/api/items/create-minimal", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          code,
+          description,
+          category_id: categoryId,
+          subcategory_id: subcategoryId || null,
+        }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore creazione articolo");
+
+      setNewItemCode("");
+      setNewItemDescription("");
+      setMsg("Articolo creato.");
+
+      // ricarico lista (mantengo filtri)
+      await loadItems();
+    } catch (e: any) {
+      setError(e?.message || "Errore creazione articolo");
+    } finally {
+      setCreatingItem(false);
+    }
+  }
 
   // ✅ Mostra box assegnazione: solo admin, barcode-like, nessun risultato
   const qTrim = q.trim();
@@ -1289,6 +1333,54 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
           </div>
         )}
       </div>
+
+      {/* ✅ NUOVO ARTICOLO MINIMAL (solo admin) */}
+      {isAdmin && (
+        <div className="rounded-2xl border bg-white p-4 space-y-3">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="font-semibold">Nuovo articolo (minimal)</div>
+              <div className="text-sm text-gray-600">Inserisci solo Codice + Descrizione. La categoria viene presa dai filtri sopra.</div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div>
+              <label className="block text-sm font-medium mb-2">Codice</label>
+              <input
+                className="w-full rounded-xl border p-3"
+                placeholder="Es. 12345"
+                value={newItemCode}
+                onChange={(e) => setNewItemCode(e.target.value)}
+                disabled={creatingItem}
+              />
+            </div>
+
+            <div className="md:col-span-2">
+              <label className="block text-sm font-medium mb-2">Descrizione</label>
+              <input
+                className="w-full rounded-xl border p-3"
+                placeholder="Es. Acqua naturale 1L"
+                value={newItemDescription}
+                onChange={(e) => setNewItemDescription(e.target.value)}
+                disabled={creatingItem}
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center justify-end">
+            <button
+              type="button"
+              className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60"
+              onClick={createMinimalItem}
+              disabled={creatingItem}
+              title={!categoryId ? "Seleziona una categoria" : "Crea articolo"}
+            >
+              {creatingItem ? "Creo..." : "Crea articolo"}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ✅ IMPORT ARTICOLI DA EXCEL (solo admin) */}
       {isAdmin && (

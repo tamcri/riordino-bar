@@ -10,7 +10,13 @@ type Category = { id: string; name: string; slug?: string; is_active?: boolean }
 type Subcategory = { id: string; category_id: string; name: string; slug?: string; is_active?: boolean };
 
 type InventoryGroup = {
+  // ✅ spesso qui dentro c’è già l’id header oppure una chiave composta
   key: string;
+
+  // ✅ NUOVO: se /api/inventories/list restituisce id, lo usiamo per delete sicura
+  id?: string | null;
+  header_id?: string | null;
+
   pv_id: string;
   pv_code: string;
   pv_name: string;
@@ -97,6 +103,11 @@ function formatEUR(n: number) {
   return new Intl.NumberFormat("it-IT", { style: "currency", currency: "EUR" }).format(n);
 }
 
+function isUuid(v: string | null | undefined) {
+  if (!v) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(v).trim());
+}
+
 async function fetchJsonSafe<T = any>(
   url: string,
   init?: RequestInit
@@ -177,7 +188,7 @@ function buildRowsParamsFromGroup(g: InventoryGroup) {
 }
 
 /** URL riapertura inventario (modifica) */
-function buildReopenUrl(g: InventoryGroup) {
+function buildReopenUrl(g: InventoryGroup, role: string | null) {
   const p = new URLSearchParams();
   p.set("pv_id", g.pv_id);
   p.set("inventory_date", g.inventory_date);
@@ -205,7 +216,9 @@ function buildReopenUrl(g: InventoryGroup) {
   const lbl = normStr(g.label);
   if (lbl) p.set("label", lbl);
 
-  return `/user/inventories?${p.toString()}`;
+  const base = role === "punto_vendita" ? "/pv/inventario" : "/user/inventories";
+  p.set("reopen", "1");
+  return `${base}?${p.toString()}`;
 }
 
 type MenuPos = { top: number; left: number; width: number };
@@ -252,16 +265,6 @@ export default function InventoryHistoryClient() {
 
   const canUseSubcategories = useMemo(() => !!categoryId, [categoryId]);
   const canCompare = me.role === "admin" || me.role === "amministrativo";
-
-  // ✅ Timeline box state
-  const canTimeline =
-    (me.role === "admin" || me.role === "amministrativo" || me.role === "punto_vendita") && !!me.role;
-  const [tlPvId, setTlPvId] = useState<string>("");
-  const [tlCategoryId, setTlCategoryId] = useState<string>("");
-  const [tlDateFrom, setTlDateFrom] = useState<string>("");
-  const [tlDateTo, setTlDateTo] = useState<string>(todayISO());
-  const [tlMsg, setTlMsg] = useState<string | null>(null);
-  const [tlLoading, setTlLoading] = useState(false);
 
   const filteredDetail = useMemo(() => {
     const t = searchDetail.trim().toLowerCase();
@@ -372,15 +375,16 @@ export default function InventoryHistoryClient() {
     setSearchDetail("");
 
     try {
+      console.log("LOADLIST CHIAMATA", { effectiveMe });
       const params = new URLSearchParams();
 
       if (dateFromISO) params.set("from", dateFromISO);
       if (dateToISO) params.set("to", dateToISO);
-      if (dateFromISO && dateToISO && dateFromISO > dateToISO)
-        throw new Error("Intervallo date non valido: 'Dal' è dopo 'Al'.");
+      if (dateFromISO && dateToISO && dateFromISO > dateToISO) throw new Error("Intervallo date non valido: 'Dal' è dopo 'Al'.");
 
       if (effectiveMe.isPv) {
-        if (categoryId) params.set("category_id", categoryId);
+        // ✅ PV lavora in modalità Rapido: nello storico filtriamo SOLO per date.
+        // (le categorie sono un concetto "standard" e qui non servono)
       } else {
         if (pvId) params.set("pv_id", pvId);
         if (categoryId) params.set("category_id", categoryId);
@@ -398,6 +402,8 @@ export default function InventoryHistoryClient() {
       }
 
       setRows(data.rows || []);
+      console.log("ROWS DAL SERVER:", data.rows);
+      console.log("PRIMA RIGA:", (data.rows || [])[0]);
     } catch (e: any) {
       setError(e?.message || "Errore");
     } finally {
@@ -447,67 +453,6 @@ export default function InventoryHistoryClient() {
     if (g.subcategory_id) params.set("subcategory_id", g.subcategory_id);
 
     window.location.href = `/api/inventories/excel?${params.toString()}`;
-  }
-
-  // ✅ Timeline box download
-  async function downloadTimelineExcel() {
-    setTlMsg(null);
-
-    const pv = me.isPv ? me.pv_id : tlPvId;
-    if (!pv) return setTlMsg("Seleziona un PV.");
-    if (!tlCategoryId) return setTlMsg("Seleziona una categoria.");
-    if (!tlDateFrom || !tlDateTo) return setTlMsg("Imposta Data da e Data a.");
-
-    if (tlDateFrom > tlDateTo) {
-      setTlMsg("Intervallo date non valido: 'Data da' è dopo 'Data a'.");
-      return;
-    }
-
-    setTlLoading(true);
-    try {
-      const params = new URLSearchParams();
-      params.set("pv_id", pv);
-      params.set("category_id", tlCategoryId);
-      params.set("date_from", tlDateFrom);
-      params.set("date_to", tlDateTo);
-
-      window.location.href = `/api/admin/timeline/excel?${params.toString()}`;
-      setTlMsg("Download avviato.");
-    } catch (e: any) {
-      setTlMsg(e?.message || "Errore");
-    } finally {
-      setTlLoading(false);
-    }
-  }
-
-  async function downloadTimelinePdf() {
-    setTlMsg(null);
-
-    const pv = me.isPv ? me.pv_id : tlPvId;
-    if (!pv) return setTlMsg("Seleziona un PV.");
-    if (!tlCategoryId) return setTlMsg("Seleziona una categoria.");
-    if (!tlDateFrom || !tlDateTo) return setTlMsg("Imposta Data da e Data a.");
-
-    if (tlDateFrom > tlDateTo) {
-      setTlMsg("Intervallo date non valido: 'Data da' è dopo 'Data a'.");
-      return;
-    }
-
-    setTlLoading(true);
-    try {
-      const params = new URLSearchParams();
-      params.set("pv_id", pv);
-      params.set("category_id", tlCategoryId);
-      params.set("date_from", tlDateFrom);
-      params.set("date_to", tlDateTo);
-
-      window.location.href = `/api/admin/timeline/pivot-pdf?${params.toString()}`;
-      setTlMsg("Download avviato.");
-    } catch (e: any) {
-      setTlMsg(e?.message || "Errore");
-    } finally {
-      setTlLoading(false);
-    }
   }
 
   function openCompare(g: InventoryGroup) {
@@ -665,19 +610,30 @@ export default function InventoryHistoryClient() {
   async function deleteInventory(g: InventoryGroup) {
     if (me.role !== "admin") return;
 
-    const label = `${g.pv_code} — ${g.category_name}${g.subcategory_id ? ` — ${g.subcategory_name}` : ""} — ${formatDateIT(
-      g.inventory_date
-    )}`;
-    const ok = window.confirm(`Confermi eliminazione inventario?\n\n${label}\n\nOperazione irreversibile.`);
+    // ✅ header_id robusto: prima id/header_id, poi key se è UUID
+    const headerIdCandidate =
+      normStr((g as any).header_id) || normStr((g as any).id) || (isUuid(g.key) ? g.key : "");
+    if (!headerIdCandidate || !isUuid(headerIdCandidate)) {
+      setError(
+        "Eliminazione bloccata: non trovo l'ID dell'inventario. Serve che /api/inventories/list restituisca 'id' (header) oppure che 'key' sia un UUID."
+      );
+      return;
+    }
+
+    const note = normStr(g.label);
+    const labelLine = `${g.pv_code} — ${g.category_name}${g.subcategory_id ? ` — ${g.subcategory_name}` : ""} — ${formatDateIT(g.inventory_date)}`;
+    const noteLine = note ? `\nNota: ${note}` : "";
+
+    const ok = window.confirm(`Confermi eliminazione inventario?\n\n${labelLine}${noteLine}\n\nOperazione irreversibile.`);
     if (!ok) return;
 
     try {
       setError(null);
+
+      // ✅ NUOVO: delete SICURA per header_id
       const params = new URLSearchParams();
-      params.set("pv_id", g.pv_id);
-      setCategoryParam(params, g.category_id);
-      params.set("inventory_date", g.inventory_date);
-      if (g.subcategory_id) params.set("subcategory_id", g.subcategory_id);
+      params.set("header_id", headerIdCandidate);
+      await fetch(`/api/inventories/delete?${params.toString()}`, { method: "DELETE" });
 
       const res = await fetch(`/api/inventories/delete?${params.toString()}`, { method: "DELETE" });
       const text = await res.text().catch(() => "");
@@ -692,6 +648,12 @@ export default function InventoryHistoryClient() {
       if (!res.ok) {
         const looksHtml = (text || "").trim().startsWith("<!DOCTYPE") || (text || "").includes("<html");
         if (looksHtml) throw new Error("Errore eliminazione: endpoint /api/inventories/delete non trovato o risposta non valida.");
+
+        // messaggio più chiaro se arriva il blocco legacy (non dovrebbe più capitare)
+        if (json?.code === "DELETE_AMBIGUOUS") {
+          throw new Error(json?.error || "Eliminazione bloccata: inventario ambiguo. Aggiorna la pagina e riprova.");
+        }
+
         throw new Error(json?.error || text || `Errore eliminazione (HTTP ${res.status})`);
       }
 
@@ -724,19 +686,12 @@ export default function InventoryHistoryClient() {
         setMe(meState);
 
         setDateToISO(todayISO());
-        setTlDateTo(todayISO());
+        
 
         await loadCategories();
 
         if (!meState.isPv) {
           await loadPvs();
-        }
-
-        // timeline defaults
-        if (meState.isPv && meState.pv_id) {
-          setTlPvId(meState.pv_id);
-        } else {
-          setTlPvId("");
         }
 
         await loadList(meState);
@@ -774,84 +729,8 @@ export default function InventoryHistoryClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pvId, categoryId, subcategoryId, dateFromISO, dateToISO, me.role]);
 
-  // quando pvs/categorie arrivano, metto i default per timeline se vuoti
-  useEffect(() => {
-    if (!me.role) return;
-
-    if (!me.isPv) {
-      if (!tlPvId && pvs?.[0]?.id) setTlPvId(pvs[0].id);
-    }
-    if (!tlCategoryId && categories?.[0]?.id) setTlCategoryId(categories[0].id);
-  }, [pvs, categories, me.role, me.isPv, tlPvId, tlCategoryId]);
-
   return (
     <div className="space-y-4">
-      {/* ✅ Timeline Giacenze (BOX COME ADMIN) */}
-      {canTimeline && (
-        <div className="rounded-2xl border bg-white p-4">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-semibold">Timeline Giacenze</h2>
-              <p className="text-sm text-gray-600 mt-1">Scarica un Excel o un PDF pivot con Δ nel periodo selezionato.</p>
-            </div>
-            {tlMsg && <div className="text-sm text-gray-700">{tlMsg}</div>}
-          </div>
-
-          <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
-            {!me.isPv && (
-              <div>
-                <label className="block text-sm font-medium mb-2">Punto Vendita</label>
-                <select className="w-full rounded-xl border p-3 bg-white" value={tlPvId} onChange={(e) => setTlPvId(e.target.value)}>
-                  <option value="">— Seleziona —</option>
-                  {pvs.map((pv) => (
-                    <option key={pv.id} value={pv.id}>
-                      {pv.code} — {pv.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
-
-            <div>
-              <label className="block text-sm font-medium mb-2">Categoria</label>
-              <select className="w-full rounded-xl border p-3 bg-white" value={tlCategoryId} onChange={(e) => setTlCategoryId(e.target.value)}>
-                <option value="">— Seleziona —</option>
-                {categories.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-              <p className="text-xs text-gray-500 mt-1">Per ora solo Categoria (sottocategoria la possiamo aggiungere dopo).</p>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium mb-2">Data da</label>
-              <input type="date" className="w-full rounded-xl border p-3 bg-white" value={tlDateFrom} onChange={(e) => setTlDateFrom(e.target.value)} />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium mb-2">Data a</label>
-              <input type="date" className="w-full rounded-xl border p-3 bg-white" value={tlDateTo} onChange={(e) => setTlDateTo(e.target.value)} />
-            </div>
-          </div>
-
-          <div className="mt-4 flex items-center gap-3">
-            <button
-              type="button"
-              className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60"
-              disabled={tlLoading}
-              onClick={downloadTimelineExcel}
-            >
-              {tlLoading ? "Genero..." : "Scarica Excel Timeline"}
-            </button>
-
-            <button type="button" className="rounded-xl border px-4 py-2 hover:bg-gray-50 disabled:opacity-60" disabled={tlLoading} onClick={downloadTimelinePdf}>
-              {tlLoading ? "Genero..." : "Scarica PDF Pivot (Δ)"}
-            </button>
-          </div>
-        </div>
-      )}
 
       {/* Date (per tutti) */}
       <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -866,24 +745,6 @@ export default function InventoryHistoryClient() {
           <div className="text-xs text-gray-500 mt-1">Formato mostrato: {dateToISO ? formatDateIT(dateToISO) : "—"}</div>
         </div>
       </div>
-
-      {/* PV: filtro categoria */}
-      {me.isPv && (
-        <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-1 gap-3">
-          <div>
-            <label className="block text-sm font-medium mb-2">Categoria</label>
-            <select className="w-full rounded-xl border p-3 bg-white" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
-              <option value="">— Tutte le categorie —</option>
-              {categories.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-            <p className="text-xs text-gray-500 mt-1">Nel Punto Vendita, nello storico filtriamo per data e (opzionale) categoria.</p>
-          </div>
-        </div>
-      )}
 
       {/* Admin/Ammin: filtri completi */}
       {!me.isPv && (
@@ -989,9 +850,7 @@ export default function InventoryHistoryClient() {
                   <td className="p-3">
                     <div className="leading-tight">
                       <div className="font-medium">{normStr(r.operatore) ? normStr(r.operatore) : "—"}</div>
-                      {normStr((r as any).label) ? (
-                        <div className="text-xs text-gray-500 mt-0.5">{normStr((r as any).label)}</div>
-                      ) : null}
+                      {normStr((r as any).label) ? <div className="text-xs text-gray-500 mt-0.5">{normStr((r as any).label)}</div> : null}
                     </div>
                   </td>
 
@@ -1042,11 +901,10 @@ export default function InventoryHistoryClient() {
               const g = rows.find((x) => x.key === actionsOpenKey);
               if (!g) return null;
 
-              const canReopenBase = me.role === "admin" || me.role === "amministrativo";
+              const canReopenBase = me.role === "admin" || me.role === "amministrativo" || me.role === "punto_vendita";
 
               // ✅ admin può sempre riaprire/modificare
-              const canReopenOwner =
-              me.role === "admin" ? true : !g.created_by_username || (me.username && g.created_by_username === me.username);
+              const canReopenOwner = me.role === "admin" ? true : !g.created_by_username || (me.username && g.created_by_username === me.username);
 
               const canReopen = canReopenBase && canReopenOwner;
 
@@ -1067,13 +925,18 @@ export default function InventoryHistoryClient() {
                           return;
                         }
 
-                        // ✅ blocco duro: in rapido senza sessione non riapri (altrimenti “vuoto” sicuro)
-                        if (isRapid && !rs) {
-                          alert("Questo inventario è in modalità Rapido ma non ha rapid_session_id: non posso riaprirlo correttamente (scansionati).");
-                          return;
-                        }
+                        // ✅ Rapido: se manca rapid_session_id (inventari vecchi), NON blocco.
+// Avviso solo: potrebbe riaprire “vuoto” oppure prendere righe legacy (sessione NULL).
+if (isRapid && !rs) {
+  const ok = window.confirm(
+    "Questo inventario è in modalità Rapido ma non ha rapid_session_id (vecchio inventario).\n" +
+      "Posso comunque provare a riaprirlo, ma gli scansionati potrebbero non combaciare.\n\n" +
+      "Vuoi continuare?"
+  );
+  if (!ok) return;
+}
 
-                        router.push(buildReopenUrl(g));
+router.push(buildReopenUrl(g, me.role));
                       }}
                       role="menuitem"
                       title={!canReopen ? "Inventario creato da altro utente" : "Riapri l'inventario per modificare"}
@@ -1221,8 +1084,7 @@ export default function InventoryHistoryClient() {
               </table>
 
               <div className="px-3 py-2 text-xs text-gray-500 border-t">
-                Nota: per articoli a ML, <b>PZ</b> = bottiglie chiuse equivalenti, <b>ML</b> = residuo “aperto”. Per articoli a grammi,{" "}
-                <b>GR</b> = peso “aperto”.
+                Nota: per articoli a ML, <b>PZ</b> = bottiglie chiuse equivalenti, <b>ML</b> = residuo “aperto”. Per articoli a grammi, <b>GR</b> = peso “aperto”.
               </div>
             </div>
           )}

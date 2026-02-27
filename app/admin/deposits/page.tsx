@@ -26,10 +26,7 @@ type DepositItemRow = {
   items?: any;
 };
 
-function todayISO() {
-  const d = new Date();
-  return d.toISOString().slice(0, 10);
-}
+
 
 function formatEUR(n: any) {
   const x = Number(n);
@@ -38,9 +35,23 @@ function formatEUR(n: any) {
 }
 
 function normUm(v: any) {
-  return String(v ?? "")
-    .trim()
-    .toUpperCase();
+  return String(v ?? "").trim().toUpperCase();
+}
+
+function isLiquid(r: DepositItemRow) {
+  const v = Number(r.items?.volume_ml_per_unit ?? 0);
+  return Number.isFinite(v) && v > 0;
+}
+
+function isKg(r: DepositItemRow) {
+  return normUm(r.items?.um) === "KG";
+}
+
+function formatStock(r: DepositItemRow) {
+  const qty = Math.max(0, Math.trunc(Number(r.stock_qty ?? 0) || 0));
+  if (isLiquid(r)) return `${qty} ml`;
+  if (isKg(r)) return `${qty} gr`;
+  return `${qty} pz`;
 }
 
 function computeRowValueEUR(r: DepositItemRow) {
@@ -50,14 +61,21 @@ function computeRowValueEUR(r: DepositItemRow) {
   const qty = Number(r.stock_qty ?? 0);
   if (!Number.isFinite(qty) || qty <= 0) return 0;
 
-  // ✅ Regola coerente col resto del progetto:
-  // - UM=KG => stock_qty è in grammi => converto a kg
-  // - altrimenti => stock_qty “vale” come unità base (PZ / CL / ecc.)
-  const um = normUm(r.items?.um);
-  if (um === "KG") {
-    return (qty / 1000) * price;
+  if (isLiquid(r)) {
+    const perUnit = Number(r.items?.volume_ml_per_unit ?? 0);
+    if (!Number.isFinite(perUnit) || perUnit <= 0) return 0;
+    return (qty / perUnit) * price;
   }
+
+  if (isKg(r)) return (qty / 1000) * price;
   return qty * price;
+}
+
+function categoryLabel(r: DepositItemRow) {
+  const c = r.items?.categories?.name ?? "";
+  const s = r.items?.subcategories?.name ?? "";
+  if (c && s) return `${c} / ${s}`;
+  return c || s || "";
 }
 
 export default function AdminDepositsPage() {
@@ -66,15 +84,7 @@ export default function AdminDepositsPage() {
 
   const [deposits, setDeposits] = useState<Deposit[]>([]);
   const [depositId, setDepositId] = useState<string>("");
-
-  const [depCode, setDepCode] = useState("");
-  const [depName, setDepName] = useState("");
-  const [createMsg, setCreateMsg] = useState<string | null>(null);
-  const [createLoading, setCreateLoading] = useState(false);
-
-  const [file, setFile] = useState<File | null>(null);
-  const [importMsg, setImportMsg] = useState<string | null>(null);
-  const [importLoading, setImportLoading] = useState(false);
+  
 
   const [items, setItems] = useState<DepositItemRow[]>([]);
   const [itemsMsg, setItemsMsg] = useState<string | null>(null);
@@ -84,14 +94,20 @@ export default function AdminDepositsPage() {
   const selectedDeposit = useMemo(() => deposits.find((d) => d.id === depositId) || null, [deposits, depositId]);
 
   const itemsTotals = useMemo(() => {
-    let totQty = 0;
+    let totPz = 0;
+    let totGr = 0;
+    let totMl = 0;
     let totValue = 0;
+
     for (const r of items) {
-      const q = Number(r.stock_qty ?? 0);
-      totQty += Number.isFinite(q) ? q : 0;
+      const q = Math.max(0, Math.trunc(Number(r.stock_qty ?? 0) || 0));
+      if (isLiquid(r)) totMl += q;
+      else if (isKg(r)) totGr += q;
+      else totPz += q;
       totValue += computeRowValueEUR(r);
     }
-    return { totQty, totValue };
+
+    return { totPz, totGr, totMl, totValue };
   }, [items]);
 
   async function loadPvs() {
@@ -102,8 +118,7 @@ export default function AdminDepositsPage() {
   }
 
   async function loadDeposits(nextPvId: string) {
-    setCreateMsg(null);
-    setImportMsg(null);
+
     setItemsMsg(null);
 
     setDeposits([]);
@@ -116,7 +131,7 @@ export default function AdminDepositsPage() {
     const json = await res.json().catch(() => null);
 
     if (!res.ok || !json?.ok) {
-      setCreateMsg(json?.error || "Errore caricamento depositi");
+      setItemsMsg(json?.error || "Errore caricamento depositi");
       return;
     }
 
@@ -161,260 +176,97 @@ export default function AdminDepositsPage() {
     loadDepositItems(depositId).catch(() => null);
   }, [depositId]);
 
-  async function createDeposit(e: React.FormEvent) {
-    e.preventDefault();
-    setCreateMsg(null);
-    setImportMsg(null);
-
-    if (!pvId) {
-      setCreateMsg("Seleziona prima un PV.");
-      return;
-    }
-
-    const code = depCode.trim().toUpperCase();
-    if (!code) {
-      setCreateMsg("Inserisci un codice deposito (es. A1-DIVERSIVO).");
-      return;
-    }
-
-    setCreateLoading(true);
-    try {
-      const res = await fetch("/api/deposits/create", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ pv_id: pvId, code, name: depName.trim() ? depName.trim() : null }),
-      });
-
-      const json = await res.json().catch(() => null);
-      if (!res.ok || !json?.ok) {
-        setCreateMsg(json?.error || "Errore creazione deposito");
-        return;
-      }
-
-      setCreateMsg(`Deposito creato: ${json.deposit.code}`);
-      setDepCode("");
-      setDepName("");
-
-      await loadDeposits(pvId);
-      const newId = json.deposit?.id;
-      if (newId) setDepositId(newId);
-    } finally {
-      setCreateLoading(false);
-    }
-  }
-
-  async function importExcel(e: React.FormEvent) {
-    e.preventDefault();
-    setImportMsg(null);
-
-    if (!depositId) {
-      setImportMsg("Seleziona prima un deposito.");
-      return;
-    }
-    if (!file) {
-      setImportMsg("Seleziona un file Excel.");
-      return;
-    }
-
-    setImportLoading(true);
-    try {
-      const fd = new FormData();
-      fd.append("deposit_id", depositId);
-      fd.append("file", file);
-
-      const res = await fetch("/api/deposits/import", { method: "POST", body: fd });
-      const json = await res.json().catch(() => null);
-
-      if (!res.ok || !json?.ok) {
-        setImportMsg(json?.error || "Errore import");
-        return;
-      }
-
-      const notFound = Array.isArray(json.not_found) ? json.not_found.length : 0;
-      const excluded = Array.isArray(json.excluded) ? json.excluded.length : 0;
-
-      setImportMsg(
-        `Import OK (${todayISO()}): righe=${json.total_rows}, mappate=${json.mapped}, non_trovate=${notFound}, escluse(TAB/GV)=${excluded}`
-      );
-
-      setFile(null);
-      await loadDepositItems(depositId);
-    } finally {
-      setImportLoading(false);
-    }
-  }
 
   return (
-    <main className="min-h-screen bg-gray-100">
-      <div className="mx-auto max-w-6xl px-6 py-6 space-y-6">
-        <div className="flex items-start justify-between">
+    <div className="mx-auto max-w-[1600px] p-4 space-y-4">
+      <div className="flex items-center justify-between gap-2">
+        <h1 className="text-2xl font-semibold">Depositi (Magazzini)</h1>
+        <Link className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" href="/admin">
+          ← Admin
+        </Link>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        <section className="rounded-2xl border bg-white p-4">
+          <h2 className="text-lg font-semibold">Seleziona PV</h2>
+          <select className="mt-3 w-full rounded-xl border p-3 bg-white" value={pvId} onChange={(e) => setPvId(e.target.value)}>
+            <option value="">— Seleziona —</option>
+            {pvs.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.code} — {p.name}
+              </option>
+            ))}
+          </select>
+          {selectedPV && (
+            <p className="mt-3 text-sm text-gray-700">
+              PV selezionato: <b>{selectedPV.code}</b>
+            </p>
+          )}
+        </section>
+
+        <section className="rounded-2xl border bg-white p-4">
+          <h2 className="text-lg font-semibold">Deposito</h2>
+          <select
+            className="mt-3 w-full rounded-xl border p-3 bg-white"
+            value={depositId}
+            onChange={(e) => setDepositId(e.target.value)}
+            disabled={!pvId || deposits.length === 0}
+          >
+            <option value="">— Seleziona —</option>
+            {deposits.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.code} — {d.name || ""}
+              </option>
+            ))}
+          </select>
+          {selectedDeposit && (
+            <p className="mt-3 text-sm text-gray-700">
+              Deposito selezionato: <b>{selectedDeposit.code}</b>
+            </p>
+          )}
+        </section>
+      </div>
+
+      <section className="rounded-2xl border bg-white p-4">
+        <div className="flex items-start justify-between gap-3 flex-col lg:flex-row">
           <div>
-            <h1 className="text-2xl font-semibold">Depositi (Magazzini)</h1>
-            <p className="text-gray-600 mt-1">Crea depositi per PV, importa articoli da Excel e verifica i mapping.</p>
+            <h2 className="text-lg font-semibold">Articoli nel deposito</h2>
+            <p className="text-sm text-gray-600 mt-1">Stock con unità corretta (pz / gr / ml) + valore (quando disponibile).</p>
           </div>
-
-          <div className="flex gap-2">
-            <Link href="/admin" className="rounded-xl border bg-white px-4 py-2 hover:bg-gray-50">
-              ← Admin
-            </Link>
-          </div>
-        </div>
-
-        {/* shortcut */}
-        <section className="rounded-2xl border bg-white p-4">
-          <h2 className="text-lg font-semibold">Azioni rapide</h2>
-          <p className="text-sm text-gray-600 mt-1">Prima seleziona PV e Deposito (sotto), poi usa i pulsanti.</p>
-
-          <div className="mt-3 flex flex-col md:flex-row gap-2">
-            <Link
-              href="/admin/deposits/inventory"
-              className="rounded-xl border bg-white px-4 py-3 hover:bg-gray-50 text-center"
-            >
-              Inventario Deposito (Tutte)
-            </Link>
-
-            <Link
-              href="/admin/deposits/history"
-              className="rounded-xl border bg-white px-4 py-3 hover:bg-gray-50 text-center"
-            >
-              Storico Inventari Deposito
-            </Link>
-          </div>
-        </section>
-
-        <section className="rounded-2xl border bg-white p-4">
-          <h2 className="text-lg font-semibold">Selezione</h2>
-
-          <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div>
-              <label className="block text-sm font-medium mb-2">Punto Vendita</label>
-              <select
-                className="w-full rounded-xl border p-3 bg-white"
-                value={pvId}
-                onChange={(e) => setPvId(e.target.value)}
-              >
-                <option value="">— Seleziona PV —</option>
-                {pvs.map((pv) => (
-                  <option key={pv.id} value={pv.id}>
-                    {pv.code} — {pv.name}
-                  </option>
-                ))}
-              </select>
-              {selectedPV && <p className="text-xs text-gray-500 mt-1">PV selezionato: {selectedPV.code}</p>}
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium mb-2">Deposito</label>
-              <select
-                className="w-full rounded-xl border p-3 bg-white"
-                value={depositId}
-                onChange={(e) => setDepositId(e.target.value)}
-                disabled={!pvId}
-              >
-                <option value="">— Seleziona deposito —</option>
-                {deposits.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.code}
-                    {d.name ? ` — ${d.name}` : ""}
-                  </option>
-                ))}
-              </select>
-              {selectedDeposit && (
-                <p className="text-xs text-gray-500 mt-1">
-                  Deposito selezionato: <b>{selectedDeposit.code}</b>
-                </p>
-              )}
-            </div>
-          </div>
-        </section>
-
-        <section className="rounded-2xl border bg-white p-4">
-          <h2 className="text-lg font-semibold">Crea Deposito</h2>
-          <p className="text-sm text-gray-600 mt-1">Esempio: A1-DIVERSIVO, A3-FLACCA…</p>
-
-          <form onSubmit={createDeposit} className="mt-4 space-y-3">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <input
-                className="w-full rounded-xl border p-3 md:col-span-1"
-                placeholder="Codice deposito"
-                value={depCode}
-                onChange={(e) => setDepCode(e.target.value)}
-                disabled={!pvId}
-              />
-              <input
-                className="w-full rounded-xl border p-3 md:col-span-2"
-                placeholder="Nome (opzionale)"
-                value={depName}
-                onChange={(e) => setDepName(e.target.value)}
-                disabled={!pvId}
-              />
-            </div>
-
-            <button
-              className="w-full rounded-xl bg-black text-white p-3 disabled:opacity-60"
-              disabled={createLoading || !pvId}
-            >
-              {createLoading ? "Creazione..." : "Crea deposito"}
-            </button>
-
-            {createMsg && <p className="text-sm">{createMsg}</p>}
-          </form>
-        </section>
-
-        <section className="rounded-2xl border bg-white p-4">
-          <h2 className="text-lg font-semibold">Import articoli deposito (Excel)</h2>
-          <p className="text-sm text-gray-600 mt-1">
-            File con 2 colonne: <b>Codice</b> + <b>Descrizione</b> (opzionale).
-          </p>
-
-          <form onSubmit={importExcel} className="mt-4 space-y-3">
-            <input
-              type="file"
-              accept=".xlsx"
-              className="w-full rounded-xl border p-3 bg-white"
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-              disabled={!depositId || importLoading}
-            />
-
-            <button
-              className="w-full rounded-xl bg-slate-900 text-white p-3 disabled:opacity-60"
-              disabled={!depositId || !file || importLoading}
-            >
-              {importLoading ? "Import..." : "Importa Excel"}
-            </button>
-
-            {importMsg && <p className="text-sm">{importMsg}</p>}
-          </form>
-        </section>
-
-        <section className="rounded-2xl border bg-white p-4">
-          <h2 className="text-lg font-semibold">Articoli nel deposito</h2>
-          <p className="text-sm text-gray-600 mt-1">
-            Qui vedi i mapping su Anagrafica e lo stock attuale. Mostriamo anche prezzo e valore (quando disponibili).
-          </p>
 
           {items.length > 0 && !itemsLoading && (
-            <div className="mt-2 text-sm text-gray-700 flex flex-col md:flex-row md:items-center md:justify-between gap-2">
-              <div>
+            <div className="text-sm text-gray-700 flex flex-wrap gap-3 lg:justify-end">
+              <span>
                 Righe: <b>{items.length}</b>
-              </div>
-              <div>
-                Totale quantità: <b>{itemsTotals.totQty}</b> — Totale valore: <b>{formatEUR(itemsTotals.totValue)}</b>
-              </div>
+              </span>
+              <span>
+                Tot PZ: <b>{itemsTotals.totPz}</b>
+              </span>
+              <span>
+                Tot GR: <b>{itemsTotals.totGr}</b>
+              </span>
+              <span>
+                Tot ML: <b>{itemsTotals.totMl}</b>
+              </span>
+              <span>
+                Tot valore: <b>{formatEUR(itemsTotals.totValue)}</b>
+              </span>
             </div>
           )}
+        </div>
 
-          {itemsMsg && <div className="mt-3 rounded-xl border bg-white p-3 text-sm">{itemsMsg}</div>}
+        {itemsMsg && <div className="mt-3 rounded-xl border bg-white p-3 text-sm">{itemsMsg}</div>}
 
-          <div className="mt-4">
-            {itemsLoading ? (
-              <div className="text-sm text-gray-600">Caricamento...</div>
-            ) : items.length === 0 ? (
-              <div className="text-sm text-gray-600">Nessun articolo. Importa un Excel o seleziona un deposito.</div>
-            ) : (
-              <div className="overflow-auto rounded-xl border">
-                <table className="min-w-full text-sm">
-                  <thead className="bg-gray-50">
+        <div className="mt-4">
+          {itemsLoading ? (
+            <div className="text-sm text-gray-600">Caricamento...</div>
+          ) : items.length === 0 ? (
+            <div className="text-sm text-gray-600">Nessun articolo. Seleziona un deposito.</div>
+          ) : (
+            <div className="rounded-xl border overflow-hidden">
+              <div className="max-h-[72vh] overflow-auto">
+                <table className="min-w-[1500px] w-full text-sm">
+                  <thead className="bg-gray-50 sticky top-0 z-10">
                     <tr>
                       <th className="text-left p-2 border-b">Codice import</th>
                       <th className="text-left p-2 border-b">Descr. file</th>
@@ -430,17 +282,17 @@ export default function AdminDepositsPage() {
                   <tbody>
                     {items.map((r) => (
                       <tr key={r.id} className="odd:bg-white even:bg-gray-50">
-                        <td className="p-2 border-b font-mono">{r.imported_code}</td>
+                        <td className="p-2 border-b font-mono whitespace-nowrap">{r.imported_code}</td>
                         <td className="p-2 border-b">{r.note_description ?? ""}</td>
-                        <td className="p-2 border-b font-mono">{r.items?.code ?? ""}</td>
+                        <td className="p-2 border-b font-mono whitespace-nowrap">{r.items?.code ?? ""}</td>
                         <td className="p-2 border-b">{r.items?.description ?? ""}</td>
-                        <td className="p-2 border-b text-right">{Number(r.stock_qty ?? 0)}</td>
-                        <td className="p-2 border-b text-right font-mono">{formatEUR(r.items?.prezzo_vendita_eur ?? 0)}</td>
-                        <td className="p-2 border-b text-right font-mono">{formatEUR(computeRowValueEUR(r))}</td>
+                        <td className="p-2 border-b text-right whitespace-nowrap">{formatStock(r)}</td>
+                        <td className="p-2 border-b text-right font-mono whitespace-nowrap">{formatEUR(r.items?.prezzo_vendita_eur ?? 0)}</td>
+                        <td className="p-2 border-b text-right font-mono whitespace-nowrap">{formatEUR(computeRowValueEUR(r))}</td>
                         <td className="p-2 border-b">
                           {r.item_id ? (
                             <Link
-                              className="rounded-lg border px-2 py-1 text-xs hover:bg-gray-50"
+                              className="rounded-lg border px-2 py-1 text-xs hover:bg-gray-50 whitespace-nowrap inline-block"
                               href={`/admin/deposits/item-history?pv_id=${encodeURIComponent(pvId)}&item_id=${encodeURIComponent(r.item_id)}`}
                             >
                               Apri
@@ -449,17 +301,17 @@ export default function AdminDepositsPage() {
                             ""
                           )}
                         </td>
-                        <td className="p-2 border-b">{r.items?.category ?? ""}</td>
+                        <td className="p-2 border-b">{categoryLabel(r)}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
-            )}
-          </div>
-        </section>
-      </div>
-    </main>
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
   );
 }
 

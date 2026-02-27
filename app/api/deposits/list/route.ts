@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { getPvIdForSession } from "@/lib/pvLookup";
+import { ensurePvStockDepositId } from "@/lib/deposits/syncPvStockFromInventory";
 
 export const runtime = "nodejs";
 
@@ -35,6 +36,15 @@ export async function GET(req: Request) {
     if (!pv_id) return NextResponse.json({ ok: false, error: "pv_id obbligatorio" }, { status: 400 });
   }
 
+  // ✅ STEP A: assicura che PV-STOCK esista SEMPRE prima di leggere la lista depositi.
+  // Questo evita il caso “per alcuni PV la lista è vuota” (depositi non creati/storici).
+  try {
+    await ensurePvStockDepositId(String(pv_id));
+  } catch (e) {
+    // Non blocco la lista: se fallisce, semplicemente PV-STOCK non comparirà.
+    console.error("[deposits/list] ensure PV-STOCK error:", e);
+  }
+
   const { data, error } = await supabaseAdmin
     .from("deposits")
     .select("id, pv_id, code, name, is_active, created_at")
@@ -43,5 +53,6 @@ export async function GET(req: Request) {
 
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
 
-  return NextResponse.json({ ok: true, deposits: data || [], ...(warning ? { warning } : {}) });
+  const deposits = Array.isArray(data) ? data : [];
+  return NextResponse.json({ ok: true, deposits, ...(warning ? { warning } : {}) });
 }

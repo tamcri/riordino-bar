@@ -49,10 +49,11 @@ export default function AdminPage() {
   const [assignMsg, setAssignMsg] = useState<string | null>(null);
   const [assignLoading, setAssignLoading] = useState(false);
 
-  // ✅ Timeline Giacenze (solo Admin/Amministrativo - UI qui)
+  // ✅ Timeline Giacenze
   const [categories, setCategories] = useState<Category[]>([]);
   const [tlPvId, setTlPvId] = useState<string>("");
-  const [tlCategoryId, setTlCategoryId] = useState<string>("");
+  // ✅ "" = tutte, "__NULL__" = solo inventory.category_id NULL, uuid = categoria specifica
+  const [tlCategoryId, setTlCategoryId] = useState<string>(""); // default: Tutte
   const [tlDateFrom, setTlDateFrom] = useState<string>("");
   const [tlDateTo, setTlDateTo] = useState<string>(todayISO());
   const [tlMsg, setTlMsg] = useState<string | null>(null);
@@ -77,7 +78,6 @@ export default function AdminPage() {
       const normalizedPvs = Array.isArray(pvList) ? pvList : [];
       setPvs(normalizedPvs);
 
-      // ✅ se timeline PV non è selezionato, metto il primo (comodo)
       if (!tlPvId && normalizedPvs?.[0]?.id) setTlPvId(normalizedPvs[0].id);
 
       // Lista utenti PV
@@ -93,7 +93,6 @@ export default function AdminPage() {
     }
   }
 
-  // ✅ carica categorie per timeline
   async function loadCategories() {
     try {
       const res = await fetch("/api/categories/list", { cache: "no-store" });
@@ -102,7 +101,7 @@ export default function AdminPage() {
       const normalized = Array.isArray(rows) ? rows : [];
       setCategories(normalized);
 
-      if (!tlCategoryId && normalized?.[0]?.id) setTlCategoryId(normalized[0].id);
+      // ✅ NON setto più default su prima categoria: voglio lasciare "Tutte"
     } catch {
       // non blocca admin
     }
@@ -114,7 +113,6 @@ export default function AdminPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Se cambio ruolo e non è PV, pulisco scelta PV
   useEffect(() => {
     if (role !== "punto_vendita") setPvIdForNewUser("");
   }, [role]);
@@ -214,14 +212,13 @@ export default function AdminPage() {
     setTlMsg(null);
 
     if (!tlPvId) return setTlMsg("Seleziona un PV.");
-    if (!tlCategoryId) return setTlMsg("Seleziona una categoria.");
     if (!tlDateFrom || !tlDateTo) return setTlMsg("Imposta Data da e Data a.");
 
     setTlLoading(true);
     try {
       const params = new URLSearchParams();
       params.set("pv_id", tlPvId);
-      params.set("category_id", tlCategoryId);
+      params.set("category_id", tlCategoryId); // "" | "__NULL__" | uuid
       params.set("date_from", tlDateFrom);
       params.set("date_to", tlDateTo);
 
@@ -253,14 +250,13 @@ export default function AdminPage() {
     setTlMsg(null);
 
     if (!tlPvId) return setTlMsg("Seleziona un PV.");
-    if (!tlCategoryId) return setTlMsg("Seleziona una categoria.");
     if (!tlDateFrom || !tlDateTo) return setTlMsg("Imposta Data da e Data a.");
 
     setTlPdfLoading(true);
     try {
       const params = new URLSearchParams();
       params.set("pv_id", tlPvId);
-      params.set("category_id", tlCategoryId);
+      params.set("category_id", tlCategoryId); // "" | "__NULL__" | uuid
       params.set("date_from", tlDateFrom);
       params.set("date_to", tlDateTo);
 
@@ -342,7 +338,9 @@ export default function AdminPage() {
               </Link>
 
               <div className="pt-3 border-t mt-2">
-                <p className="text-xs text-gray-500">Tip: nel menu dell’area operativa aggiungeremo anche il tasto “Admin” per tornare qui.</p>
+                <p className="text-xs text-gray-500">
+                  Tip: nel menu dell’area operativa aggiungeremo anche il tasto “Admin” per tornare qui.
+                </p>
               </div>
             </div>
           </section>
@@ -351,7 +349,9 @@ export default function AdminPage() {
             {/* ✅ Timeline Giacenze */}
             <section className="rounded-2xl border bg-white p-4">
               <h2 className="text-lg font-semibold">Timeline Giacenze</h2>
-              <p className="text-sm text-gray-600 mt-1">Scarica Excel (con Δ) o PDF pivot (con Δ dentro le celle) nel periodo selezionato.</p>
+              <p className="text-sm text-gray-600 mt-1">
+                Excel multi-foglio per categoria (come storico inventario) + PDF pivot (multi-pagina).
+              </p>
 
               <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div>
@@ -369,14 +369,20 @@ export default function AdminPage() {
                 <div>
                   <label className="block text-sm font-medium mb-2">Categoria</label>
                   <select className="w-full rounded-xl border p-3 bg-white" value={tlCategoryId} onChange={(e) => setTlCategoryId(e.target.value)}>
-                    <option value="">— Seleziona —</option>
+                    <option value="">Tutte (incluse senza categoria)</option>
+                    <option value="__NULL__">Solo inventari senza categoria (NULL)</option>
+                    <option value="__SEP__" disabled>
+                      ─────────────
+                    </option>
                     {categories.map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.name}
                       </option>
                     ))}
                   </select>
-                  <p className="text-xs text-gray-500 mt-1">Per ora solo Categoria (la sottocategoria la aggiungiamo dopo).</p>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Se Tabacchi ti risulta salvata con category_id NULL, usa “Solo inventari senza categoria (NULL)” oppure “Tutte”.
+                  </p>
                 </div>
 
                 <div>
@@ -397,7 +403,7 @@ export default function AdminPage() {
                   disabled={tlLoading}
                   onClick={downloadTimelineExcel}
                 >
-                  {tlLoading ? "Genero..." : "Scarica Excel Timeline (Δ)"}
+                  {tlLoading ? "Genero..." : "Scarica Excel Timeline"}
                 </button>
 
                 <button
@@ -406,7 +412,7 @@ export default function AdminPage() {
                   disabled={tlPdfLoading}
                   onClick={downloadTimelinePivotPdf}
                 >
-                  {tlPdfLoading ? "Genero..." : "Scarica PDF Pivot (Δ)"}
+                  {tlPdfLoading ? "Genero..." : "Scarica PDF Pivot"}
                 </button>
 
                 {tlMsg && <div className="text-sm text-gray-700">{tlMsg}</div>}

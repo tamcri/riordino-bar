@@ -34,6 +34,9 @@ type Body = {
   // ✅ Etichetta libera (es. "Tabacchi", "Banco 1", "Bevande")
   label?: string;
 
+  // ✅ Rapido: chiave anti-sovrascrittura (UUID)
+  rapid_session_id?: string;
+
   rows?: Row[];
   force_overwrite?: boolean; // (compat)
   mode?: "close" | "continue"; // (UI) non cambia la logica server
@@ -123,12 +126,6 @@ function normalizeRapidSessionIdForServer(raw: any, isRapid: boolean): string | 
   return isUuid(s) ? s : null;
 }
 
-function requireRapidSessionId(rapid_session_id: string | null) {
-  if (!rapid_session_id) {
-    throw new Error("Rapido: rapid_session_id mancante o non valido (UUID).");
-  }
-}
-
 export async function POST(req: Request) {
   const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
 
@@ -140,18 +137,16 @@ export async function POST(req: Request) {
   if (!body) return NextResponse.json({ ok: false, error: "Body non valido" }, { status: 400 });
 
   // ✅ Rapido: se category_id è "" oppure "null" (o null), SERVER FORZA NULL
-const { isRapid, category_id } = normalizeCategoryForServer(body.category_id);
+  const { isRapid, category_id } = normalizeCategoryForServer(body.category_id);
 
-// ✅ subcategory: in Rapido SEMPRE NULL, altrimenti ""/"null"/null => null
-const subcategory_id = normalizeSubcategoryForServer(body.subcategory_id, isRapid);
+  // ✅ subcategory: in Rapido SEMPRE NULL, altrimenti ""/"null"/null => null
+  const subcategory_id = normalizeSubcategoryForServer(body.subcategory_id, isRapid);
 
-
-// ✅ Rapido: serve un rapid_session_id valido (UUID) per NON sovrascrivere
-const rapid_session_id = normalizeRapidSessionIdForServer((body as any)?.rapid_session_id, isRapid);
-
-if (isRapid && !rapid_session_id) {
-  return NextResponse.json({ ok: false, error: "Rapido: rapid_session_id mancante o non valido (UUID)." }, { status: 400 });
-}
+  // ✅ Rapido: serve un rapid_session_id valido (UUID) per NON sovrascrivere
+  const rapid_session_id = normalizeRapidSessionIdForServer(body.rapid_session_id, isRapid);
+  if (isRapid && !rapid_session_id) {
+    return NextResponse.json({ ok: false, error: "Rapido: rapid_session_id mancante o non valido (UUID)." }, { status: 400 });
+  }
 
   const inventory_date = (body.inventory_date || "").trim();
 
@@ -159,12 +154,25 @@ if (isRapid && !rapid_session_id) {
   if (!operatore) return NextResponse.json({ ok: false, error: "Operatore mancante" }, { status: 400 });
   if (operatore.length > 80) return NextResponse.json({ ok: false, error: "Operatore troppo lungo (max 80)" }, { status: 400 });
 
-  const label_raw = String((body as any).label ?? "").trim();
-const label = label_raw ? label_raw : null;
+  // ✅ STEP B (1/2): label OBBLIGATORIA
+  // Normalizzo spazi (evita doppioni "Banco 1" vs "Banco   1")
+  const label_norm = String(body.label ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
 
-if (label && label.length > 80) {
-  return NextResponse.json({ ok: false, error: "Etichetta troppo lunga (max 80)" }, { status: 400 });
-}
+  if (!label_norm) {
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "LABEL_REQUIRED",
+        error: "Nome Categoria (nota) obbligatorio per salvare l’inventario.",
+      },
+      { status: 400 }
+    );
+  }
+  if (label_norm.length > 80) {
+    return NextResponse.json({ ok: false, error: "Etichetta troppo lunga (max 80)" }, { status: 400 });
+  }
 
   // ✅ Standard: UUID obbligatorio; Rapido: NULL ammesso
   if (category_id !== null && !isUuid(category_id)) {
@@ -175,20 +183,16 @@ if (label && label.length > 80) {
   }
 
   // ✅ FK safety: se subcategory_id è valorizzato, deve esistere davvero
-if (subcategory_id) {
-  const { data: subRow, error: subErr } = await supabaseAdmin
-    .from("subcategories")
-    .select("id")
-    .eq("id", subcategory_id)
-    .maybeSingle();
+  if (subcategory_id) {
+    const { data: subRow, error: subErr } = await supabaseAdmin.from("subcategories").select("id").eq("id", subcategory_id).maybeSingle();
 
-  if (subErr) {
-    return NextResponse.json({ ok: false, error: subErr.message }, { status: 500 });
+    if (subErr) {
+      return NextResponse.json({ ok: false, error: subErr.message }, { status: 500 });
+    }
+    if (!subRow?.id) {
+      return NextResponse.json({ ok: false, error: "subcategory_id non esiste (FK)" }, { status: 400 });
+    }
   }
-  if (!subRow?.id) {
-    return NextResponse.json({ ok: false, error: "subcategory_id non esiste (FK)" }, { status: 400 });
-  }
-}
 
   const rows = Array.isArray(body.rows) ? body.rows : [];
   if (rows.length === 0) {
@@ -222,22 +226,22 @@ if (subcategory_id) {
     return NextResponse.json({ ok: false, error: "pv_id mancante" }, { status: 400 });
   }
 
-  // ✅ 0) verifica header esistente (chiave logica)
+  // ✅ 0) verifica header esistente (chiave logica attuale)
   let existsQ = supabaseAdmin
-  .from("inventories_headers")
-  .select("id, created_by_username")
-  .eq("pv_id", pv_id)
-  .eq("inventory_date", dateOrNull);
+    .from("inventories_headers")
+    .select("id, created_by_username")
+    .eq("pv_id", pv_id)
+    .eq("inventory_date", dateOrNull);
 
-if (category_id) existsQ = existsQ.eq("category_id", category_id);
-else existsQ = existsQ.is("category_id", null);
+  if (category_id) existsQ = existsQ.eq("category_id", category_id);
+  else existsQ = existsQ.is("category_id", null);
 
-if (subcategory_id) existsQ = existsQ.eq("subcategory_id", subcategory_id);
-else existsQ = existsQ.is("subcategory_id", null);
+  if (subcategory_id) existsQ = existsQ.eq("subcategory_id", subcategory_id);
+  else existsQ = existsQ.is("subcategory_id", null);
 
-// ✅ Rapido: distinguo le sessioni. Standard: rapid_session_id deve essere NULL
-if (isRapid) existsQ = existsQ.eq("rapid_session_id", rapid_session_id);
-else existsQ = existsQ.is("rapid_session_id", null);
+  // ✅ Rapido: distinguo le sessioni. Standard: rapid_session_id deve essere NULL
+  if (isRapid) existsQ = existsQ.eq("rapid_session_id", rapid_session_id);
+  else existsQ = existsQ.is("rapid_session_id", null);
 
   const { data: existing, error: existsErr } = await existsQ.limit(1);
   if (existsErr) return NextResponse.json({ ok: false, error: existsErr.message }, { status: 500 });
@@ -249,19 +253,49 @@ else existsQ = existsQ.is("rapid_session_id", null);
   const alreadyExists = !!existingId;
 
   // ✅ admin può modificare/sovrascrivere anche se creato da altri
-if (alreadyExists && existingCreatedBy && existingCreatedBy !== session.username && session.role !== "admin") {
-  return NextResponse.json(
-    {
-      ok: false,
-      error:
-        "Esiste già un inventario per questa combinazione (PV/Categoria/Sottocategoria/Data) creato da un altro utente. Non puoi modificarlo.",
-      code: "INVENTORY_ALREADY_EXISTS",
-    },
-    { status: 409 }
-  );
-}
+  if (alreadyExists && existingCreatedBy && existingCreatedBy !== session.username && session.role !== "admin") {
+    return NextResponse.json(
+      {
+        ok: false,
+        error:
+          "Esiste già un inventario per questa combinazione (PV/Categoria/Sottocategoria/Data) creato da un altro utente. Non puoi modificarlo.",
+        code: "INVENTORY_ALREADY_EXISTS",
+      },
+      { status: 409 }
+    );
+  }
 
-    // ✅ 1) header: insert se non esiste, update+overwrite SOLO se richiesto esplicitamente
+  // ✅ STEP B (2/2): unicità pv_id + inventory_date + label
+  // Se sto aggiornando, posso mantenere la stessa label sullo stesso header, ma NON posso duplicarla su un altro header.
+  {
+    let dupeQ = supabaseAdmin
+      .from("inventories_headers")
+      .select("id")
+      .eq("pv_id", pv_id)
+      .eq("inventory_date", dateOrNull)
+      .eq("label", label_norm);
+
+    // se sto sovrascrivendo/aggiornando questo header, lo escludo dal controllo dup
+    if (alreadyExists && existingId) {
+      dupeQ = dupeQ.neq("id", existingId);
+    }
+
+    const { data: dupes, error: dupeErr } = await dupeQ.limit(1);
+    if (dupeErr) return NextResponse.json({ ok: false, error: dupeErr.message }, { status: 500 });
+
+    if (Array.isArray(dupes) && dupes.length > 0) {
+      return NextResponse.json(
+        {
+          ok: false,
+          code: "LABEL_ALREADY_EXISTS",
+          error: "Esiste già un inventario con la stessa nota per questo PV e questa data. Cambia la nota e riprova.",
+        },
+        { status: 409 }
+      );
+    }
+  }
+
+  // ✅ 1) header: insert se non esiste, update+overwrite SOLO se richiesto esplicitamente
   if (!alreadyExists) {
     const headerPayload = {
       pv_id,
@@ -269,7 +303,7 @@ if (alreadyExists && existingCreatedBy && existingCreatedBy !== session.username
       subcategory_id, // ✅ null per Rapido
       inventory_date: dateOrNull,
       operatore,
-      label: label || null,
+      label: label_norm, // ✅ OBBLIGATORIA (normalizzata)
       created_by_username: session.username,
       updated_at: new Date().toISOString(),
       rapid_session_id, // ✅
@@ -278,6 +312,21 @@ if (alreadyExists && existingCreatedBy && existingCreatedBy !== session.username
     const { error: insErr } = await supabaseAdmin.from("inventories_headers").insert(headerPayload as any);
     if (insErr) {
       console.error("[inventories/save] header insert error:", insErr);
+
+      // Se in DB hai un vincolo unique, questo è l’errore “pulito”
+      // (dipende dal driver / supabase, ma spesso appare come duplicate key / 23505)
+      const msg = String(insErr.message || "");
+      if (msg.toLowerCase().includes("duplicate") || msg.includes("23505")) {
+        return NextResponse.json(
+          {
+            ok: false,
+            code: "LABEL_ALREADY_EXISTS",
+            error: "Esiste già un inventario con la stessa nota per questo PV e questa data. Cambia la nota e riprova.",
+          },
+          { status: 409 }
+        );
+      }
+
       return NextResponse.json({ ok: false, error: insErr.message }, { status: 500 });
     }
   } else {
@@ -298,7 +347,7 @@ if (alreadyExists && existingCreatedBy && existingCreatedBy !== session.username
 
     const { error: updErr } = await supabaseAdmin
       .from("inventories_headers")
-            .update({ operatore, label: label || null, updated_at: new Date().toISOString() } as any)
+      .update({ operatore, label: label_norm, updated_at: new Date().toISOString() } as any)
       .eq("id", existingId);
 
     if (updErr) {
@@ -306,20 +355,16 @@ if (alreadyExists && existingCreatedBy && existingCreatedBy !== session.username
       return NextResponse.json({ ok: false, error: updErr.message }, { status: 500 });
     }
 
-    let delQ = supabaseAdmin
-  .from("inventories")
-  .delete()
-  .eq("pv_id", pv_id)
-  .eq("inventory_date", dateOrNull);
+    let delQ = supabaseAdmin.from("inventories").delete().eq("pv_id", pv_id).eq("inventory_date", dateOrNull);
 
-if (isRapid) delQ = delQ.eq("rapid_session_id", rapid_session_id);
-else delQ = delQ.is("rapid_session_id", null);
+    if (isRapid) delQ = delQ.eq("rapid_session_id", rapid_session_id);
+    else delQ = delQ.is("rapid_session_id", null);
 
-if (category_id) delQ = delQ.eq("category_id", category_id);
-else delQ = delQ.is("category_id", null);
+    if (category_id) delQ = delQ.eq("category_id", category_id);
+    else delQ = delQ.is("category_id", null);
 
-if (subcategory_id) delQ = delQ.eq("subcategory_id", subcategory_id);
-else delQ = delQ.is("subcategory_id", null);
+    if (subcategory_id) delQ = delQ.eq("subcategory_id", subcategory_id);
+    else delQ = delQ.is("subcategory_id", null);
 
     const { error: delErr } = await delQ;
     if (delErr) {
@@ -341,10 +386,7 @@ else delQ = delQ.is("subcategory_id", null);
   const itemsMeta: { id: string; code: string; volume_ml_per_unit: number | null; peso_kg: number | null; um: string | null }[] = [];
 
   if (validItemIds.length > 0) {
-    const { data: itemsData, error: itemsErr } = await supabaseAdmin
-      .from("items")
-      .select("id, code, volume_ml_per_unit, peso_kg, um")
-      .in("id", validItemIds);
+    const { data: itemsData, error: itemsErr } = await supabaseAdmin.from("items").select("id, code, volume_ml_per_unit, peso_kg, um").in("id", validItemIds);
 
     if (itemsErr) {
       console.error("[inventories/save] items volume fetch error:", itemsErr);
@@ -497,6 +539,7 @@ else delQ = delQ.is("subcategory_id", null);
     operatore,
     enforced_pv: session.role === "punto_vendita",
     overwritten: alreadyExists,
+    label: label_norm,
     ...(deposit_sync ? { deposit_sync } : {}),
     ...(warning ? { warning } : {}),
   });

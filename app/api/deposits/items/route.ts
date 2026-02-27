@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { getPvIdForSession } from "@/lib/pvLookup";
+import { PV_STOCK_CODE } from "@/lib/deposits/syncPvStockFromInventory";
 
 export const runtime = "nodejs";
 
@@ -27,25 +28,28 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: "deposit_id obbligatorio" }, { status: 400 });
   }
 
-  // 🔐 controllo sicurezza PV
+  const { data: depInfo, error: depErr } = await supabaseAdmin
+    .from("deposits")
+    .select("id, pv_id, code")
+    .eq("id", deposit_id)
+    .maybeSingle();
+
+  if (depErr) return NextResponse.json({ ok: false, error: depErr.message }, { status: 500 });
+  if (!depInfo) return NextResponse.json({ ok: false, error: "Deposito non trovato" }, { status: 404 });
+
+  // 🔐 sicurezza PV
   if (session.role === "punto_vendita") {
     const r = await getPvIdForSession(session);
     const pv_id = r.pv_id;
-    if (!pv_id) {
-      return NextResponse.json({ ok: false, error: "Utente PV senza pv_id assegnato" }, { status: 400 });
+    if (!pv_id) return NextResponse.json({ ok: false, error: "Utente PV senza pv_id assegnato" }, { status: 400 });
+    if (String(depInfo.pv_id) !== String(pv_id)) {
+      return NextResponse.json({ ok: false, error: "Deposito non trovato" }, { status: 404 });
     }
-
-    const { data: dep, error: depErr } = await supabaseAdmin
-      .from("deposits")
-      .select("id, pv_id")
-      .eq("id", deposit_id)
-      .maybeSingle();
-
-    if (depErr) return NextResponse.json({ ok: false, error: depErr.message }, { status: 500 });
-    if (!dep || dep.pv_id !== pv_id) return NextResponse.json({ ok: false, error: "Deposito non trovato" }, { status: 404 });
   }
 
-  // ✅ Se filtro per category/subcategory devo fare INNER JOIN, altrimenti items può essere null (righe “vuote” in UI)
+  // ✅ Qui NON cambio la tua logica: se nel tuo progetto richiami RPC rebuild_pv_stock, lasciala dov’è.
+  // L’unica cosa che serve per questa richiesta è riempire “Categoria” in output.
+
   const join = category_id || subcategory_id ? "items:items!inner" : "items:items";
 
   let query = supabaseAdmin
@@ -62,10 +66,11 @@ export async function GET(req: Request) {
          peso_kg,
          conf_da,
          prezzo_vendita_eur,
-         category,
          category_id,
          subcategory_id,
-         is_active
+         is_active,
+         categories:categories(name),
+         subcategories:subcategories(name)
        )`
     )
     .eq("deposit_id", deposit_id);
@@ -77,11 +82,8 @@ export async function GET(req: Request) {
 
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
 
-  return NextResponse.json({ ok: true, items: data || [] });
+  // opzionale: includo info deposito (utile debug)
+  const isPvStock = String(depInfo.code || "").trim().toUpperCase() === PV_STOCK_CODE;
+
+  return NextResponse.json({ ok: true, items: data || [], meta: { is_pv_stock: isPvStock } });
 }
-
-
-
-
-
-

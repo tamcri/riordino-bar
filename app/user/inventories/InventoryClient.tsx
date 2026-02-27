@@ -159,8 +159,8 @@ export default function InventoryClient() {
 
   const searchParams = useSearchParams();
 
-  // ✅ Modalità inventario (Standard / Rapido)
-  const [inventoryMode, setInventoryMode] = useState<InventoryMode>("rapid");
+  // ✅ SOLO RAPIDO (Standard disabilitato)
+  const inventoryMode: InventoryMode = "rapid";
   const [rapidSessionId, setRapidSessionId] = useState<string>(() => newRapidSessionId());
 
   // ✅ Rapido: vista "scan" (focus su singolo articolo) oppure "list" (lista scansionati full)
@@ -189,6 +189,15 @@ const [categoryNote, setCategoryNote] = useState("");
 
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // ✅ Associazione barcode non riconosciuto -> articolo esistente (barcode principale)
+  const [unknownBarcode, setUnknownBarcode] = useState<string | null>(null);
+  const [assocStep, setAssocStep] = useState<"confirm" | "search" | null>(null);
+  const [assocQuery, setAssocQuery] = useState("");
+  const [assocResults, setAssocResults] = useState<Item[]>([]);
+  const [assocLoading, setAssocLoading] = useState(false);
+  const [assocError, setAssocError] = useState<string | null>(null);
+  const assocSearchRef = useRef<HTMLInputElement | null>(null);
 
   // ✅ pezzi (per tutti)
   const [qtyPzMap, setQtyPzMap] = useState<Record<string, string>>({});
@@ -345,6 +354,12 @@ useEffect(() => {
   setSubcategoryId("");
 }
 
+// ✅ appena montiamo la pagina: in Rapido categoria sempre vuota
+useEffect(() => {
+  forceRapidCategoryNull();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, []);
+
   useEffect(() => {
     if (didInitFromUrlRef.current) return;
     didInitFromUrlRef.current = true;
@@ -370,12 +385,11 @@ if (isRapidUrl && rapidId) {
     // ✅ Reopen: Standard richiede pv+cat+date, Rapido richiede pv+date
     reopenModeRef.current = isRapidUrl ? !!(pv && date) : false;
 
-    // ✅ se URL dice rapid -> forzo rapid + categorie null (ignoro category_id/subcategory_id anche se presenti)
-    if (isRapidUrl) {
-      setInventoryMode("rapid");
-      setRapidView("scan");
-      forceRapidCategoryNull();
-    }
+    // ✅ Rapido fisso: se URL dice rapid, applico solo vista + categorie null
+  if (isRapidUrl) {
+  setRapidView("scan");
+  forceRapidCategoryNull();
+}
 
     initFromUrlValuesRef.current = {
       pvId: pv || undefined,
@@ -1238,6 +1252,19 @@ if (isRapidUrl && rapidId) {
   setSuggestionsOpen(false);
 
   if (!found) {
+    // ✅ se sembra un barcode, apro flusso di associazione
+    if (isLikelyBarcode && digits) {
+      setMsg(null);
+      setError(null);
+      setUnknownBarcode(digits);
+      setAssocStep("confirm");
+      setAssocQuery("");
+      setAssocResults([]);
+      setAssocError(null);
+      requestAnimationFrame(() => focusSearchSoon());
+      return;
+    }
+
     setMsg(null);
     setError("Articolo non trovato.");
     requestAnimationFrame(() => focusSearchSoon());
@@ -1251,6 +1278,73 @@ if (isRapidUrl && rapidId) {
 
   openItemInRapid(found);
 }
+
+  async function runAssocSearch(q: string) {
+    const qq = String(q || "").trim();
+    if (qq.length < 2) {
+      setAssocResults([]);
+      return;
+    }
+
+    setAssocLoading(true);
+    setAssocError(null);
+
+    try {
+      const res = await fetch(`/api/items/search?q=${encodeURIComponent(qq)}`, { cache: "no-store" });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore ricerca articoli");
+
+      const rows: Item[] = Array.isArray(json?.rows) ? json.rows : [];
+      setAssocResults(rows);
+    } catch (e: any) {
+      setAssocResults([]);
+      setAssocError(e?.message || "Errore ricerca articoli");
+    } finally {
+      setAssocLoading(false);
+    }
+  }
+
+  async function assignBarcodeToItemPrimary(itemId: string) {
+    const bc = String(unknownBarcode || "").trim();
+    if (!bc) return;
+
+    setAssocLoading(true);
+    setAssocError(null);
+    try {
+      const res = await fetch("/api/items/assign-barcode-primary", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ item_id: itemId, barcode: bc }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore assegnazione barcode");
+
+      const updated: Item = json?.row;
+      // ✅ aggiorno items in memoria, così da riconoscere subito il barcode
+      setItems((prev) => {
+        const has = prev.some((it) => it.id === updated.id);
+        if (has) return prev.map((it) => (it.id === updated.id ? { ...it, barcode: bc } : it));
+        return [{ ...updated, barcode: bc }, ...prev];
+      });
+
+      // ✅ chiudo modale
+      setAssocStep(null);
+      setUnknownBarcode(null);
+      setAssocQuery("");
+      setAssocResults([]);
+      setAssocError(null);
+
+      // ✅ continuo inventario: apro l'articolo appena associato
+      const toOpen = { ...updated, barcode: bc };
+      openItemInRapid(toOpen);
+      setMsg(`Barcode ${bc} associato a ${toOpen.code}.`);
+      setError(null);
+    } catch (e: any) {
+      setAssocError(e?.message || "Errore assegnazione barcode");
+    } finally {
+      setAssocLoading(false);
+    }
+  }
 
   function onScannerDetected(rawValue: string) {
     const v = String(rawValue || "").trim();
@@ -1279,11 +1373,6 @@ if (isRapidUrl && rapidId) {
 
     if (initCat && !categoryId) {
       setCategoryId(initCat);
-      return;
-    }
-
-    if (inventoryMode === "standard" && !categoryId && firstId) {
-      setCategoryId(firstId);
       return;
     }
   }
@@ -1639,6 +1728,10 @@ if (isRapidUrl && rapidId) {
       return next;
     });
 
+      // ✅ Rapido: nuova sessione per NON sovrascrivere inventari stesso PV+giorno
+  setRapidSessionId(newRapidSessionId());
+  lastPrefillKeyRef.current = "";
+
     clearDraft();
   }
 
@@ -1794,45 +1887,14 @@ console.log(
   }
 
   function InventoryModeToggle() {
-    return (
-      <div className="inline-flex rounded-xl border overflow-hidden w-full md:w-auto">
-        <button
-          type="button"
-          className={`flex-1 px-3 py-2 text-sm ${inventoryMode === "standard" ? "bg-slate-900 text-white" : "bg-white hover:bg-gray-50"}`}
-          onClick={() => {
-  setInventoryMode("rapid");
-  setRapidView("scan");
-  forceRapidCategoryNull();
-
-  // ✅ nuova sessione rapida (se fai più inventari stesso PV+giorno non sovrascrive)
-  setRapidSessionId(newRapidSessionId());
-
-  setFocusItemId(null);
-  setMsg(null);
-  setError(null);
-}}
-          title="Modalità Standard"
-        >
-          Standard
-        </button>
-        <button
-          type="button"
-          className={`flex-1 px-3 py-2 text-sm ${inventoryMode === "rapid" ? "bg-slate-900 text-white" : "bg-white hover:bg-gray-50"}`}
-          onClick={() => {
-            setInventoryMode("rapid");
-            setRapidView("scan");
-            forceRapidCategoryNull();
-            setFocusItemId(null);
-            setMsg(null);
-            setError(null);
-          }}
-          title="Modalità Rapido"
-        >
-          Rapido
-        </button>
+  return (
+    <div className="inline-flex rounded-xl border overflow-hidden w-full md:w-auto">
+      <div className="flex-1 px-3 py-2 text-sm bg-slate-900 text-white text-center">
+        Rapido
       </div>
-    );
-  }
+    </div>
+  );
+}
 
   function focusSearchSoon() {
     requestAnimationFrame(() => {
@@ -2088,7 +2150,7 @@ console.log(
         </div>
 
         <div className="flex flex-col md:flex-row md:items-center gap-2 w-full md:w-auto">
-          <InventoryModeToggle />
+        
 
           <div className="grid grid-cols-3 gap-2 w-full md:w-auto">
   <button
@@ -2124,6 +2186,7 @@ console.log(
 
       // importantissimo: evita che il prefill/draft “rientri” subito
       lastPrefillKeyRef.current = "";
+      setRapidSessionId(newRapidSessionId());
       setMsg("Bozza pulita. Riparti da zero.");
       setError(null);
 
@@ -2142,8 +2205,8 @@ console.log(
         </div>
       </div>
 
-      {inventoryMode === "rapid" ? (
-        <div className="space-y-4">
+      {/* ✅ SOLO RAPIDO (Standard disabilitato) */}
+      <div className="space-y-4">
           {/* ====== RAPIDO: SEARCH BAR POS (fixed bottom on mobile) ====== */}
           <div
             className={[
@@ -2799,26 +2862,138 @@ console.log(
             </div>
           )}
         </div>
-      ) : (
-        <>
-          {/* STANDARD: invariato (come il tuo file) */}
-          {/* ... lascia tutto com’era sotto, non lo tocco qui per non allungare ulteriormente ... */}
-
-          {/* ⚠️ Qui NON ho riscritto la parte STANDARD per non far esplodere il messaggio:
-              nel tuo progetto, incolla comunque questo file intero così com’è.
-              Se vuoi che io reincluda anche la sezione STANDARD completa dentro questa risposta,
-              dimmelo e te la rimando completa senza tagli.
-          */}
-          <div className="rounded-2xl border bg-white p-4">
-            <div className="text-sm text-gray-600">
-              Modalità Standard: invariata (stesso layout del tuo file). Se vuoi anche Standard “mobile friendly”, lo facciamo dopo — ma la tua richiesta era solo Inventario Rapido.
-            </div>
-          </div>
-        </>
-      )}
 
       {msg && <p className="text-sm text-green-700">{msg}</p>}
       {error && <p className="text-sm text-red-600">{error}</p>}
+
+      {/* ✅ Modal: barcode non riconosciuto -> associa a articolo */}
+      {assocStep && unknownBarcode && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-lg rounded-2xl bg-white shadow-xl border p-4">
+            {assocStep === "confirm" ? (
+              <>
+                <div className="text-lg font-semibold">Barcode non riconosciuto</div>
+                <div className="mt-2 text-sm text-gray-700">
+                  Barcode <span className="font-mono">{unknownBarcode}</span> non riconosciuto. Vuoi associarlo a un articolo già esistente?
+                </div>
+
+                <div className="mt-4 flex items-center justify-end gap-2">
+                  <button
+                    className="rounded-xl border px-3 py-2 text-sm"
+                    onClick={() => {
+                      setAssocStep(null);
+                      setUnknownBarcode(null);
+                      setAssocQuery("");
+                      setAssocResults([]);
+                      setAssocError(null);
+                      focusSearchSoon();
+                    }}
+                  >
+                    No
+                  </button>
+                  <button
+                    className="rounded-xl bg-blue-600 px-3 py-2 text-sm text-white"
+                    onClick={() => {
+                      setAssocStep("search");
+                      setAssocQuery("");
+                      setAssocResults([]);
+                      setAssocError(null);
+                      requestAnimationFrame(() => assocSearchRef.current?.focus());
+                    }}
+                  >
+                    Sì
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="text-lg font-semibold">Associa barcode</div>
+                <div className="mt-1 text-sm text-gray-700">
+                  Barcode: <span className="font-mono">{unknownBarcode}</span>
+                </div>
+
+                <div className="mt-3">
+                  <input
+                    ref={assocSearchRef}
+                    value={assocQuery}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setAssocQuery(v);
+                      // debounce leggero
+                      window.clearTimeout((runAssocSearch as any)._t);
+                      (runAssocSearch as any)._t = window.setTimeout(() => runAssocSearch(v), 180);
+                    }}
+                    placeholder="Cerca per codice o descrizione..."
+                    className="w-full rounded-xl border px-3 py-2 text-sm"
+                  />
+                  <div className="mt-2 flex items-center justify-between">
+                    <div className="text-xs text-gray-500">Minimo 2 caratteri</div>
+                    {assocLoading && <div className="text-xs text-gray-500">Ricerca...</div>}
+                  </div>
+                  {assocError && <div className="mt-2 text-sm text-red-600">{assocError}</div>}
+                </div>
+
+                <div className="mt-3 max-h-72 overflow-auto rounded-xl border">
+                  {assocResults.length === 0 ? (
+                    <div className="p-3 text-sm text-gray-600">Nessun risultato.</div>
+                  ) : (
+                    <div className="divide-y">
+                      {assocResults.map((it) => (
+                        <button
+                          key={it.id}
+                          className="w-full text-left p-3 hover:bg-gray-50"
+                          onClick={() => assignBarcodeToItemPrimary(it.id)}
+                          disabled={assocLoading}
+                          title="Clicca per associare"
+                        >
+                          <div className="text-sm font-semibold">{it.code}</div>
+                          <div className="text-xs text-gray-600">{it.description}</div>
+                          {it.barcode ? (
+                            <div className="mt-1 text-[11px] text-gray-500">
+                              Barcode attuale: <span className="font-mono">{it.barcode}</span>
+                            </div>
+                          ) : (
+                            <div className="mt-1 text-[11px] text-gray-500">Barcode attuale: —</div>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="mt-4 flex items-center justify-end gap-2">
+                  <button
+                    className="rounded-xl border px-3 py-2 text-sm"
+                    onClick={() => {
+                      setAssocStep("confirm");
+                      setAssocQuery("");
+                      setAssocResults([]);
+                      setAssocError(null);
+                    }}
+                    disabled={assocLoading}
+                  >
+                    Indietro
+                  </button>
+                  <button
+                    className="rounded-xl border px-3 py-2 text-sm"
+                    onClick={() => {
+                      setAssocStep(null);
+                      setUnknownBarcode(null);
+                      setAssocQuery("");
+                      setAssocResults([]);
+                      setAssocError(null);
+                      focusSearchSoon();
+                    }}
+                    disabled={assocLoading}
+                  >
+                    Chiudi
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
       <BarcodeScannerModal
         open={scannerOpen}

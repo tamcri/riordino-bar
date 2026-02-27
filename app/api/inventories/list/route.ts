@@ -71,6 +71,7 @@ type InventoryRow = {
 };
 
 type InventoryHeaderRow = {
+  id: string; // ✅ SERVE PER DELETE SICURA
   pv_id: string;
   category_id: string | null; // ✅ Rapido => NULL
   subcategory_id: string | null;
@@ -78,6 +79,7 @@ type InventoryHeaderRow = {
   inventory_date: string; // YYYY-MM-DD
   operatore: string | null;
   label: string | null;
+  created_by_username?: string | null;
   updated_at: string | null;
 };
 
@@ -120,7 +122,7 @@ export async function GET(req: Request) {
     // - se category_id NON è presente -> nessun filtro
     // - se category_id è presente ma vuoto -> Rapido (NULL)
     // - se category_id è UUID -> filtro UUID
-        const hasCategoryParam = url.searchParams.has("category_id");
+    const hasCategoryParam = url.searchParams.has("category_id");
     const category_qs_raw = url.searchParams.get("category_id");
     const categoryTrimmed = (category_qs_raw ?? "").trim();
     const categoryLower = categoryTrimmed.toLowerCase();
@@ -176,7 +178,7 @@ export async function GET(req: Request) {
     }
 
     // 1) righe inventories
-        let q = supabaseAdmin
+    let q = supabaseAdmin
       .from("inventories")
       .select("pv_id, category_id, subcategory_id, rapid_session_id, inventory_date, item_id, qty, qty_ml, qty_gr, created_by_username, created_at")
       .order("inventory_date", { ascending: false })
@@ -232,7 +234,7 @@ export async function GET(req: Request) {
       }
     }
 
-        type Group = {
+    type Group = {
       key: string;
       pv_id: string;
       category_id: string | null;
@@ -274,11 +276,17 @@ export async function GET(req: Request) {
         } else if (qty > 0) rowValue = qty * prezzo;
       }
 
-            const key = makeKey(r.pv_id, r.category_id ?? null, r.subcategory_id ?? null, r.inventory_date, (r as any).rapid_session_id ?? null);
+      const key = makeKey(
+        r.pv_id,
+        r.category_id ?? null,
+        r.subcategory_id ?? null,
+        r.inventory_date,
+        (r as any).rapid_session_id ?? null
+      );
 
       const g = groups.get(key);
       if (!g) {
-         groups.set(key, {
+        groups.set(key, {
           key,
           pv_id: r.pv_id,
           category_id: r.category_id ?? null,
@@ -310,10 +318,11 @@ export async function GET(req: Request) {
     const list = Array.from(groups.values());
     if (list.length === 0) return NextResponse.json({ ok: true, rows: [] });
 
-    // headers operatore
-   let hq = supabaseAdmin
-  .from("inventories_headers")
-  .select("id, pv_id, category_id, subcategory_id, inventory_date, operatore, label, rapid_session_id, created_by_username, updated_at")
+    // headers operatore + label + rapid_session_id + (✅ id header)
+    let hq = supabaseAdmin
+      .from("inventories_headers")
+      .select("id, pv_id, category_id, subcategory_id, inventory_date, operatore, label, rapid_session_id, created_by_username, updated_at");
+
     if (effectivePvId) hq = hq.eq("pv_id", effectivePvId);
 
     // ✅ filtro categoria SOLO se parametro presente
@@ -331,19 +340,33 @@ export async function GET(req: Request) {
     }
 
     const headers = (Array.isArray(headersData) ? headersData : []) as InventoryHeaderRow[];
-const headerMap = new Map<
-  string,
-  { operatore: string | null; label: string | null; rapid_session_id: string | null; updated_at: string | null }
->();
 
-for (const h of headers) {
-    const k = makeKey(h.pv_id, h.category_id ?? null, h.subcategory_id ?? null, h.inventory_date, (h as any).rapid_session_id ?? null);
+    const headerMap = new Map<
+      string,
+      {
+        header_id: string | null;
+        operatore: string | null;
+        label: string | null;
+        rapid_session_id: string | null;
+        updated_at: string | null;
+      }
+    >();
+
+    for (const h of headers) {
+  const k = makeKey(
+    h.pv_id,
+    h.category_id ?? null,
+    h.subcategory_id ?? null,
+    h.inventory_date,
+    (h as any).rapid_session_id ?? null
+  );
 
   headerMap.set(k, {
+  header_id: (h as any).id ?? null, // ✅ AGGIUNGI QUESTA RIGA
   operatore: (h.operatore ?? "").trim() || null,
   label: String(h.label ?? "").trim() || null,
-  rapid_session_id: String(h.rapid_session_id ?? "").trim() || null,
-  updated_at: h.updated_at ?? null,
+  rapid_session_id: String((h as any).rapid_session_id ?? "").trim() || null,
+  updated_at: (h as any).updated_at ?? null,
 });
 }
 
@@ -381,7 +404,13 @@ for (const h of headers) {
 
     const out = list.map((g) => {
       const isRapid = g.category_id === null;
+      const hm = headerMap.get(g.key) || null;
+
       return {
+        // ✅ nuovo: id header per delete sicura
+       header_id: hm?.header_id ?? null,
+       id: hm?.header_id ?? null, // ✅ AGGIUNGI QUESTA RIGA
+
         key: g.key,
         pv_id: g.pv_id,
         pv_code: pvMap.get(g.pv_id)?.code ?? "",
@@ -392,15 +421,15 @@ for (const h of headers) {
         subcategory_name: g.subcategory_id ? subMap.get(g.subcategory_id)?.name ?? "" : "",
         inventory_date: g.inventory_date,
         created_by_username: g.created_by_username,
-        updated_at: headerMap.get(g.key)?.updated_at ?? null,
+        updated_at: hm?.updated_at ?? null,
         lines_count: g.lines_count,
         qty_sum: g.qty_sum,
         qty_ml_sum: g.qty_ml_sum,
         qty_gr_sum: g.qty_gr_sum,
         value_sum: g.value_sum,
-        operatore: headerMap.get(g.key)?.operatore ?? null,
-        label: headerMap.get(g.key)?.label ?? null,
-        rapid_session_id: headerMap.get(g.key)?.rapid_session_id ?? g.rapid_session_id ?? null,
+        operatore: hm?.operatore ?? null,
+        label: hm?.label ?? null,
+        rapid_session_id: hm?.rapid_session_id ?? g.rapid_session_id ?? null,
       };
     });
 
