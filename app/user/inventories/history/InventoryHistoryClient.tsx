@@ -441,19 +441,26 @@ export default function InventoryHistoryClient() {
   }
 
   function downloadExcel(g: InventoryGroup, effectiveMe: MeState) {
-    if (effectiveMe.isPv && effectiveMe.pv_id && g.pv_id !== effectiveMe.pv_id) {
-      setError("Non autorizzato.");
-      return;
-    }
+  if (effectiveMe.isPv && effectiveMe.pv_id && g.pv_id !== effectiveMe.pv_id) {
+    setError("Non autorizzato.");
+    return;
+  }
 
-    const params = new URLSearchParams();
+  const params = new URLSearchParams();
+
+  // ✅ nuovo: esporta singolo inventario
+  if (g.header_id) {
+    params.set("header_id", g.header_id);
+  } else {
+    // fallback vecchio (non dovrebbe più servire, ma meglio tenerlo)
     params.set("pv_id", g.pv_id);
     setCategoryParam(params, g.category_id);
     params.set("inventory_date", g.inventory_date);
     if (g.subcategory_id) params.set("subcategory_id", g.subcategory_id);
-
-    window.location.href = `/api/inventories/excel?${params.toString()}`;
   }
+
+  window.location.href = `/api/inventories/excel?${params.toString()}`;
+}
 
   function openCompare(g: InventoryGroup) {
     setCompareTarget(g);

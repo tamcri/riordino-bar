@@ -25,6 +25,16 @@ function normNullParam(v: string | null): string | null {
   return s;
 }
 
+function safeFilePart(s: string, maxLen = 40) {
+  const out = String(s || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/[^a-z0-9\-_]+/gi, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return out.slice(0, maxLen) || "INV";
+}
+
 const USER_TABLE_CANDIDATES = ["app_user", "app_users", "utenti", "users"];
 
 async function lookupPvIdFromUserTables(username: string): Promise<string | null> {
@@ -71,19 +81,240 @@ export async function GET(req: Request) {
 
   const url = new URL(req.url);
 
+  // ✅ NUOVO: se arriva header_id, esporta QUEL singolo inventario (anche se stessa data/PV)
+  const header_id = (url.searchParams.get("header_id") || "").trim();
+
+  // PV enforcement
+  let pvFromSession: string | null = null;
+  if (session.role === "punto_vendita") {
+    try {
+      pvFromSession = await requirePvIdForPuntoVendita(session.username);
+    } catch (e: any) {
+      return NextResponse.json({ ok: false, error: e?.message || "Non autorizzato" }, { status: 401 });
+    }
+  }
+
+  // =========================
+  // PATH A: export by header_id
+  // =========================
+  if (header_id) {
+    if (!isUuid(header_id)) {
+      return NextResponse.json({ ok: false, error: "header_id non valido" }, { status: 400 });
+    }
+
+    const { data: h, error: hErr } = await supabaseAdmin
+      .from("inventories_headers")
+      .select("id, pv_id, category_id, subcategory_id, inventory_date, operatore, label, rapid_session_id, created_by_username")
+      .eq("id", header_id)
+      .maybeSingle();
+
+    if (hErr) return NextResponse.json({ ok: false, error: hErr.message }, { status: 500 });
+    if (!h) return NextResponse.json({ ok: false, error: "Inventario non trovato (header)" }, { status: 404 });
+
+    const pv_id = String((h as any).pv_id || "").trim();
+    const category_id: string | null = (h as any).category_id ? String((h as any).category_id) : null;
+    const subcategory_id: string | null = (h as any).subcategory_id ? String((h as any).subcategory_id) : null;
+    const inventory_date = String((h as any).inventory_date || "").trim();
+    const rapid_session_id: string | null = (h as any).rapid_session_id ? String((h as any).rapid_session_id) : null;
+
+    // sicurezza PV user
+    if (session.role === "punto_vendita") {
+      if (!pvFromSession || pvFromSession !== pv_id) {
+        return NextResponse.json({ ok: false, error: "Non autorizzato." }, { status: 401 });
+      }
+      // opzionale ma consigliato: un PV user esporta solo ciò che ha creato lui
+      const createdBy = String((h as any).created_by_username || "").trim();
+      if (createdBy && createdBy !== session.username) {
+        return NextResponse.json({ ok: false, error: "Non autorizzato." }, { status: 401 });
+      }
+    }
+
+    if (category_id !== null && !isUuid(category_id)) {
+      return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
+    }
+    if (subcategory_id && !isUuid(subcategory_id)) {
+      return NextResponse.json({ ok: false, error: "subcategory_id non valido" }, { status: 400 });
+    }
+    if (!isIsoDate(inventory_date)) {
+      return NextResponse.json({ ok: false, error: "inventory_date non valida (YYYY-MM-DD)" }, { status: 400 });
+    }
+
+    // meta: PV label
+    const pvRes = await supabaseAdmin.from("pvs").select("id, code, name").eq("id", pv_id).maybeSingle();
+    if (pvRes.error) return NextResponse.json({ ok: false, error: pvRes.error.message }, { status: 500 });
+    const pvLabel = pvRes.data ? `${(pvRes.data as any).code} — ${(pvRes.data as any).name}` : pv_id;
+
+    // Categoria / sottocategoria label
+    let categoryName = "Tutte";
+    if (category_id) {
+      const catRes = await supabaseAdmin.from("categories").select("id, name").eq("id", category_id).maybeSingle();
+      if (catRes.error) return NextResponse.json({ ok: false, error: catRes.error.message }, { status: 500 });
+      categoryName = (catRes.data as any)?.name ?? "";
+    }
+
+    let subcategoryName = "—";
+    if (subcategory_id) {
+      const subRes = await supabaseAdmin.from("subcategories").select("id, name").eq("id", subcategory_id).maybeSingle();
+      if (subRes.error) return NextResponse.json({ ok: false, error: subRes.error.message }, { status: 500 });
+      subcategoryName = (subRes.data as any)?.name ?? "";
+    }
+
+    const operatore = String((h as any).operatore || "").trim() || "—";
+    const label = String((h as any).label || "").trim() || "";
+
+    // righe: filtro ESATTO con rapid_session_id (quando presente)
+    let q = supabaseAdmin
+      .from("inventories")
+      .select("item_id, qty, qty_gr, qty_ml, created_by_username")
+      .eq("pv_id", pv_id)
+      .eq("inventory_date", inventory_date);
+
+    if (category_id) q = q.eq("category_id", category_id);
+    else q = q.is("category_id", null);
+
+    if (subcategory_id) q = q.eq("subcategory_id", subcategory_id);
+    else q = q.is("subcategory_id", null);
+
+    // ✅ chiave vera del “singolo inventario” in Rapido
+    if (rapid_session_id) q = q.eq("rapid_session_id", rapid_session_id);
+    else q = q.is("rapid_session_id", null);
+
+    const { data: invRows, error: invErr } = await q;
+    if (invErr) return NextResponse.json({ ok: false, error: invErr.message }, { status: 500 });
+
+    const inv = (invRows || []) as any[];
+
+    // items map
+    const itemIds = Array.from(
+      new Set(
+        inv
+          .map((r) => String(r?.item_id ?? "").trim())
+          .filter((id) => isUuid(id))
+      )
+    );
+
+    const itemsMap = new Map<string, { code: string; description: string; category_id: string | null; subcategory_id: string | null }>();
+
+    if (itemIds.length > 0) {
+      const { data: items, error: itemsErr } = await supabaseAdmin
+        .from("items")
+        .select("id, code, description, category_id, subcategory_id")
+        .in("id", itemIds);
+
+      if (itemsErr) return NextResponse.json({ ok: false, error: itemsErr.message }, { status: 500 });
+
+      for (const it of (items || []) as any[]) {
+        const id = String(it?.id ?? "").trim();
+        if (!isUuid(id)) continue;
+
+        itemsMap.set(id, {
+          code: String(it?.code ?? ""),
+          description: String(it?.description ?? ""),
+          category_id: it?.category_id ? String(it.category_id) : null,
+          subcategory_id: it?.subcategory_id ? String(it.subcategory_id) : null,
+        });
+      }
+    }
+
+    // nomi categoria/sottocategoria per raggruppamento fogli
+    const catIds = Array.from(new Set(Array.from(itemsMap.values()).map((x) => x.category_id).filter((x): x is string => !!x && isUuid(x))));
+    const subIds = Array.from(new Set(Array.from(itemsMap.values()).map((x) => x.subcategory_id).filter((x): x is string => !!x && isUuid(x))));
+
+    const catNameById = new Map<string, string>();
+    const subNameById = new Map<string, string>();
+
+    if (catIds.length > 0) {
+      const { data: cats, error: catsErr } = await supabaseAdmin.from("categories").select("id, name").in("id", catIds);
+      if (catsErr) return NextResponse.json({ ok: false, error: catsErr.message }, { status: 500 });
+      for (const c of (cats || []) as any[]) {
+        const id = String(c?.id ?? "").trim();
+        if (!isUuid(id)) continue;
+        catNameById.set(id, String(c?.name ?? "").trim());
+      }
+    }
+
+    if (subIds.length > 0) {
+      const { data: subs, error: subsErr } = await supabaseAdmin.from("subcategories").select("id, name").in("id", subIds);
+      if (subsErr) return NextResponse.json({ ok: false, error: subsErr.message }, { status: 500 });
+      for (const s of (subs || []) as any[]) {
+        const id = String(s?.id ?? "").trim();
+        if (!isUuid(id)) continue;
+        subNameById.set(id, String(s?.name ?? "").trim());
+      }
+    }
+
+    const lines = inv
+      .map((r: any) => {
+        const itemId = String(r?.item_id ?? "").trim();
+        const it = itemsMap.get(itemId);
+
+        const pz = Number(r?.qty ?? 0);
+        const gr = Number(r?.qty_gr ?? 0);
+        const ml = Number(r?.qty_ml ?? 0);
+
+        const cid = it?.category_id ?? null;
+        const sid = it?.subcategory_id ?? null;
+
+        const cname = cid ? (catNameById.get(cid) || "") : "";
+        const sname = sid ? (subNameById.get(sid) || "") : "";
+
+        return {
+          code: it?.code ?? "",
+          description: it?.description ?? "",
+          qty: Number.isFinite(pz) ? pz : 0,
+          qty_gr: Number.isFinite(gr) ? gr : 0,
+          qty_ml: Number.isFinite(ml) ? ml : 0,
+          category_name: cname || null,
+          subcategory_name: sname || null,
+        };
+      })
+      .filter((x: any) => {
+        const pz = Number(x.qty || 0);
+        const gr = Number(x.qty_gr || 0);
+        const ml = Number(x.qty_ml || 0);
+        return (Number.isFinite(pz) && pz > 0) || (Number.isFinite(gr) && gr > 0) || (Number.isFinite(ml) && ml > 0);
+      });
+
+    lines.sort((a: any, b: any) => {
+      const da = String(a.description ?? "").trim();
+      const db = String(b.description ?? "").trim();
+      const cmp = da.localeCompare(db, "it", { sensitivity: "base" });
+      if (cmp !== 0) return cmp;
+      return String(a.code ?? "").localeCompare(String(b.code ?? ""), "it", { sensitivity: "base" });
+    });
+
+    const xlsx = await buildInventoryXlsx(
+      { inventoryDate: inventory_date, operatore, pvLabel, categoryName, subcategoryName },
+      lines
+    );
+
+    const pvCode = (pvRes.data as any)?.code ?? "PV";
+    const labelPart = label ? safeFilePart(label) : "INV";
+    const filename = `inventario_${pvCode}_${inventory_date}_${labelPart}.xlsx`;
+
+    return new NextResponse(new Uint8Array(xlsx), {
+      status: 200,
+      headers: {
+        "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "content-disposition": `attachment; filename="${filename}"`,
+        "cache-control": "no-store",
+      },
+    });
+  }
+
+  // =========================
+  // PATH B: compatibilità vecchia (pv_id + date + category/subcategory)
+  // =========================
   const pv_id_qs = (url.searchParams.get("pv_id") || "").trim();
 
-  // ✅ Rapido: category_id può essere null (qs: omesso, "", "null")
   const category_id_raw = normNullParam(url.searchParams.get("category_id"));
   const category_id: string | null = category_id_raw;
 
-  // ✅ subcategory: "" / "null" / omesso => null
   const subcategory_id_raw = normNullParam(url.searchParams.get("subcategory_id"));
   const subcategory_id: string | null = subcategory_id_raw;
 
   const inventory_date = (url.searchParams.get("inventory_date") || "").trim();
 
-  // ✅ Standard: UUID obbligatorio; Rapido: NULL ammesso
   if (category_id !== null && !isUuid(category_id)) {
     return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
   }
@@ -94,26 +325,21 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: "inventory_date non valida (YYYY-MM-DD)" }, { status: 400 });
   }
 
-  // PV enforcement
   let effectivePvId = pv_id_qs;
 
   if (session.role === "punto_vendita") {
-    try {
-      effectivePvId = await requirePvIdForPuntoVendita(session.username);
-    } catch (e: any) {
-      return NextResponse.json({ ok: false, error: e?.message || "Non autorizzato" }, { status: 401 });
-    }
+    // PV user: forzo sempre il suo PV
+    effectivePvId = pvFromSession || "";
   } else {
     if (!isUuid(effectivePvId)) return NextResponse.json({ ok: false, error: "pv_id non valido" }, { status: 400 });
   }
 
-  // 1) meta: PV + category + subcategory names
+  // meta: PV + category + subcategory names
   const pvRes = await supabaseAdmin.from("pvs").select("id, code, name").eq("id", effectivePvId).maybeSingle();
   if (pvRes.error) return NextResponse.json({ ok: false, error: pvRes.error.message }, { status: 500 });
 
   const pvLabel = pvRes.data ? `${(pvRes.data as any).code} — ${(pvRes.data as any).name}` : effectivePvId;
 
-  // ✅ Categoria: se Rapido => "Tutte" e NON faccio query categories
   let categoryName = "Tutte";
   if (category_id) {
     const catRes = await supabaseAdmin.from("categories").select("id, name").eq("id", category_id).maybeSingle();
@@ -121,7 +347,6 @@ export async function GET(req: Request) {
     categoryName = (catRes.data as any)?.name ?? "";
   }
 
-  // ✅ Sottocategoria: se null => "—"
   let subcategoryName = "—";
   if (subcategory_id) {
     const subRes = await supabaseAdmin.from("subcategories").select("id, name").eq("id", subcategory_id).maybeSingle();
@@ -129,7 +354,7 @@ export async function GET(req: Request) {
     subcategoryName = (subRes.data as any)?.name ?? "";
   }
 
-  // 2) operatore dalla testata (prendo l’ultimo header per id)
+  // operatore dalla testata (prendo l’ultimo header per id)
   let hq = supabaseAdmin
     .from("inventories_headers")
     .select("id, operatore")
@@ -147,7 +372,7 @@ export async function GET(req: Request) {
 
   const operatore = ((header as any)?.operatore || "").toString().trim() || "—";
 
-  // 3) righe inventario (senza join items: così poi possiamo risolvere categorie/sottocategorie)
+  // righe inventario (ATTENZIONE: questo path vecchio può includere più inventari rapidi dello stesso giorno)
   let q = supabaseAdmin
     .from("inventories")
     .select("item_id, qty, qty_gr, qty_ml, created_by_username")
@@ -160,7 +385,6 @@ export async function GET(req: Request) {
   if (subcategory_id) q = q.eq("subcategory_id", subcategory_id);
   else q = q.is("subcategory_id", null);
 
-  // ✅ PV: esporta solo il SUO inventario (evita mix con admin/amministrativo)
   if (session.role === "punto_vendita") {
     q = q.eq("created_by_username", session.username);
   }
@@ -170,19 +394,9 @@ export async function GET(req: Request) {
 
   const inv = (invRows || []) as any[];
 
-  const itemIds = Array.from(
-    new Set(
-      inv
-        .map((r) => String(r?.item_id ?? "").trim())
-        .filter((id) => isUuid(id))
-    )
-  );
+  const itemIds = Array.from(new Set(inv.map((r) => String(r?.item_id ?? "").trim()).filter((id) => isUuid(id))));
 
-  // 4) items map (code/desc + category_id/subcategory_id)
-  const itemsMap = new Map<
-    string,
-    { code: string; description: string; category_id: string | null; subcategory_id: string | null }
-  >();
+  const itemsMap = new Map<string, { code: string; description: string; category_id: string | null; subcategory_id: string | null }>();
 
   if (itemIds.length > 0) {
     const { data: items, error: itemsErr } = await supabaseAdmin
@@ -205,22 +419,8 @@ export async function GET(req: Request) {
     }
   }
 
-  // 5) risolvo nomi categoria/sottocategoria per i fogli
-  const catIds = Array.from(
-    new Set(
-      Array.from(itemsMap.values())
-        .map((x) => x.category_id)
-        .filter((x): x is string => !!x && isUuid(x))
-    )
-  );
-
-  const subIds = Array.from(
-    new Set(
-      Array.from(itemsMap.values())
-        .map((x) => x.subcategory_id)
-        .filter((x): x is string => !!x && isUuid(x))
-    )
-  );
+  const catIds = Array.from(new Set(Array.from(itemsMap.values()).map((x) => x.category_id).filter((x): x is string => !!x && isUuid(x))));
+  const subIds = Array.from(new Set(Array.from(itemsMap.values()).map((x) => x.subcategory_id).filter((x): x is string => !!x && isUuid(x))));
 
   const catNameById = new Map<string, string>();
   const subNameById = new Map<string, string>();
@@ -228,7 +428,6 @@ export async function GET(req: Request) {
   if (catIds.length > 0) {
     const { data: cats, error: catsErr } = await supabaseAdmin.from("categories").select("id, name").in("id", catIds);
     if (catsErr) return NextResponse.json({ ok: false, error: catsErr.message }, { status: 500 });
-
     for (const c of (cats || []) as any[]) {
       const id = String(c?.id ?? "").trim();
       if (!isUuid(id)) continue;
@@ -239,7 +438,6 @@ export async function GET(req: Request) {
   if (subIds.length > 0) {
     const { data: subs, error: subsErr } = await supabaseAdmin.from("subcategories").select("id, name").in("id", subIds);
     if (subsErr) return NextResponse.json({ ok: false, error: subsErr.message }, { status: 500 });
-
     for (const s of (subs || []) as any[]) {
       const id = String(s?.id ?? "").trim();
       if (!isUuid(id)) continue;
@@ -247,7 +445,6 @@ export async function GET(req: Request) {
     }
   }
 
-  // 6) costruisco lines includendo category_name/subcategory_name per i fogli
   const lines = inv
     .map((r: any) => {
       const itemId = String(r?.item_id ?? "").trim();
@@ -269,8 +466,6 @@ export async function GET(req: Request) {
         qty: Number.isFinite(pz) ? pz : 0,
         qty_gr: Number.isFinite(gr) ? gr : 0,
         qty_ml: Number.isFinite(ml) ? ml : 0,
-
-        // ✅ per buildInventoryXlsx: fogli raggruppati
         category_name: cname || null,
         subcategory_name: sname || null,
       };
@@ -282,13 +477,11 @@ export async function GET(req: Request) {
       return (Number.isFinite(pz) && pz > 0) || (Number.isFinite(gr) && gr > 0) || (Number.isFinite(ml) && ml > 0);
     });
 
-  // ✅ ORDINAMENTO RICHIESTO: alfabetico per descrizione (case-insensitive, it)
   lines.sort((a: any, b: any) => {
     const da = String(a.description ?? "").trim();
     const db = String(b.description ?? "").trim();
     const cmp = da.localeCompare(db, "it", { sensitivity: "base" });
     if (cmp !== 0) return cmp;
-    // fallback stabile: per codice
     return String(a.code ?? "").localeCompare(String(b.code ?? ""), "it", { sensitivity: "base" });
   });
 
