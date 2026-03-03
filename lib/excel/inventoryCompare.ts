@@ -418,11 +418,15 @@ function addCompareSheet(wb: ExcelJS.Workbook, sheetName: string, meta: Inventor
 
     const prezzo = line.prezzoVenditaEur == null ? null : Number(line.prezzoVenditaEur);
 
-    const valInv = prezzo == null ? null : qi * prezzo;
-    const valGes = prezzo == null ? null : qg * prezzo;
-    const valDiff = prezzo == null ? null : diff * prezzo;
+    // ✅ Se è articolo a ML (volumeMlPerUnit presente), il prezzo è €/L
+// quindi valore = (ml / 1000) * prezzo
+const ml = line.volumeMlPerUnit == null ? null : Number(line.volumeMlPerUnit);
+const isMl = ml != null && Number.isFinite(ml) && ml > 0;
+const unitFactor = isMl ? 1 / 1000 : 1;
 
-    const ml = line.volumeMlPerUnit == null ? null : Number(line.volumeMlPerUnit);
+const valInv = prezzo == null ? null : qi * unitFactor * prezzo;
+const valGes = prezzo == null ? null : qg * unitFactor * prezzo;
+const valDiff = prezzo == null ? null : diff * unitFactor * prezzo;
 
     const litInv = ml == null ? null : mlToLitri(qi);
     const litGes = ml == null ? null : mlToLitri(qg);
@@ -470,8 +474,10 @@ function addCompareSheet(wb: ExcelJS.Workbook, sheetName: string, meta: Inventor
       applyRedRow(ws, rr, 14);
     }
 
+    if (!isMl) {
     totInv += qi;
     totGes += qg;
+}
 
     if (valInv != null) totValInv += valInv;
     if (valGes != null) totValGes += valGes;
@@ -483,7 +489,7 @@ function addCompareSheet(wb: ExcelJS.Workbook, sheetName: string, meta: Inventor
 
     if (diff < 0) {
       totNegPieces += -diff;
-      if (prezzo != null) totNegValue += (-diff) * prezzo;
+      if (prezzo != null) totNegValue += (-diff) * unitFactor * prezzo;
       if (ml != null) totNegLitri += mlToLitri(-diff);
     }
 
@@ -665,7 +671,22 @@ export function buildCompareLines(
     // NB: la Map originale potrebbe avere key non-normalizzate in casi strani,
     // quindi prendiamo dalla Set normalizzata -> ma il valore lo leggiamo dalla Map originale:
     // (qui assumiamo che parseGestionaleXlsx normalizzi i key: infatti usa normCode).
-    const qtyGes = Number(gestionaleMap.get(code) ?? 0);
+    let qtyGes = Number(gestionaleMap.get(code) ?? 0);
+
+// ✅ FIX LIQUIDI: se articolo a ML e il gestionale esporta in litri (es. 3,440),
+// convertiamo in ML.
+if (isMlItem) {
+  const hasDecimals = Math.abs(qtyGes - Math.trunc(qtyGes)) > 0.000001;
+
+  if (qtyGes !== 0 && Math.abs(qtyGes) < 1000 && hasDecimals) {
+    qtyGes = Math.round(qtyGes * 1000);
+  }
+}
+
+// ✅ blocca negativi gestionale
+if (qtyGes < 0) {
+  qtyGes = 0;
+}
 
     const diff = qtyInv - qtyGes;
 

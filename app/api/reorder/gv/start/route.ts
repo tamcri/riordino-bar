@@ -1,26 +1,16 @@
 import { NextResponse } from "next/server";
 import crypto from "crypto";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
-import { processReorderGVExcel } from "@/lib/excel/reorder_gv";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { processReorderGVExcel } from "@/lib/excel/reorder_gv";
 
-// ✅ days libero con limiti 1..21
-function sanitizeDays(v: unknown): number {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return 7; // default 7 giorni
-  const di = Math.trunc(n);
-  if (di < 1) return 1;
-  if (di > 21) return 21;
-  return di;
-}
+export const runtime = "nodejs";
 
-// ✅ per compatibilità DB: weeks sempre INTEGER
-function weeksFromDays(days: number): number {
-  const w = Math.ceil(days / 7);
-  // se vuoi tenere un range “sensato”:
-  if (w < 1) return 1;
-  if (w > 4) return 4;
-  return w;
+function formatITDate(d: Date) {
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  return `${dd}/${mm}/${yyyy}`;
 }
 
 export async function POST(req: Request) {
@@ -32,7 +22,7 @@ export async function POST(req: Request) {
       ?.split("=")[1];
 
     const session = parseSessionValue(sessionCookie);
-    if (!session || !["admin", "amministrativo"].includes(session.role)) {
+    if (!session) {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
     }
 
@@ -42,13 +32,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "File mancante" }, { status: 400 });
     }
 
-    // ✅ pvId obbligatorio
     const pvId = String(formData.get("pvId") ?? "").trim();
     if (!pvId) {
       return NextResponse.json({ ok: false, error: "Punto vendita mancante" }, { status: 400 });
     }
 
-    // ✅ Validazione PV
     const { data: pv, error: pvErr } = await supabaseAdmin
       .from("pvs")
       .select("id, code, name")
@@ -59,23 +47,34 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Punto vendita non valido" }, { status: 400 });
     }
 
-    const pvLabel = `${pv.code} - ${pv.name}`;
+    // ✅ prezzi da DB
+    const { data: items, error: itemsErr } = await supabaseAdmin
+      .from("items")
+      .select("code, prezzo_vendita_eur")
+      .eq("is_active", true);
 
-    // ✅ NEW: days (1..21)
-    const days = sanitizeDays(formData.get("days"));
-    const weeks = weeksFromDays(days); // ✅ sempre intero per DB
+    if (itemsErr) {
+      console.error("[GV start] items error:", itemsErr);
+      return NextResponse.json({ ok: false, error: "Errore lettura anagrafica prezzi" }, { status: 500 });
+    }
+
+    const priceMap: Record<string, number> = {};
+    for (const it of items || []) {
+      priceMap[String(it.code)] = Number(it.prezzo_vendita_eur) || 0;
+    }
 
     const input = await file.arrayBuffer();
 
-    // ✅ processReorderGVExcel riceve days
-    const { xlsx, rows } = await processReorderGVExcel(input, days);
+    // ✅ Titolo intestazione Excel
+    const today = new Date();
+    const title = `${pv.code} - ${pv.name} Ordine Gratta e Vinci del ${formatITDate(today)}`;
+
+    const { xlsx, rows } = await processReorderGVExcel(input, priceMap, title);
 
     const reorderId = crypto.randomUUID();
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, "0");
+    const year = today.getFullYear();
+    const month = String(today.getMonth() + 1).padStart(2, "0");
 
-    // ✅ path ordinato per PV
     const exportPath = `GV/${pv.code}/${year}/${month}/${reorderId}.xlsx`;
 
     const { error: uploadErr } = await supabaseAdmin.storage
@@ -90,6 +89,8 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Errore upload Excel" }, { status: 500 });
     }
 
+    const pvLabel = `${pv.code} - ${pv.name}`;
+
     const { error: insertErr } = await supabaseAdmin.from("reorders").insert({
       id: reorderId,
       created_by_username: session.username,
@@ -97,7 +98,7 @@ export async function POST(req: Request) {
       pv_id: pv.id,
       pv_label: pvLabel,
       type: "GV",
-      weeks, // ✅ INTEGER compatibile
+      weeks: 1,
       export_path: exportPath,
       tot_rows: rows.length,
     });
@@ -115,8 +116,6 @@ export async function POST(req: Request) {
       reorderId,
       preview: rows.slice(0, 20),
       totalRows: rows.length,
-      days,   // ✅ lo usi in UI
-      weeks,  // ✅ per storico/DB (intero)
       downloadUrl: `/api/reorder/history/${reorderId}/excel`,
     });
   } catch (err: any) {

@@ -14,27 +14,22 @@ function eur(v: any): string {
 type PreviewRowGV = {
   codArticolo: string;
   descrizione: string;
-  qtaVenduta: number | null;
-  valoreVenduto: number | null;
-  giacenzaBar: number | null;
-  qtaOrdineBar: number | null;
-  qtaConf: number | null;
-  valoreDaOrdinare: number | null;
+  qtaVenduta: number;
+  valoreVenduto: number;
+
+  // ✅ NEW
+  giacenzaBarQty: number;
+
+  valoreGiacenzaBar: number;
+  qtaDaOrdinare: number;
+  valoreDaOrdinare: number;
 };
 
-type PV = {
-  id: string;
-  code: string;
-  name: string;
-};
+type PV = { id: string; code: string; name: string };
 
 export default function OrderGVClient() {
   const [file, setFile] = useState<File | null>(null);
 
-  // ✅ NEW: giorni liberi (1..21)
-  const [days, setDays] = useState<number>(7);
-
-  // ✅ PV
   const [pvs, setPvs] = useState<PV[]>([]);
   const [pvId, setPvId] = useState<string>("");
 
@@ -44,7 +39,6 @@ export default function OrderGVClient() {
   const [totalRows, setTotalRows] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
 
-  // ✅ carica PV al mount
   useEffect(() => {
     (async () => {
       try {
@@ -54,21 +48,33 @@ export default function OrderGVClient() {
 
         const rows: PV[] = json.rows || [];
         setPvs(rows);
-
         if (!pvId && rows.length > 0) setPvId(rows[0].id);
       } catch {
-        // silenzioso
+        // niente
       }
       // eslint-disable-next-line react-hooks/exhaustive-deps
     })();
   }, []);
 
-  function clampDays(v: number) {
-    if (!Number.isFinite(v)) return 7;
-    const n = Math.trunc(v);
-    if (n < 1) return 1;
-    if (n > 21) return 21;
-    return n;
+  function onPickFile(f: File | null) {
+    setError(null);
+    setDownloadUrl(null);
+    setPreview([]);
+    setTotalRows(0);
+
+    if (!f) {
+      setFile(null);
+      return;
+    }
+
+    const name = (f.name || "").toLowerCase();
+    if (!name.endsWith(".xls") && !name.endsWith(".xlsx")) {
+      setFile(null);
+      setError("Formato non valido: carica un file .xls o .xlsx");
+      return;
+    }
+
+    setFile(f);
   }
 
   async function startProcess(e: React.FormEvent) {
@@ -88,9 +94,6 @@ export default function OrderGVClient() {
       fd.append("file", file);
       fd.append("pvId", pvId);
 
-      // ✅ NEW: days
-      fd.append("days", String(clampDays(days)));
-
       const res = await fetch("/api/reorder/gv/start", { method: "POST", body: fd });
       const text = await res.text();
       let json: any = null;
@@ -98,24 +101,19 @@ export default function OrderGVClient() {
       try {
         json = text ? JSON.parse(text) : null;
       } catch {
-        // non è JSON
+        // non JSON
       }
 
       if (!res.ok || !json?.ok) {
-        const msg =
-          json?.error ||
-          `Errore server (${res.status}). Risposta non-JSON: ${text?.slice(0, 120) || "vuota"}`;
+        const msg = json?.error || `Errore server (${res.status}). Risposta: ${text?.slice(0, 160) || "vuota"}`;
         throw new Error(msg);
       }
 
       setDownloadUrl(json.downloadUrl || null);
       setPreview(json.preview || []);
       setTotalRows(json.totalRows || 0);
-
-      // se il server ritorna days, riallineo (evita valori fuori range)
-      if (typeof json.days === "number") setDays(clampDays(json.days));
     } catch (err: any) {
-      setError(err.message || "Errore");
+      setError(err?.message || "Errore");
     } finally {
       setLoading(false);
     }
@@ -129,16 +127,14 @@ export default function OrderGVClient() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold text-slate-900">Calcolo Riordino Gratta &amp; Vinci</h1>
+        <h1 className="text-2xl font-semibold text-slate-900">Order G&amp;V</h1>
         <p className="text-slate-600 mt-1">
-          Seleziona il Punto vendita, carica l’Excel G&amp;V, imposta i giorni di copertura, controlla l’anteprima,
-          poi scarica il file compilato.
+          Seleziona il Punto vendita, carica l’Excel (.xls/.xlsx), genera l’anteprima e scarica l’output.
         </p>
       </div>
 
       <form onSubmit={startProcess} className="space-y-4">
         <div className="rounded-2xl border bg-white p-4 space-y-4">
-          {/* ✅ PV dropdown */}
           <div>
             <label className="block text-sm font-medium mb-2">Punto vendita</label>
             <select
@@ -157,45 +153,26 @@ export default function OrderGVClient() {
                 ))
               )}
             </select>
-            {pvs.length === 0 && (
-              <p className="text-xs text-gray-500 mt-1">Vai in Admin → “Crea PV”, poi torna qui.</p>
-            )}
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-2">File Excel G&amp;V (.xlsx)</label>
-            <input type="file" accept=".xlsx" onChange={(e) => setFile(e.target.files?.[0] || null)} />
+            <label className="block text-sm font-medium mb-2">File Excel G&amp;V (.xls / .xlsx)</label>
+            <input
+              type="file"
+              accept=".xls,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              onChange={(e) => onPickFile(e.target.files?.[0] || null)}
+            />
             {file && (
               <p className="text-sm text-gray-600 mt-2">
                 Selezionato: <b>{file.name}</b>
               </p>
             )}
           </div>
-
-          {/* ✅ NEW: giorni liberi */}
-          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
-            <label className="block text-sm font-medium min-w-[180px]">Periodo di calcolo (giorni)</label>
-
-            <input
-              type="number"
-              min={1}
-              max={21}
-              step={1}
-              className="rounded-xl border p-3 w-full sm:w-[260px]"
-              value={days}
-              onChange={(e) => setDays(clampDays(Number(e.target.value)))}
-            />
-          </div>
-
-          <p className="text-xs text-gray-500">
-            Nota: per G&amp;V consideriamo anche <b>+1 giorno</b> di consegna (ordine entro le 11, arriva il giorno dopo).
-          </p>
         </div>
 
         <button
           className="w-full rounded-xl bg-orange-500 text-white p-3 hover:bg-orange-600 disabled:opacity-60"
           disabled={!file || loading || !pvId}
-          title={!pvId ? "Seleziona un Punto vendita" : undefined}
         >
           {loading ? "Elaborazione..." : "Genera anteprima"}
         </button>
@@ -207,7 +184,7 @@ export default function OrderGVClient() {
         <div className="space-y-3">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
             <p className="text-gray-700">
-              Anteprima pronta. Righe elaborate: <b>{totalRows}</b> (mostro le prime 20)
+              Righe elaborate: <b>{totalRows}</b> (mostro le prime 20)
             </p>
             <button onClick={downloadExcel} className="rounded-xl bg-slate-900 text-white px-4 py-2">
               Scarica Excel
@@ -221,24 +198,24 @@ export default function OrderGVClient() {
                   <th className="text-left p-3">Cod. Articolo</th>
                   <th className="text-left p-3">Descrizione</th>
                   <th className="text-left p-3">Qtà Venduta</th>
-                  <th className="text-left p-3">Valore Venduto (€)</th>
-                  <th className="text-left p-3">Giacenza BAR</th>
-                  <th className="text-left p-3">Qtà da ordinare BAR</th>
-                  <th className="text-left p-3">Qtà Conf.</th>
-                  <th className="text-left p-3">Valore da ordinare (€)</th>
+                  <th className="text-left p-3">Valore Venduto</th>
+                  <th className="text-left p-3">Giacenza Bar</th>
+                  <th className="text-left p-3">Valore Giacenza Bar</th>
+                  <th className="text-left p-3">QTA DA ORDINARE</th>
+                  <th className="text-left p-3">VALORE DA ORDINARE</th>
                 </tr>
               </thead>
 
               <tbody>
                 {preview.map((r, i) => (
                   <tr key={i} className="border-t">
-                    <td className="p-3">{r.codArticolo || ""}</td>
-                    <td className="p-3">{r.descrizione || ""}</td>
+                    <td className="p-3">{r.codArticolo}</td>
+                    <td className="p-3">{r.descrizione}</td>
                     <td className="p-3">{n0(r.qtaVenduta)}</td>
                     <td className="p-3">{eur(r.valoreVenduto)}</td>
-                    <td className="p-3">{n0(r.giacenzaBar)}</td>
-                    <td className="p-3 font-medium">{n0(r.qtaOrdineBar)}</td>
-                    <td className="p-3">{n0(r.qtaConf)}</td>
+                    <td className="p-3">{n0(r.giacenzaBarQty)}</td>
+                    <td className="p-3">{eur(r.valoreGiacenzaBar)}</td>
+                    <td className="p-3 font-medium">{n0(r.qtaDaOrdinare)}</td>
                     <td className="p-3 font-medium">{eur(r.valoreDaOrdinare)}</td>
                   </tr>
                 ))}
