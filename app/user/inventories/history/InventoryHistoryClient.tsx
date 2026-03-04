@@ -263,6 +263,16 @@ export default function InventoryHistoryClient() {
   const [compareMsg, setCompareMsg] = useState<string | null>(null);
   const [compareDownloadUrl, setCompareDownloadUrl] = useState<string | null>(null);
 
+    // ✅ MODAL PROGRESSIVI
+  const [progressiviOpen, setProgressiviOpen] = useState(false);
+  const [progressiviTarget, setProgressiviTarget] = useState<InventoryGroup | null>(null);
+  const [progressiviFile, setProgressiviFile] = useState<File | null>(null);
+  const [progressiviLoading, setProgressiviLoading] = useState(false);
+  const [progressiviError, setProgressiviError] = useState<string | null>(null);
+  const [progressiviMsg, setProgressiviMsg] = useState<string | null>(null);
+  const [progressiviIsFirst, setProgressiviIsFirst] = useState<boolean>(false);
+  const [progressiviChecked, setProgressiviChecked] = useState<boolean>(false);
+
   const canUseSubcategories = useMemo(() => !!categoryId, [categoryId]);
   const canCompare = me.role === "admin" || me.role === "amministrativo";
 
@@ -473,6 +483,8 @@ export default function InventoryHistoryClient() {
     setCompareDownloadUrl(null);
   }
 
+  
+
   function closeCompare() {
     setCompareOpen(false);
     setCompareTarget(null);
@@ -533,6 +545,117 @@ export default function InventoryHistoryClient() {
       setCompareLoading(false);
     }
   }
+
+   function openProgressivi(g: InventoryGroup) {
+  setProgressiviTarget(g);
+  setProgressiviFile(null);
+  setProgressiviOpen(true);
+  setProgressiviError(null);
+  setProgressiviMsg(null);
+
+  // ✅ reset stato "primo inserimento"
+  setProgressiviIsFirst(false);
+  setProgressiviChecked(false);
+
+  // ✅ controlla se esistono già progressivi per PV + data
+  (async () => {
+    try {
+      const qs = new URLSearchParams();
+      qs.set("pv_id", g.pv_id);
+      qs.set("inventory_date", g.inventory_date);
+
+      const res = await fetch(`/api/inventories/progressivi/status?${qs.toString()}`, {
+        cache: "no-store",
+      });
+
+      const text = await res.text().catch(() => "");
+      let json: any = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        json = null;
+      }
+
+      if (!res.ok || !json?.ok) {
+        setProgressiviError(json?.error || text || `Errore controllo progressivi (HTTP ${res.status})`);
+        setProgressiviChecked(true);
+        return;
+      }
+
+      const exists = !!json.exists;
+      setProgressiviIsFirst(!exists);
+      setProgressiviChecked(true);
+    } catch (e: any) {
+      setProgressiviError(e?.message || "Errore controllo progressivi");
+      setProgressiviChecked(true);
+    }
+  })();
+}
+
+function closeProgressivi() {
+  setProgressiviOpen(false);
+  setProgressiviTarget(null);
+  setProgressiviFile(null);
+  setProgressiviError(null);
+  setProgressiviMsg(null);
+  setProgressiviLoading(false);
+
+  setProgressiviIsFirst(false);
+  setProgressiviChecked(false);
+}
+
+async function startProgressiviUpload() {
+  if (!progressiviTarget) return;
+
+  if (!progressiviFile) {
+    setProgressiviError("Carica prima il file progressivi (.xls/.xlsx).");
+    return;
+  }
+
+  // ✅ Se è il primo inserimento, chiedi conferma
+  if (progressiviIsFirst) {
+  const ok = window.confirm(
+    "Questo è il PRIMO caricamento Progressivi per questo PV.\n\n" +
+      "Non ti chiederò dati manuali: userò questo file come BASE.\n" +
+      "Dal prossimo inventario in poi calcolerò venduto periodo e ammanco.\n\n" +
+      "Vuoi procedere?"
+  );
+  if (!ok) return;
+}
+  setProgressiviLoading(true);
+  setProgressiviError(null);
+  setProgressiviMsg(null);
+
+  try {
+    const fd = new FormData();
+    fd.append("file", progressiviFile);
+    fd.append("pv_id", progressiviTarget.pv_id);
+    fd.append("inventory_date", progressiviTarget.inventory_date);
+
+    const res = await fetch("/api/inventories/progressivi/upload", {
+      method: "POST",
+      body: fd,
+    });
+
+    const text = await res.text().catch(() => "");
+    let json: any = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = null;
+    }
+
+    if (!res.ok || !json?.ok) {
+      throw new Error(json?.error || text || `Errore upload (HTTP ${res.status})`);
+    }
+
+    setProgressiviMsg(`Progressivi caricati. Righe importate: ${json.rows ?? "?"}`);
+  } catch (e: any) {
+    setProgressiviError(e?.message || "Errore upload progressivi");
+  } finally {
+    setProgressiviLoading(false);
+  }
+}
 
   const [actionsOpenKey, setActionsOpenKey] = useState<string | null>(null);
   const [menuPos, setMenuPos] = useState<MenuPos | null>(null);
@@ -965,18 +1088,32 @@ router.push(buildReopenUrl(g, me.role));
                   </button>
 
                   {canCompare && (
-                    <button
-                      className="text-left rounded-lg px-3 py-2 hover:bg-gray-50 text-sm"
-                      onClick={() => {
-                        setActionsOpenKey(null);
-                        setMenuPos(null);
-                        openCompare(g);
-                      }}
-                      role="menuitem"
-                    >
-                      Compara
-                    </button>
-                  )}
+  <button
+    className="text-left rounded-lg px-3 py-2 hover:bg-gray-50 text-sm"
+    onClick={() => {
+      setActionsOpenKey(null);
+      setMenuPos(null);
+      openCompare(g);
+    }}
+    role="menuitem"
+  >
+    Compara
+  </button>
+)}
+
+{canCompare && (
+  <button
+    className="text-left rounded-lg px-3 py-2 hover:bg-gray-50 text-sm"
+    onClick={() => {
+      setActionsOpenKey(null);
+      setMenuPos(null);
+      openProgressivi(g);
+    }}
+    role="menuitem"
+  >
+    Progressivi
+  </button>
+)}
 
                   {me.role === "admin" && (
                     <button
@@ -1113,6 +1250,8 @@ router.push(buildReopenUrl(g, me.role));
                 </div>
               </div>
 
+     
+
               <button className="rounded-xl border px-3 py-2 hover:bg-gray-50" onClick={closeCompare}>
                 Chiudi
               </button>
@@ -1150,6 +1289,63 @@ router.push(buildReopenUrl(g, me.role));
 
               <p className="text-xs text-gray-500">
                 Nota: l’endpoint <b>/api/inventories/compare</b> restituisce un file Excel scaricabile.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+                     {/* MODAL PROGRESSIVI */}
+      {progressiviOpen && progressiviTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/40" onClick={closeProgressivi} />
+
+          <div className="relative w-full max-w-xl rounded-2xl bg-white shadow-lg border p-5">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-lg font-semibold">Carica Progressivi</div>
+                <div className="text-sm text-gray-600 mt-1">
+                  <b>{progressiviTarget.pv_code} — {progressiviTarget.pv_name}</b> — {formatDateIT(progressiviTarget.inventory_date)}
+                  <div className="text-xs text-gray-500 mt-1">
+  {progressiviChecked ? (progressiviIsFirst ? "Primo inserimento: SÌ" : "Primo inserimento: NO") : "Controllo primo inserimento..."}
+</div>
+                </div>
+              </div>
+
+              <button className="rounded-xl border px-3 py-2 hover:bg-gray-50" onClick={closeProgressivi}>
+                Chiudi
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              <div>
+                <label className="block text-sm font-medium mb-2">File progressivi (.xls / .xlsx)</label>
+                <input
+                  type="file"
+                  accept=".xls,.xlsx"
+                  onChange={(e) => setProgressiviFile(e.target.files?.[0] || null)}
+                />
+                {progressiviFile && (
+                  <p className="text-xs text-gray-600 mt-2">
+                    Selezionato: <b>{progressiviFile.name}</b>
+                  </p>
+                )}
+              </div>
+
+              {progressiviError && <p className="text-sm text-red-600">{progressiviError}</p>}
+              {progressiviMsg && <p className="text-sm text-green-700">{progressiviMsg}</p>}
+
+              <div className="flex items-center justify-between gap-3">
+                <button
+                  className="rounded-xl bg-slate-900 text-white px-4 py-2 hover:bg-slate-800 disabled:opacity-60"
+                  disabled={!progressiviFile || progressiviLoading}
+                  onClick={startProgressiviUpload}
+                >
+                  {progressiviLoading ? "Carico..." : "Carica Progressivi"}
+                </button>
+              </div>
+
+              <p className="text-xs text-gray-500">
+                Nota: questo carica i progressivi e li associa a PV + data inventario.
               </p>
             </div>
           </div>

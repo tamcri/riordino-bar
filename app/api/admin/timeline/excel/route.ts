@@ -33,8 +33,7 @@ function safeSheetName(name: string) {
 }
 
 function normParam(v: string | null) {
-  const s = (v ?? "").trim();
-  return s;
+  return (v ?? "").trim();
 }
 
 type InvRow = {
@@ -92,7 +91,7 @@ function matchCategory(requested: string, invCategoryId: string | null, itemCate
   // requested:
   // "" => tutte (incluse null)
   // "__NULL__" => solo inventory.category_id NULL
-  // uuid => match su inventory.category_id OR item.category_id (perché da te Tabacchi a volte è NULL)
+  // uuid => match su inventory.category_id OR item.category_id
   if (!requested) return true;
 
   if (requested === "__NULL__") {
@@ -103,8 +102,13 @@ function matchCategory(requested: string, invCategoryId: string | null, itemCate
     return invCategoryId === requested || itemCategoryId === requested;
   }
 
-  // fallback: se arriva qualcosa di strano, non filtro
   return true;
+}
+
+function keyFor(dateIso: string, suffix: string) {
+  // es: 2026-02-12 -> d20260212_pz
+  const k = `d${dateIso.replace(/-/g, "")}_${suffix}`;
+  return k;
 }
 
 export async function GET(req: Request) {
@@ -126,7 +130,7 @@ export async function GET(req: Request) {
   if (!isIsoDate(date_from) || !isIsoDate(date_to))
     return NextResponse.json({ ok: false, error: "date_from/date_to non valide" }, { status: 400 });
 
-  // 1) Inventories nel periodo (NON filtro qui per category_id, perché spesso Tabacchi è salvata con category_id NULL)
+  // 1) Inventories nel periodo (NON filtro qui per category_id)
   let q = supabaseAdmin
     .from("inventories")
     .select("item_id, inventory_date, category_id, qty, qty_gr, qty_ml")
@@ -198,8 +202,6 @@ export async function GET(req: Request) {
   });
 
   // 5) grouping fogli
-  // - se category_id è uuid o "__NULL__" => 1 foglio unico
-  // - se category_id è "" => più fogli, uno per categoria item (come storico inventario)
   type GroupKey = { key: string; label: string };
 
   function groupKeyForRow(r: InvRow): GroupKey {
@@ -210,7 +212,6 @@ export async function GET(req: Request) {
     if (category_id === "__NULL__") return { key: "__NULL__", label: "SENZA_CATEGORIA_INV" };
     if (isUuid(category_id)) return { key: category_id, label: categoriesMap.get(category_id) || "CATEGORIA" };
 
-    // tutte: splitta per categoria item
     return { key: itemCatId || "__NO_CAT__", label: itemCatName || "SENZA_CATEGORIA" };
   }
 
@@ -222,7 +223,6 @@ export async function GET(req: Request) {
     else g.rows.push(r);
   }
 
-  // ordinamento fogli: alfabetico, SENZA_CATEGORIA per ultimo
   const groupEntries = Array.from(groups.entries()).sort((a, b) => {
     const an = a[1].label.toLowerCase();
     const bn = b[1].label.toLowerCase();
@@ -236,7 +236,7 @@ export async function GET(req: Request) {
   wb.creator = "riordino-bar";
   wb.created = new Date();
 
-  // SOMMARIO
+  // SOMMARIO (come prima)
   const wsSum = wb.addWorksheet("SOMMARIO");
   wsSum.columns = [
     { header: "Categoria", key: "cat", width: 30 },
@@ -277,64 +277,35 @@ export async function GET(req: Request) {
     });
   }
 
-  function buildTimelineSheet(label: string, rows: InvRow[]) {
+  // ✅ NUOVA: foglio pivot orizzontale
+  function buildTimelineSheetPivot(label: string, rows: InvRow[]) {
     const ws = wb.addWorksheet(safeSheetName(label));
 
-    ws.columns = [
-      { header: "Data", key: "date", width: 14 },
-      { header: "Codice", key: "code", width: 18 },
-      { header: "Descrizione", key: "description", width: 45 },
+    ws.pageSetup = {
+      orientation: "landscape",
+      fitToPage: true,
+      fitToWidth: 1,
+      fitToHeight: 0,
+      paperSize: 9,
+    };
 
-      { header: "PZ", key: "pz", width: 10 },
-      { header: "Δ PZ", key: "dpz", width: 10 },
+    // date ordinate
+    const datesIso = Array.from(new Set(rows.map((r) => String(r.inventory_date || "").trim()).filter(Boolean))).sort();
 
-      { header: "GR", key: "gr", width: 10 },
-      { header: "Δ GR", key: "dgr", width: 10 },
+    // item list
+    const itemIds = Array.from(new Set(rows.map((r) => String(r.item_id || "").trim()).filter((id) => isUuid(id))));
 
-      { header: "ML", key: "ml", width: 10 },
-      { header: "Δ ML", key: "dml", width: 10 },
+    // data map: itemId -> date -> values
+    type V = { pz: number; gr: number; ml: number; value: number };
+    const byItem = new Map<string, Map<string, V>>();
 
-      { header: "Valore €", key: "value", width: 15 },
-      { header: "Δ Valore €", key: "dvalue", width: 15 },
-    ];
+    for (const r of rows) {
+      const itemId = String(r.item_id || "").trim();
+      if (!isUuid(itemId)) continue;
 
-    ws.getRow(1).font = { bold: true };
+      const dateIso = String(r.inventory_date || "").trim();
+      if (!dateIso) continue;
 
-    ws.getColumn("pz").numFmt = "0";
-    ws.getColumn("dpz").numFmt = "0";
-    ws.getColumn("gr").numFmt = "0";
-    ws.getColumn("dgr").numFmt = "0";
-    ws.getColumn("ml").numFmt = "0";
-    ws.getColumn("dml").numFmt = "0";
-    ws.getColumn("value").numFmt = "€ #,##0.00";
-    ws.getColumn("dvalue").numFmt = "€ #,##0.00";
-
-    // delta per item
-    const lastByItem = new Map<string, { pz: number; gr: number; ml: number; value: number }>();
-
-    let totalPz = 0;
-    let totalGr = 0;
-    let totalMl = 0;
-    let totalValue = 0;
-
-    let totalDeltaPz = 0;
-    let totalDeltaGr = 0;
-    let totalDeltaMl = 0;
-    let totalDeltaValue = 0;
-
-    // ordine: data poi codice
-    const sorted = rows.slice().sort((a, b) => {
-      const da = String(a.inventory_date || "");
-      const db = String(b.inventory_date || "");
-      if (da !== db) return da.localeCompare(db);
-
-      const ita = itemsMap.get(String(a.item_id || "").trim());
-      const itb = itemsMap.get(String(b.item_id || "").trim());
-      return String(ita?.code ?? "").localeCompare(String(itb?.code ?? ""));
-    });
-
-    for (const r of sorted) {
-      const itemId = String(r.item_id || "");
       const it = itemsMap.get(itemId) || null;
 
       const pz = Number(r.qty || 0) || 0;
@@ -342,61 +313,111 @@ export async function GET(req: Request) {
       const ml = Number(r.qty_ml || 0) || 0;
       const value = computeValueEUR({ qty: pz, qty_gr: gr, qty_ml: ml }, it);
 
-      const prev = itemId ? lastByItem.get(itemId) : undefined;
-
-      const dpz = prev ? pz - prev.pz : 0;
-      const dgr = prev ? gr - prev.gr : 0;
-      const dml = prev ? ml - prev.ml : 0;
-      const dvalue = prev ? value - prev.value : 0;
-
-      if (itemId) lastByItem.set(itemId, { pz, gr, ml, value });
-
-      totalPz += pz;
-      totalGr += gr;
-      totalMl += ml;
-      totalValue += value;
-
-      if (prev) {
-        totalDeltaPz += dpz;
-        totalDeltaGr += dgr;
-        totalDeltaMl += dml;
-        totalDeltaValue += dvalue;
+      let m = byItem.get(itemId);
+      if (!m) {
+        m = new Map<string, V>();
+        byItem.set(itemId, m);
       }
-
-      ws.addRow({
-        date: isoToIt(r.inventory_date),
-        code: it?.code ?? "",
-        description: it?.description ?? "",
-        pz: pz || "",
-        dpz: prev ? dpz : "",
-        gr: gr || "",
-        dgr: prev ? dgr : "",
-        ml: ml || "",
-        dml: prev ? dml : "",
-        value,
-        dvalue: prev ? dvalue : "",
-      });
+      m.set(dateIso, { pz, gr, ml, value });
     }
 
-    const totalRow = ws.addRow({
-      date: "",
-      code: "",
-      description: "TOTALE",
-      pz: totalPz,
-      dpz: totalDeltaPz,
-      gr: totalGr,
-      dgr: totalDeltaGr,
-      ml: totalMl,
-      dml: totalDeltaMl,
-      value: totalValue,
-      dvalue: totalDeltaValue,
-    });
+    // colonne dinamiche
+    const cols: any[] = [
+      { header: "Codice", key: "code", width: 18 },
+      { header: "Descrizione", key: "description", width: 45 },
+    ];
+
+    for (const d of datesIso) {
+      const dit = isoToIt(d);
+      cols.push({ header: `${dit} PZ`, key: keyFor(d, "pz"), width: 10 });
+      cols.push({ header: `${dit} GR`, key: keyFor(d, "gr"), width: 10 });
+      cols.push({ header: `${dit} ML`, key: keyFor(d, "ml"), width: 10 });
+      cols.push({ header: `${dit} Valore €`, key: keyFor(d, "val"), width: 14 });
+    }
+
+    // colonne finali “situazione reale”
+    cols.push({ header: "Ultima data", key: "last_date", width: 14 });
+    cols.push({ header: "Ultimo PZ", key: "last_pz", width: 10 });
+    cols.push({ header: "Ultimo GR", key: "last_gr", width: 10 });
+    cols.push({ header: "Ultimo ML", key: "last_ml", width: 10 });
+    cols.push({ header: "Ultimo Valore €", key: "last_val", width: 16 });
+    cols.push({ header: "Δ Valore € (ultimo-primo)", key: "delta_val", width: 20 });
+
+    ws.columns = cols;
+    ws.getRow(1).font = { bold: true };
+
+    // formati €
+    for (const d of datesIso) {
+      ws.getColumn(keyFor(d, "val")).numFmt = "€ #,##0.00";
+    }
+    ws.getColumn("last_val").numFmt = "€ #,##0.00";
+    ws.getColumn("delta_val").numFmt = "€ #,##0.00";
+
+    // freeze header
+    ws.views = [{ state: "frozen", xSplit: 0, ySplit: 1 }];
+
+    // righe prodotti
+    const itemListSorted = itemIds
+      .map((id) => {
+        const it = itemsMap.get(id) || null;
+        return { id, code: it?.code ?? "", description: it?.description ?? "" };
+      })
+      .sort((a, b) => a.code.localeCompare(b.code));
+
+    for (const it of itemListSorted) {
+      const m = byItem.get(it.id) || new Map<string, V>();
+
+      const firstDate = datesIso[0] || "";
+      const lastDate = datesIso[datesIso.length - 1] || "";
+
+      const first = firstDate ? m.get(firstDate) : undefined;
+      const last = lastDate ? m.get(lastDate) : undefined;
+
+      const row: any = {
+        code: it.code,
+        description: it.description,
+      };
+
+      for (const d of datesIso) {
+        const v = m.get(d);
+        row[keyFor(d, "pz")] = v ? (v.pz || "") : "";
+        row[keyFor(d, "gr")] = v ? (v.gr || "") : "";
+        row[keyFor(d, "ml")] = v ? (v.ml || "") : "";
+        row[keyFor(d, "val")] = v ? v.value : "";
+      }
+
+      row.last_date = lastDate ? isoToIt(lastDate) : "";
+      row.last_pz = last ? (last.pz || "") : "";
+      row.last_gr = last ? (last.gr || "") : "";
+      row.last_ml = last ? (last.ml || "") : "";
+      row.last_val = last ? last.value : "";
+
+      const delta = (last?.value ?? 0) - (first?.value ?? 0);
+      row.delta_val = first && last ? delta : "";
+
+      ws.addRow(row);
+    }
+
+    // riga totale (somma SOLO ultimo valore, così sai “dove sei oggi”)
+    const totalRow = ws.addRow({});
+    totalRow.getCell(2).value = "TOTALE (Ultimo Valore €)";
     totalRow.font = { bold: true };
+
+    // somma sulla colonna last_val
+    const lastValColIndex = ws.getColumn("last_val").number; // 1-based
+    const start = 2; // prima riga dati (dopo header)
+    const end = ws.rowCount - 1; // ultima riga dati (prima del totale)
+    if (end >= start) {
+      totalRow.getCell(lastValColIndex).value = {
+        formula: `SUM(${ws.getColumn(lastValColIndex).letter}${start}:${ws.getColumn(lastValColIndex).letter}${end})`,
+      };
+      totalRow.getCell(lastValColIndex).numFmt = "€ #,##0.00";
+    }
   }
 
   // creo i fogli
   for (const [, g] of groupEntries) {
-    buildTimelineSheet(g.label, g.rows);
+    buildTimelineSheetPivot(g.label, g.rows);
   }
 
   const buffer = await wb.xlsx.writeBuffer();
