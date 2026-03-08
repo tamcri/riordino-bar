@@ -263,7 +263,7 @@ export default function InventoryHistoryClient() {
   const [compareMsg, setCompareMsg] = useState<string | null>(null);
   const [compareDownloadUrl, setCompareDownloadUrl] = useState<string | null>(null);
 
-    // ✅ MODAL PROGRESSIVI
+  // ✅ MODAL PROGRESSIVI
   const [progressiviOpen, setProgressiviOpen] = useState(false);
   const [progressiviTarget, setProgressiviTarget] = useState<InventoryGroup | null>(null);
   const [progressiviFile, setProgressiviFile] = useState<File | null>(null);
@@ -390,7 +390,8 @@ export default function InventoryHistoryClient() {
 
       if (dateFromISO) params.set("from", dateFromISO);
       if (dateToISO) params.set("to", dateToISO);
-      if (dateFromISO && dateToISO && dateFromISO > dateToISO) throw new Error("Intervallo date non valido: 'Dal' è dopo 'Al'.");
+      if (dateFromISO && dateToISO && dateFromISO > dateToISO)
+        throw new Error("Intervallo date non valido: 'Dal' è dopo 'Al'.");
 
       if (effectiveMe.isPv) {
         // ✅ PV lavora in modalità Rapido: nello storico filtriamo SOLO per date.
@@ -439,7 +440,9 @@ export default function InventoryHistoryClient() {
       if (!ok) {
         console.error("[inventories/rows] ERROR", { url, status, rawText, data });
         const snippet = (rawText || "").slice(0, 300);
-        throw new Error(data?.error || `Errore caricamento dettaglio (HTTP ${status}). Risposta: ${snippet || "—"}`);
+        throw new Error(
+          data?.error || `Errore caricamento dettaglio (HTTP ${status}). Risposta: ${snippet || "—"}`
+        );
       }
 
       setDetail(data.rows || []);
@@ -451,26 +454,45 @@ export default function InventoryHistoryClient() {
   }
 
   function downloadExcel(g: InventoryGroup, effectiveMe: MeState) {
-  if (effectiveMe.isPv && effectiveMe.pv_id && g.pv_id !== effectiveMe.pv_id) {
-    setError("Non autorizzato.");
-    return;
+    if (effectiveMe.isPv && effectiveMe.pv_id && g.pv_id !== effectiveMe.pv_id) {
+      setError("Non autorizzato.");
+      return;
+    }
+
+    const params = new URLSearchParams();
+
+    // ✅ nuovo: esporta singolo inventario
+    if (g.header_id) {
+      params.set("header_id", g.header_id);
+    } else {
+      // fallback vecchio (non dovrebbe più servire, ma meglio tenerlo)
+      params.set("pv_id", g.pv_id);
+      setCategoryParam(params, g.category_id);
+      params.set("inventory_date", g.inventory_date);
+      if (g.subcategory_id) params.set("subcategory_id", g.subcategory_id);
+    }
+
+    window.location.href = `/api/inventories/excel?${params.toString()}`;
   }
 
-  const params = new URLSearchParams();
+  // ✅ NUOVO: scarica Report Progressivi (SOLO admin/amministrativo)
+  function downloadReportProgressivi(g: InventoryGroup, effectiveMe: MeState) {
+    if (!(effectiveMe.role === "admin" || effectiveMe.role === "amministrativo")) {
+      setError("Non autorizzato.");
+      return;
+    }
 
-  // ✅ nuovo: esporta singolo inventario
-  if (g.header_id) {
-    params.set("header_id", g.header_id);
-  } else {
-    // fallback vecchio (non dovrebbe più servire, ma meglio tenerlo)
-    params.set("pv_id", g.pv_id);
-    setCategoryParam(params, g.category_id);
-    params.set("inventory_date", g.inventory_date);
-    if (g.subcategory_id) params.set("subcategory_id", g.subcategory_id);
+    const qs = new URLSearchParams();
+    if (g.header_id || g.id) qs.set("header_id", g.header_id || g.id || "");
+    else {
+      qs.set("pv_id", g.pv_id);
+      qs.set("inventory_date", g.inventory_date);
+      setCategoryParam(qs, g.category_id);
+      if (g.subcategory_id) qs.set("subcategory_id", g.subcategory_id);
+    }
+
+    window.open(`/admin/progressivi-reports/view?${qs.toString()}`, "_blank");
   }
-
-  window.location.href = `/api/inventories/excel?${params.toString()}`;
-}
 
   function openCompare(g: InventoryGroup) {
     setCompareTarget(g);
@@ -482,8 +504,6 @@ export default function InventoryHistoryClient() {
     if (compareDownloadUrl) URL.revokeObjectURL(compareDownloadUrl);
     setCompareDownloadUrl(null);
   }
-
-  
 
   function closeCompare() {
     setCompareOpen(false);
@@ -546,26 +566,96 @@ export default function InventoryHistoryClient() {
     }
   }
 
-   function openProgressivi(g: InventoryGroup) {
-  setProgressiviTarget(g);
-  setProgressiviFile(null);
-  setProgressiviOpen(true);
-  setProgressiviError(null);
-  setProgressiviMsg(null);
+  function openProgressivi(g: InventoryGroup) {
+    setProgressiviTarget(g);
+    setProgressiviFile(null);
+    setProgressiviOpen(true);
+    setProgressiviError(null);
+    setProgressiviMsg(null);
 
-  // ✅ reset stato "primo inserimento"
-  setProgressiviIsFirst(false);
-  setProgressiviChecked(false);
+    // ✅ reset stato "primo inserimento"
+    setProgressiviIsFirst(false);
+    setProgressiviChecked(false);
 
-  // ✅ controlla se esistono già progressivi per PV + data
-  (async () => {
+    // ✅ controlla se esistono già progressivi per PV + data
+    (async () => {
+      try {
+        const qs = new URLSearchParams();
+        qs.set("pv_id", g.pv_id);
+        qs.set("inventory_date", g.inventory_date);
+
+        const res = await fetch(`/api/inventories/progressivi/status?${qs.toString()}`, {
+          cache: "no-store",
+        });
+
+        const text = await res.text().catch(() => "");
+        let json: any = null;
+        try {
+          json = text ? JSON.parse(text) : null;
+        } catch {
+          json = null;
+        }
+
+        if (!res.ok || !json?.ok) {
+          setProgressiviError(json?.error || text || `Errore controllo progressivi (HTTP ${res.status})`);
+          setProgressiviChecked(true);
+          return;
+        }
+
+        const exists = !!json.exists;
+        setProgressiviIsFirst(!exists);
+        setProgressiviChecked(true);
+      } catch (e: any) {
+        setProgressiviError(e?.message || "Errore controllo progressivi");
+        setProgressiviChecked(true);
+      }
+    })();
+  }
+
+  function closeProgressivi() {
+    setProgressiviOpen(false);
+    setProgressiviTarget(null);
+    setProgressiviFile(null);
+    setProgressiviError(null);
+    setProgressiviMsg(null);
+    setProgressiviLoading(false);
+
+    setProgressiviIsFirst(false);
+    setProgressiviChecked(false);
+  }
+
+  async function startProgressiviUpload() {
+    if (!progressiviTarget) return;
+
+    if (!progressiviFile) {
+      setProgressiviError("Carica prima il file progressivi (.xls/.xlsx).");
+      return;
+    }
+
+    // ✅ Se è il primo inserimento, chiedi conferma
+    if (progressiviIsFirst) {
+      const ok = window.confirm(
+        "Questo è il PRIMO caricamento Progressivi per questo PV.\n\n" +
+          "Non ti chiederò dati manuali: userò questo file come BASE.\n" +
+          "Dal prossimo inventario in poi calcolerò venduto periodo e ammanco.\n\n" +
+          "Vuoi procedere?"
+      );
+      if (!ok) return;
+    }
+
+    setProgressiviLoading(true);
+    setProgressiviError(null);
+    setProgressiviMsg(null);
+
     try {
-      const qs = new URLSearchParams();
-      qs.set("pv_id", g.pv_id);
-      qs.set("inventory_date", g.inventory_date);
+      const fd = new FormData();
+      fd.append("file", progressiviFile);
+      fd.append("pv_id", progressiviTarget.pv_id);
+      fd.append("inventory_date", progressiviTarget.inventory_date);
 
-      const res = await fetch(`/api/inventories/progressivi/status?${qs.toString()}`, {
-        cache: "no-store",
+      const res = await fetch("/api/inventories/progressivi/upload", {
+        method: "POST",
+        body: fd,
       });
 
       const text = await res.text().catch(() => "");
@@ -577,85 +667,16 @@ export default function InventoryHistoryClient() {
       }
 
       if (!res.ok || !json?.ok) {
-        setProgressiviError(json?.error || text || `Errore controllo progressivi (HTTP ${res.status})`);
-        setProgressiviChecked(true);
-        return;
+        throw new Error(json?.error || text || `Errore upload (HTTP ${res.status})`);
       }
 
-      const exists = !!json.exists;
-      setProgressiviIsFirst(!exists);
-      setProgressiviChecked(true);
+      setProgressiviMsg(`Progressivi caricati. Righe importate: ${json.rows ?? "?"}`);
     } catch (e: any) {
-      setProgressiviError(e?.message || "Errore controllo progressivi");
-      setProgressiviChecked(true);
+      setProgressiviError(e?.message || "Errore upload progressivi");
+    } finally {
+      setProgressiviLoading(false);
     }
-  })();
-}
-
-function closeProgressivi() {
-  setProgressiviOpen(false);
-  setProgressiviTarget(null);
-  setProgressiviFile(null);
-  setProgressiviError(null);
-  setProgressiviMsg(null);
-  setProgressiviLoading(false);
-
-  setProgressiviIsFirst(false);
-  setProgressiviChecked(false);
-}
-
-async function startProgressiviUpload() {
-  if (!progressiviTarget) return;
-
-  if (!progressiviFile) {
-    setProgressiviError("Carica prima il file progressivi (.xls/.xlsx).");
-    return;
   }
-
-  // ✅ Se è il primo inserimento, chiedi conferma
-  if (progressiviIsFirst) {
-  const ok = window.confirm(
-    "Questo è il PRIMO caricamento Progressivi per questo PV.\n\n" +
-      "Non ti chiederò dati manuali: userò questo file come BASE.\n" +
-      "Dal prossimo inventario in poi calcolerò venduto periodo e ammanco.\n\n" +
-      "Vuoi procedere?"
-  );
-  if (!ok) return;
-}
-  setProgressiviLoading(true);
-  setProgressiviError(null);
-  setProgressiviMsg(null);
-
-  try {
-    const fd = new FormData();
-    fd.append("file", progressiviFile);
-    fd.append("pv_id", progressiviTarget.pv_id);
-    fd.append("inventory_date", progressiviTarget.inventory_date);
-
-    const res = await fetch("/api/inventories/progressivi/upload", {
-      method: "POST",
-      body: fd,
-    });
-
-    const text = await res.text().catch(() => "");
-    let json: any = null;
-    try {
-      json = text ? JSON.parse(text) : null;
-    } catch {
-      json = null;
-    }
-
-    if (!res.ok || !json?.ok) {
-      throw new Error(json?.error || text || `Errore upload (HTTP ${res.status})`);
-    }
-
-    setProgressiviMsg(`Progressivi caricati. Righe importate: ${json.rows ?? "?"}`);
-  } catch (e: any) {
-    setProgressiviError(e?.message || "Errore upload progressivi");
-  } finally {
-    setProgressiviLoading(false);
-  }
-}
 
   const [actionsOpenKey, setActionsOpenKey] = useState<string | null>(null);
   const [menuPos, setMenuPos] = useState<MenuPos | null>(null);
@@ -751,7 +772,9 @@ async function startProgressiviUpload() {
     }
 
     const note = normStr(g.label);
-    const labelLine = `${g.pv_code} — ${g.category_name}${g.subcategory_id ? ` — ${g.subcategory_name}` : ""} — ${formatDateIT(g.inventory_date)}`;
+    const labelLine = `${g.pv_code} — ${g.category_name}${g.subcategory_id ? ` — ${g.subcategory_name}` : ""} — ${formatDateIT(
+      g.inventory_date
+    )}`;
     const noteLine = note ? `\nNota: ${note}` : "";
 
     const ok = window.confirm(`Confermi eliminazione inventario?\n\n${labelLine}${noteLine}\n\nOperazione irreversibile.`);
@@ -763,7 +786,6 @@ async function startProgressiviUpload() {
       // ✅ NUOVO: delete SICURA per header_id
       const params = new URLSearchParams();
       params.set("header_id", headerIdCandidate);
-      await fetch(`/api/inventories/delete?${params.toString()}`, { method: "DELETE" });
 
       const res = await fetch(`/api/inventories/delete?${params.toString()}`, { method: "DELETE" });
       const text = await res.text().catch(() => "");
@@ -816,7 +838,6 @@ async function startProgressiviUpload() {
         setMe(meState);
 
         setDateToISO(todayISO());
-        
 
         await loadCategories();
 
@@ -861,17 +882,26 @@ async function startProgressiviUpload() {
 
   return (
     <div className="space-y-4">
-
       {/* Date (per tutti) */}
       <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
         <div>
           <label className="block text-sm font-medium mb-2">Dal</label>
-          <input type="date" className="w-full rounded-xl border p-3 bg-white" value={dateFromISO} onChange={(e) => setDateFromISO(e.target.value)} />
+          <input
+            type="date"
+            className="w-full rounded-xl border p-3 bg-white"
+            value={dateFromISO}
+            onChange={(e) => setDateFromISO(e.target.value)}
+          />
           <div className="text-xs text-gray-500 mt-1">Formato mostrato: {dateFromISO ? formatDateIT(dateFromISO) : "—"}</div>
         </div>
         <div>
           <label className="block text-sm font-medium mb-2">Al</label>
-          <input type="date" className="w-full rounded-xl border p-3 bg-white" value={dateToISO} onChange={(e) => setDateToISO(e.target.value)} />
+          <input
+            type="date"
+            className="w-full rounded-xl border p-3 bg-white"
+            value={dateToISO}
+            onChange={(e) => setDateToISO(e.target.value)}
+          />
           <div className="text-xs text-gray-500 mt-1">Formato mostrato: {dateToISO ? formatDateIT(dateToISO) : "—"}</div>
         </div>
       </div>
@@ -1034,7 +1064,8 @@ async function startProgressiviUpload() {
               const canReopenBase = me.role === "admin" || me.role === "amministrativo" || me.role === "punto_vendita";
 
               // ✅ admin può sempre riaprire/modificare
-              const canReopenOwner = me.role === "admin" ? true : !g.created_by_username || (me.username && g.created_by_username === me.username);
+              const canReopenOwner =
+                me.role === "admin" ? true : !g.created_by_username || (me.username && g.created_by_username === me.username);
 
               const canReopen = canReopenBase && canReopenOwner;
 
@@ -1056,17 +1087,17 @@ async function startProgressiviUpload() {
                         }
 
                         // ✅ Rapido: se manca rapid_session_id (inventari vecchi), NON blocco.
-// Avviso solo: potrebbe riaprire “vuoto” oppure prendere righe legacy (sessione NULL).
-if (isRapid && !rs) {
-  const ok = window.confirm(
-    "Questo inventario è in modalità Rapido ma non ha rapid_session_id (vecchio inventario).\n" +
-      "Posso comunque provare a riaprirlo, ma gli scansionati potrebbero non combaciare.\n\n" +
-      "Vuoi continuare?"
-  );
-  if (!ok) return;
-}
+                        // Avviso solo: potrebbe riaprire “vuoto” oppure prendere righe legacy (sessione NULL).
+                        if (isRapid && !rs) {
+                          const ok = window.confirm(
+                            "Questo inventario è in modalità Rapido ma non ha rapid_session_id (vecchio inventario).\n" +
+                              "Posso comunque provare a riaprirlo, ma gli scansionati potrebbero non combaciare.\n\n" +
+                              "Vuoi continuare?"
+                          );
+                          if (!ok) return;
+                        }
 
-router.push(buildReopenUrl(g, me.role));
+                        router.push(buildReopenUrl(g, me.role));
                       }}
                       role="menuitem"
                       title={!canReopen ? "Inventario creato da altro utente" : "Riapri l'inventario per modificare"}
@@ -1087,33 +1118,48 @@ router.push(buildReopenUrl(g, me.role));
                     Excel
                   </button>
 
+                  {/* ✅ NUOVO: Report Progressivi (solo admin/amministrativo) */}
                   {canCompare && (
-  <button
-    className="text-left rounded-lg px-3 py-2 hover:bg-gray-50 text-sm"
-    onClick={() => {
-      setActionsOpenKey(null);
-      setMenuPos(null);
-      openCompare(g);
-    }}
-    role="menuitem"
-  >
-    Compara
-  </button>
-)}
+                    <button
+                      className="text-left rounded-lg px-3 py-2 hover:bg-gray-50 text-sm"
+                      onClick={() => {
+                        setActionsOpenKey(null);
+                        setMenuPos(null);
+                        downloadReportProgressivi(g, me);
+                      }}
+                      role="menuitem"
+                    >
+                      Report Progressivi
+                    </button>
+                  )}
 
-{canCompare && (
-  <button
-    className="text-left rounded-lg px-3 py-2 hover:bg-gray-50 text-sm"
-    onClick={() => {
-      setActionsOpenKey(null);
-      setMenuPos(null);
-      openProgressivi(g);
-    }}
-    role="menuitem"
-  >
-    Progressivi
-  </button>
-)}
+                  {canCompare && (
+                    <button
+                      className="text-left rounded-lg px-3 py-2 hover:bg-gray-50 text-sm"
+                      onClick={() => {
+                        setActionsOpenKey(null);
+                        setMenuPos(null);
+                        openCompare(g);
+                      }}
+                      role="menuitem"
+                    >
+                      Compara
+                    </button>
+                  )}
+
+                  {canCompare && (
+                    <button
+                      className="text-left rounded-lg px-3 py-2 hover:bg-gray-50 text-sm"
+                      onClick={() => {
+                        setActionsOpenKey(null);
+                        setMenuPos(null);
+                        openProgressivi(g);
+                      }}
+                      role="menuitem"
+                    >
+                      Progressivi
+                    </button>
+                  )}
 
                   {me.role === "admin" && (
                     <button
@@ -1153,7 +1199,13 @@ router.push(buildReopenUrl(g, me.role));
                     — GR: <b>{detailGrSum}</b>
                   </>
                 ) : null}
-                {detailMlSum > 0 ? <> — Ml: <b>{detailMlSum}</b></> : null} — Valore: <b>{hasAnyPriceInDetail ? formatEUR(detailValueEur) : "—"}</b>
+                {detailMlSum > 0 ? (
+                  <>
+                    {" "}
+                    — Ml: <b>{detailMlSum}</b>
+                  </>
+                ) : null}{" "}
+                — Valore: <b>{hasAnyPriceInDetail ? formatEUR(detailValueEur) : "—"}</b>
               </div>
             </div>
 
@@ -1250,8 +1302,6 @@ router.push(buildReopenUrl(g, me.role));
                 </div>
               </div>
 
-     
-
               <button className="rounded-xl border px-3 py-2 hover:bg-gray-50" onClick={closeCompare}>
                 Chiudi
               </button>
@@ -1281,7 +1331,10 @@ router.push(buildReopenUrl(g, me.role));
                 </button>
 
                 {compareDownloadUrl && (
-                  <button className="rounded-xl border px-4 py-2 hover:bg-gray-50" onClick={() => (window.location.href = compareDownloadUrl)}>
+                  <button
+                    className="rounded-xl border px-4 py-2 hover:bg-gray-50"
+                    onClick={() => (window.location.href = compareDownloadUrl)}
+                  >
                     Scarica risultato
                   </button>
                 )}
@@ -1294,7 +1347,8 @@ router.push(buildReopenUrl(g, me.role));
           </div>
         </div>
       )}
-                     {/* MODAL PROGRESSIVI */}
+
+      {/* MODAL PROGRESSIVI */}
       {progressiviOpen && progressiviTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/40" onClick={closeProgressivi} />
@@ -1304,10 +1358,13 @@ router.push(buildReopenUrl(g, me.role));
               <div>
                 <div className="text-lg font-semibold">Carica Progressivi</div>
                 <div className="text-sm text-gray-600 mt-1">
-                  <b>{progressiviTarget.pv_code} — {progressiviTarget.pv_name}</b> — {formatDateIT(progressiviTarget.inventory_date)}
+                  <b>
+                    {progressiviTarget.pv_code} — {progressiviTarget.pv_name}
+                  </b>{" "}
+                  — {formatDateIT(progressiviTarget.inventory_date)}
                   <div className="text-xs text-gray-500 mt-1">
-  {progressiviChecked ? (progressiviIsFirst ? "Primo inserimento: SÌ" : "Primo inserimento: NO") : "Controllo primo inserimento..."}
-</div>
+                    {progressiviChecked ? (progressiviIsFirst ? "Primo inserimento: SÌ" : "Primo inserimento: NO") : "Controllo primo inserimento..."}
+                  </div>
                 </div>
               </div>
 
@@ -1319,11 +1376,7 @@ router.push(buildReopenUrl(g, me.role));
             <div className="mt-4 space-y-3">
               <div>
                 <label className="block text-sm font-medium mb-2">File progressivi (.xls / .xlsx)</label>
-                <input
-                  type="file"
-                  accept=".xls,.xlsx"
-                  onChange={(e) => setProgressiviFile(e.target.files?.[0] || null)}
-                />
+                <input type="file" accept=".xls,.xlsx" onChange={(e) => setProgressiviFile(e.target.files?.[0] || null)} />
                 {progressiviFile && (
                   <p className="text-xs text-gray-600 mt-2">
                     Selezionato: <b>{progressiviFile.name}</b>
@@ -1344,9 +1397,7 @@ router.push(buildReopenUrl(g, me.role));
                 </button>
               </div>
 
-              <p className="text-xs text-gray-500">
-                Nota: questo carica i progressivi e li associa a PV + data inventario.
-              </p>
+              <p className="text-xs text-gray-500">Nota: questo carica i progressivi e li associa a PV + data inventario.</p>
             </div>
           </div>
         </div>

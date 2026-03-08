@@ -202,11 +202,20 @@ export async function POST(req: Request) {
     });
   }
 
-  // 5) confronto
-  // ✅ Qui: per Tabacchi confronto completo, per gli altri solo inventariati
-  const isTabacchi = categoryName.toLowerCase().includes("tabacc");
+    // 5) confronto
+  // ✅ Per Compara lavoriamo solo su Tabacchi e Gratta e Vinci:
+  // il report deve includere tutti gli articoli presenti nel file allegato,
+  // anche se in inventario hanno quantità 0.
+  const normalizedCategoryName = categoryName.toLowerCase().trim();
+  const isTabacchi = normalizedCategoryName.includes("tabacc");
+  const isGrattaEVinci =
+    normalizedCategoryName.includes("gratta e vinci") ||
+    normalizedCategoryName.includes("gratta&vinci") ||
+    normalizedCategoryName.includes("grattaevinci");
 
-  const compareLines = isTabacchi
+  const isFullCompareCategory = isTabacchi || isGrattaEVinci;
+
+  const compareLines = isFullCompareCategory
     ? buildCompareLines(inventoryLines, gestionaleMap)
     : buildCompareLines(inventoryLines, gestionaleMap, { onlyInventory: true });
 

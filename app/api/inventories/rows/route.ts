@@ -1,257 +1,206 @@
 // app/api/inventories/rows/route.ts
-import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
+import { NextResponse } from "next/server";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-function isUuid(v: string | null) {
+function isUuid(v: string | null | undefined) {
   if (!v) return false;
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v.trim());
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    String(v).trim()
+  );
 }
 
-function isIsoDate(v: string | null) {
+function isIsoDate(v: string | null | undefined) {
   if (!v) return false;
-  return /^\d{4}-\d{2}-\d{2}$/.test(v.trim());
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(v).trim());
 }
 
-const USER_TABLE_CANDIDATES = ["app_user", "app_users", "utenti", "users"];
-
-async function lookupPvIdFromUserTables(username: string): Promise<string | null> {
-  for (const table of USER_TABLE_CANDIDATES) {
-    const { data, error } = await supabaseAdmin.from(table).select("pv_id").eq("username", username).maybeSingle();
-    if (error) continue;
-    const pv_id = (data as any)?.pv_id ?? null;
-    if (pv_id && isUuid(pv_id)) return pv_id;
-    return null;
-  }
-  return null;
+// "" / "null" => null
+function normNullParam(v: any): string | null {
+  const s = String(v ?? "").trim();
+  if (!s) return null;
+  if (s.toLowerCase() === "null") return null;
+  return s;
 }
 
-async function lookupPvIdFromUsernameCode(username: string): Promise<string | null> {
-  const code = (username || "").trim().split(/\s+/)[0]?.toUpperCase();
-  if (!code || code.length > 5) return null;
-
-  const { data, error } = await supabaseAdmin
-    .from("pvs")
-    .select("id")
-    .eq("is_active", true)
-    .eq("code", code)
-    .maybeSingle();
-  if (error) return null;
-  return data?.id ?? null;
+// primo token, uppercase, no spaces
+function normCode(v: any) {
+  const raw = String(v ?? "").trim();
+  if (!raw) return "";
+  const firstToken = raw.split(/\s+/)[0] || "";
+  return firstToken.trim().toUpperCase().replace(/\s+/g, "");
 }
 
-async function requirePvIdForPuntoVendita(username: string): Promise<string> {
-  const pvFromUsers = await lookupPvIdFromUserTables(username);
-  if (pvFromUsers) return pvFromUsers;
-
-  const pvFromCode = await lookupPvIdFromUsernameCode(username);
-  if (pvFromCode) return pvFromCode;
-
-  throw new Error("Utente punto vendita senza PV assegnato (pv_id mancante).");
-}
-
-// ✅ robusto: supporta stringhe e virgole ("3,0")
 function clampInt(n: any) {
-  let x: number;
-  if (typeof n === "string") x = Number(n.trim().replace(",", "."));
-  else x = Number(n);
+  const x = Number(n);
   if (!Number.isFinite(x)) return 0;
   return Math.max(0, Math.trunc(x));
 }
 
+// ✅ GR: niente limite “9999” (resto nel range int32 per sicurezza)
+const MAX_GR = 1_000_000_000; // 1 miliardo di grammi = 1.000.000 kg
+function clampGr(n: any) {
+  return Math.min(MAX_GR, clampInt(n));
+}
+
 export async function GET(req: Request) {
-  const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
+  try {
+    const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
 
-  if (!session || !["admin", "amministrativo", "punto_vendita"].includes(session.role)) {
-    return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
-  }
+    if (!session || !["admin", "amministrativo", "punto_vendita"].includes(session.role)) {
+      return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
+    }
 
-  const url = new URL(req.url);
+    const url = new URL(req.url);
 
-  const pv_id_qs = (url.searchParams.get("pv_id") || "").trim();
+    const pv_id = String(url.searchParams.get("pv_id") ?? "").trim();
+    const inventory_date = String(url.searchParams.get("inventory_date") ?? "").trim();
 
-  // ⚠️ Alcuni client passano category_id= (vuoto) per Rapido.
-  // Altri passano category_id=null.
-  // Qui li trattiamo entrambi come NULL.
-  const category_raw = (url.searchParams.get("category_id") ?? "").trim();
-  const subcategory_raw = (url.searchParams.get("subcategory_id") ?? "").trim();
-  const rapid_session_raw = (url.searchParams.get("rapid_session_id") ?? "").trim();
+    // category_id per /rows:
+    // - "null" / "" => Rapido (NULL)
+    // - UUID => Standard
+    const categoryParamPresent = url.searchParams.has("category_id");
+    const categoryRaw = String(url.searchParams.get("category_id") ?? "").trim();
+    const categoryLower = categoryRaw.toLowerCase();
 
-  const category_param_present = url.searchParams.has("category_id");
-  const subcategory_param_present = url.searchParams.has("subcategory_id");
+    const category_id = !categoryParamPresent
+      ? null
+      : categoryRaw === "" || categoryLower === "null"
+      ? null
+      : categoryRaw;
 
-  const category_is_explicit_null = category_param_present && category_raw.toLowerCase() === "null";
-  const category_is_empty = category_param_present && category_raw === "";
+    const subcategory_id = normNullParam(url.searchParams.get("subcategory_id"));
+    const rapid_session_id = normNullParam(url.searchParams.get("rapid_session_id"));
 
-  // ✅ Rapido quando category_id è "null" OR quando è vuoto ma presente.
-  const isRapidRequest = category_is_explicit_null || category_is_empty;
-
-  const subcategory_is_explicit_null = subcategory_param_present && subcategory_raw.toLowerCase() === "null";
-
-  const hasCategory = category_param_present && category_raw !== "" && !category_is_explicit_null && !category_is_empty;
-  const hasSubcategory = subcategory_param_present && subcategory_raw !== "" && !subcategory_is_explicit_null;
-
-  const category_id: string | null = isRapidRequest ? null : category_raw;
-  const subcategory_id: string | null = subcategory_raw === "" || subcategory_is_explicit_null ? null : subcategory_raw;
-
-  // ✅ risolvo rapid_session_id:
-  // - preferisco rapid_session_id (solo se UUID)
-  // - compat: se non c'è, e siamo in rapido, uso subcategory_id come sessione (solo se UUID)
-  // - se NON è UUID => lo tratto come assente (legacy), NON 400
-  const rapid_session_id: string | null =
-    (rapid_session_raw && isUuid(rapid_session_raw) ? rapid_session_raw : null) ||
-    (isRapidRequest && subcategory_id && isUuid(subcategory_id) ? subcategory_id : null);
-
-  const inventory_date = (url.searchParams.get("inventory_date") || "").trim(); // YYYY-MM-DD
-
-  if (hasCategory && category_id !== null && !isUuid(category_id)) {
-    return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
-  }
-
-  // ✅ In rapido subcategory_id NON è una subcategory: nel DB è NULL.
-  // ✅ Legacy: se manca rapid_session_id NON blocco il dettaglio.
-  if (!isRapidRequest) {
-    if (hasSubcategory && subcategory_id !== null && !isUuid(subcategory_id)) {
+    if (!isUuid(pv_id)) return NextResponse.json({ ok: false, error: "pv_id non valido" }, { status: 400 });
+    if (!isIsoDate(inventory_date)) {
+      return NextResponse.json({ ok: false, error: "inventory_date non valida (YYYY-MM-DD)" }, { status: 400 });
+    }
+    if (category_id !== null && !isUuid(category_id)) {
+      return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
+    }
+    if (subcategory_id !== null && !isUuid(subcategory_id)) {
       return NextResponse.json({ ok: false, error: "subcategory_id non valido" }, { status: 400 });
     }
-  }
-
-  if (!isIsoDate(inventory_date)) {
-    return NextResponse.json({ ok: false, error: "inventory_date non valida (YYYY-MM-DD)" }, { status: 400 });
-  }
-
-  // PV enforcement
-  let effectivePvId = pv_id_qs;
-
-  if (session.role === "punto_vendita") {
-    try {
-      effectivePvId = await requirePvIdForPuntoVendita(session.username);
-    } catch (e: any) {
-      return NextResponse.json({ ok: false, error: e?.message || "Non autorizzato" }, { status: 401 });
+    if (rapid_session_id !== null && !isUuid(rapid_session_id)) {
+      return NextResponse.json({ ok: false, error: "rapid_session_id non valido" }, { status: 400 });
     }
-  } else {
-    if (!isUuid(effectivePvId)) {
-      return NextResponse.json({ ok: false, error: "pv_id non valido" }, { status: 400 });
-    }
-  }
 
-  try {
+    const isRapidRequest = category_id === null;
+
+    // ✅ Query base
     let q = supabaseAdmin
       .from("inventories")
       .select(
-        "id, item_id, qty, qty_ml, qty_gr, created_by_username, items:items(code, description, prezzo_vendita_eur, volume_ml_per_unit, peso_kg, um)"
+        `
+        id,
+        pv_id,
+        category_id,
+        subcategory_id,
+        rapid_session_id,
+        inventory_date,
+        item_id,
+        qty,
+        qty_gr,
+        qty_ml,
+        items:items!left(
+          code,
+          description,
+          volume_ml_per_unit,
+          prezzo_vendita_eur
+        )
+      `,
+        { count: "exact" }
       )
-      .eq("pv_id", effectivePvId)
+      .eq("pv_id", pv_id)
       .eq("inventory_date", inventory_date);
 
-    // ✅ categoria:
-    // - Rapido => category_id IS NULL
-    // - Standard: UUID => EQ
     if (isRapidRequest) {
+      // ✅ Rapido: filtro SOLO su category_id NULL e sessione
+      // ❌ NON filtrare subcategory_id: i dati storici possono averla sporca e altrimenti perdi righe.
       q = q.is("category_id", null);
-    } else {
-      if (hasCategory) q = q.eq("category_id", category_id);
-    }
-
-    // ✅ subcategory:
-    // - RAPIDO: subcategory_id deve essere NULL
-    //   se ho rapid_session_id filtro per quella,
-    //   altrimenti (legacy) filtro rapid_session_id IS NULL
-    // - STANDARD: filtro classico
-    if (isRapidRequest) {
-      q = q.is("subcategory_id", null);
 
       if (rapid_session_id) {
-        q = q.eq("rapid_session_id", rapid_session_id);
-      } else {
-        // ✅ fallback legacy
-        q = q.is("rapid_session_id", null);
-      }
+  // ✅ Legacy fix: alcuni inventari vecchi hanno righe con rapid_session_id NULL
+  // In riapertura vogliamo vedere TUTTE le righe dell’inventario (sessione + null)
+  q = q.or(`rapid_session_id.eq.${rapid_session_id},rapid_session_id.is.null`);
+} else {
+  q = q.is("rapid_session_id", null);
+}
     } else {
-      if (subcategory_is_explicit_null) q = q.is("subcategory_id", null);
-      else if (hasSubcategory) q = q.eq("subcategory_id", subcategory_id);
+      // Standard
+      q = q.eq("category_id", category_id);
 
-      // standard: mai sessione
+      if (subcategory_id) q = q.eq("subcategory_id", subcategory_id);
+      else q = q.is("subcategory_id", null);
+
+      // Standard: rapid_session_id deve essere NULL
       q = q.is("rapid_session_id", null);
     }
 
-    const { data, error } = await q;
+    const { data, error, count } = await q;
 
     if (error) {
-      console.error("[inventories/rows] supabase error:", error);
+      console.error("[inventories/rows] error:", error);
       return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
     }
 
-    const rows = (data || []) as any[];
+    const rows = Array.isArray(data) ? (data as any[]) : [];
 
-    const out = rows
-      .map((r: any) => {
-        const qty = clampInt(r?.qty ?? 0);
-        const qty_ml = clampInt(r?.qty_ml ?? 0);
-        const qty_gr = clampInt(r?.qty_gr ?? 0);
+    const out = rows.map((r) => {
+      const it = (r?.items ?? null) as any | null;
 
-        const volume = Number(String(r?.items?.volume_ml_per_unit ?? "0").replace(",", "."));
-        const volume_ml_per_unit = Number.isFinite(volume) && volume > 0 ? Math.trunc(volume) : null;
+      const codeFromItem = normCode(it?.code ?? "");
+      const fallbackCode = r?.item_id ? `NO_CODE_${String(r.item_id).slice(0, 8)}` : "NO_CODE";
+      const code = codeFromItem || fallbackCode;
 
-        const um = String(r?.items?.um ?? "").toLowerCase();
-        const peso_kg = Number(String(r?.items?.peso_kg ?? "0").replace(",", "."));
-        const peso_kg_norm = Number.isFinite(peso_kg) && peso_kg > 0 ? peso_kg : null;
+      const description = String(it?.description ?? "").trim() || "(descrizione mancante)";
 
-        const ml_mode: "mixed" | "fixed" | null =
-          volume_ml_per_unit && volume_ml_per_unit > 0 ? (qty === 0 && qty_ml > 0 ? "mixed" : "fixed") : null;
+      return {
+        id: String(r?.id ?? ""),
+        item_id: String(r?.item_id ?? ""),
+        code,
+        description,
+        qty: clampInt(r?.qty ?? 0),
+        qty_gr: clampGr(r?.qty_gr ?? 0),
+        qty_ml: clampInt(r?.qty_ml ?? 0),
+        volume_ml_per_unit: it?.volume_ml_per_unit ?? null,
+        prezzo_vendita_eur: it?.prezzo_vendita_eur ?? null,
+        _missing_code: !codeFromItem,
+        _missing_item: !it,
+        // ✅ utile: ti fa vedere se quelle 5 righe “misteriose” hanno subcategory valorizzata
+        _subcategory_id: r?.subcategory_id ?? null,
+      };
+    });
 
-        let ml_open: number | null = null;
-        if (ml_mode === "fixed" && volume_ml_per_unit && volume_ml_per_unit > 0) {
-          const calc = qty_ml - qty * volume_ml_per_unit;
-          ml_open = Math.max(0, Math.trunc(calc));
-        }
-
-        return {
-          id: r.id,
-          item_id: r.item_id,
-          code: r?.items?.code ?? "",
-          description: r?.items?.description ?? "",
-          qty,
-          qty_gr,
-          qty_ml,
-          volume_ml_per_unit,
-          ml_open,
-          ml_mode,
-          prezzo_vendita_eur: r?.items?.prezzo_vendita_eur ?? null,
-          um,
-          peso_kg: peso_kg_norm,
-        };
-      })
-      .sort((a, b) => (a.code || "").localeCompare(b.code || ""));
-
-    // ✅ header (operatore / label) coerente con le stesse regole
+    // header (operatore/label) best-effort
     let operatore_header: string | null = null;
     let label_header: string | null = null;
 
     try {
       let hq = supabaseAdmin
         .from("inventories_headers")
-        .select("operatore, label")
-        .eq("pv_id", effectivePvId)
+        .select("operatore,label")
+        .eq("pv_id", pv_id)
         .eq("inventory_date", inventory_date);
 
       if (isRapidRequest) {
-        hq = hq.is("category_id", null).is("subcategory_id", null);
+  hq = hq.is("category_id", null);
 
-        if (rapid_session_id) {
-          hq = hq.eq("rapid_session_id", rapid_session_id);
-        } else {
-          // ✅ legacy
-          hq = hq.is("rapid_session_id", null);
-        }
-      } else {
-        if (hasCategory) hq = hq.eq("category_id", category_id);
-        if (subcategory_is_explicit_null) hq = hq.is("subcategory_id", null);
-        else if (hasSubcategory) hq = hq.eq("subcategory_id", subcategory_id);
-
+  if (rapid_session_id) {
+    hq = hq.or(`rapid_session_id.eq.${rapid_session_id},rapid_session_id.is.null`);
+  } else {
+    hq = hq.is("rapid_session_id", null);
+  }
+} else {
+        hq = hq.eq("category_id", category_id);
+        if (subcategory_id) hq = hq.eq("subcategory_id", subcategory_id);
+        else hq = hq.is("subcategory_id", null);
         hq = hq.is("rapid_session_id", null);
       }
 
@@ -259,10 +208,17 @@ export async function GET(req: Request) {
       operatore_header = (hdata as any)?.operatore ?? null;
       label_header = (hdata as any)?.label ?? null;
     } catch {
-      // ignore (best-effort)
+      // ignore
     }
 
-    return NextResponse.json({ ok: true, rows: out, operatore: operatore_header, label: label_header });
+    return NextResponse.json({
+      ok: true,
+      rows: out,
+      operatore: operatore_header,
+      label: label_header,
+      // ✅ debug count: se qui torna 64 abbiamo chiuso la storia
+      db_count: count ?? null,
+    });
   } catch (e: any) {
     console.error("[inventories/rows] UNHANDLED ERROR:", e);
     return NextResponse.json({ ok: false, error: e?.message || "TypeError: fetch failed" }, { status: 500 });

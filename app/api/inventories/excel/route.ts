@@ -4,12 +4,22 @@ import { NextResponse } from "next/server";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { buildInventoryXlsx } from "@/lib/excel/inventory";
+import {
+  getCategoryItemsUniverse,
+  type CategoryUniverseItem,
+} from "@/lib/shared/getCategoryItemsUniverse";
+import {
+  resolveLogicalCategory,
+  type LogicalCategory,
+} from "@/lib/shared/resolveLogicalCategory";
 
 export const runtime = "nodejs";
 
 function isUuid(v: string | null) {
   if (!v) return false;
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v.trim());
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    v.trim()
+  );
 }
 
 function isIsoDate(v: string | null) {
@@ -17,7 +27,7 @@ function isIsoDate(v: string | null) {
   return /^\d{4}-\d{2}-\d{2}$/.test(v.trim());
 }
 
-// ✅ interpreta "" / "null" come NULL (Rapido: categoria = Nessuna/Tutte)
+// interpreta "" / "null" come NULL (Rapido: categoria = Nessuna/Tutte)
 function normNullParam(v: string | null): string | null {
   const s = (v || "").trim();
   if (!s) return null;
@@ -39,8 +49,14 @@ const USER_TABLE_CANDIDATES = ["app_user", "app_users", "utenti", "users"];
 
 async function lookupPvIdFromUserTables(username: string): Promise<string | null> {
   for (const table of USER_TABLE_CANDIDATES) {
-    const { data, error } = await supabaseAdmin.from(table).select("pv_id").eq("username", username).maybeSingle();
+    const { data, error } = await supabaseAdmin
+      .from(table)
+      .select("pv_id")
+      .eq("username", username)
+      .maybeSingle();
+
     if (error) continue;
+
     const pv_id = (data as any)?.pv_id ?? null;
     if (pv_id && isUuid(pv_id)) return pv_id;
     return null;
@@ -73,6 +89,38 @@ async function requirePvIdForPuntoVendita(username: string): Promise<string> {
   throw new Error("Utente punto vendita senza PV assegnato (pv_id mancante).");
 }
 
+async function loadCategories(): Promise<LogicalCategory[]> {
+  const { data, error } = await supabaseAdmin
+    .from("categories")
+    .select("id, name, slug, is_active")
+    .order("name", { ascending: true });
+
+  if (error) throw error;
+  return (data ?? []) as LogicalCategory[];
+}
+
+async function loadAllItems(): Promise<CategoryUniverseItem[]> {
+  const { data, error } = await supabaseAdmin
+    .from("items")
+    .select(`
+      id,
+      code,
+      description,
+      barcode,
+      prezzo_vendita_eur,
+      is_active,
+      um,
+      peso_kg,
+      volume_ml_per_unit,
+      category_id,
+      subcategory_id
+    `)
+    .order("code", { ascending: true });
+
+  if (error) throw error;
+  return (data ?? []) as CategoryUniverseItem[];
+}
+
 export async function GET(req: Request) {
   const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
   if (!session || !["admin", "amministrativo", "punto_vendita"].includes(session.role)) {
@@ -81,16 +129,18 @@ export async function GET(req: Request) {
 
   const url = new URL(req.url);
 
-  // ✅ NUOVO: se arriva header_id, esporta QUEL singolo inventario (anche se stessa data/PV)
+  // se arriva header_id, esporta QUEL singolo inventario
   const header_id = (url.searchParams.get("header_id") || "").trim();
 
-  // PV enforcement
   let pvFromSession: string | null = null;
   if (session.role === "punto_vendita") {
     try {
       pvFromSession = await requirePvIdForPuntoVendita(session.username);
     } catch (e: any) {
-      return NextResponse.json({ ok: false, error: e?.message || "Non autorizzato" }, { status: 401 });
+      return NextResponse.json(
+        { ok: false, error: e?.message || "Non autorizzato" },
+        { status: 401 }
+      );
     }
   }
 
@@ -104,25 +154,37 @@ export async function GET(req: Request) {
 
     const { data: h, error: hErr } = await supabaseAdmin
       .from("inventories_headers")
-      .select("id, pv_id, category_id, subcategory_id, inventory_date, operatore, label, rapid_session_id, created_by_username")
+      .select(
+        "id, pv_id, category_id, subcategory_id, inventory_date, operatore, label, rapid_session_id, created_by_username"
+      )
       .eq("id", header_id)
       .maybeSingle();
 
     if (hErr) return NextResponse.json({ ok: false, error: hErr.message }, { status: 500 });
-    if (!h) return NextResponse.json({ ok: false, error: "Inventario non trovato (header)" }, { status: 404 });
+    if (!h) {
+      return NextResponse.json(
+        { ok: false, error: "Inventario non trovato (header)" },
+        { status: 404 }
+      );
+    }
 
     const pv_id = String((h as any).pv_id || "").trim();
-    const category_id: string | null = (h as any).category_id ? String((h as any).category_id) : null;
-    const subcategory_id: string | null = (h as any).subcategory_id ? String((h as any).subcategory_id) : null;
+    const category_id: string | null = (h as any).category_id
+      ? String((h as any).category_id)
+      : null;
+    const subcategory_id: string | null = (h as any).subcategory_id
+      ? String((h as any).subcategory_id)
+      : null;
     const inventory_date = String((h as any).inventory_date || "").trim();
-    const rapid_session_id: string | null = (h as any).rapid_session_id ? String((h as any).rapid_session_id) : null;
+    const rapid_session_id: string | null = (h as any).rapid_session_id
+      ? String((h as any).rapid_session_id)
+      : null;
 
-    // sicurezza PV user
     if (session.role === "punto_vendita") {
       if (!pvFromSession || pvFromSession !== pv_id) {
         return NextResponse.json({ ok: false, error: "Non autorizzato." }, { status: 401 });
       }
-      // opzionale ma consigliato: un PV user esporta solo ciò che ha creato lui
+
       const createdBy = String((h as any).created_by_username || "").trim();
       if (createdBy && createdBy !== session.username) {
         return NextResponse.json({ ok: false, error: "Non autorizzato." }, { status: 401 });
@@ -133,36 +195,77 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
     }
     if (subcategory_id && !isUuid(subcategory_id)) {
-      return NextResponse.json({ ok: false, error: "subcategory_id non valido" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "subcategory_id non valido" },
+        { status: 400 }
+      );
     }
     if (!isIsoDate(inventory_date)) {
-      return NextResponse.json({ ok: false, error: "inventory_date non valida (YYYY-MM-DD)" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "inventory_date non valida (YYYY-MM-DD)" },
+        { status: 400 }
+      );
     }
 
-    // meta: PV label
-    const pvRes = await supabaseAdmin.from("pvs").select("id, code, name").eq("id", pv_id).maybeSingle();
-    if (pvRes.error) return NextResponse.json({ ok: false, error: pvRes.error.message }, { status: 500 });
-    const pvLabel = pvRes.data ? `${(pvRes.data as any).code} — ${(pvRes.data as any).name}` : pv_id;
+    const pvRes = await supabaseAdmin
+      .from("pvs")
+      .select("id, code, name")
+      .eq("id", pv_id)
+      .maybeSingle();
 
-    // Categoria / sottocategoria label
+    if (pvRes.error) {
+      return NextResponse.json({ ok: false, error: pvRes.error.message }, { status: 500 });
+    }
+
+    const pvLabel = pvRes.data
+      ? `${(pvRes.data as any).code} — ${(pvRes.data as any).name}`
+      : pv_id;
+
     let categoryName = "Tutte";
     if (category_id) {
-      const catRes = await supabaseAdmin.from("categories").select("id, name").eq("id", category_id).maybeSingle();
-      if (catRes.error) return NextResponse.json({ ok: false, error: catRes.error.message }, { status: 500 });
+      const catRes = await supabaseAdmin
+        .from("categories")
+        .select("id, name")
+        .eq("id", category_id)
+        .maybeSingle();
+
+      if (catRes.error) {
+        return NextResponse.json({ ok: false, error: catRes.error.message }, { status: 500 });
+      }
+
       categoryName = (catRes.data as any)?.name ?? "";
     }
 
     let subcategoryName = "—";
     if (subcategory_id) {
-      const subRes = await supabaseAdmin.from("subcategories").select("id, name").eq("id", subcategory_id).maybeSingle();
-      if (subRes.error) return NextResponse.json({ ok: false, error: subRes.error.message }, { status: 500 });
+      const subRes = await supabaseAdmin
+        .from("subcategories")
+        .select("id, name")
+        .eq("id", subcategory_id)
+        .maybeSingle();
+
+      if (subRes.error) {
+        return NextResponse.json({ ok: false, error: subRes.error.message }, { status: 500 });
+      }
+
       subcategoryName = (subRes.data as any)?.name ?? "";
     }
 
     const operatore = String((h as any).operatore || "").trim() || "—";
     const label = String((h as any).label || "").trim() || "";
 
-    // righe: filtro ESATTO con rapid_session_id (quando presente)
+    const categories = await loadCategories();
+
+    const logicalCategory = resolveLogicalCategory({
+      categoryId: category_id,
+      label,
+      categories,
+    });
+
+    if (!category_id && logicalCategory.resolvedCategoryName) {
+      categoryName = logicalCategory.resolvedCategoryName;
+    }
+
     let q = supabaseAdmin
       .from("inventories")
       .select("item_id, qty, qty_gr, qty_ml, created_by_username")
@@ -175,7 +278,6 @@ export async function GET(req: Request) {
     if (subcategory_id) q = q.eq("subcategory_id", subcategory_id);
     else q = q.is("subcategory_id", null);
 
-    // ✅ chiave vera del “singolo inventario” in Rapido
     if (rapid_session_id) q = q.eq("rapid_session_id", rapid_session_id);
     else q = q.is("rapid_session_id", null);
 
@@ -184,48 +286,92 @@ export async function GET(req: Request) {
 
     const inv = (invRows || []) as any[];
 
-    // items map
-    const itemIds = Array.from(
-      new Set(
-        inv
-          .map((r) => String(r?.item_id ?? "").trim())
-          .filter((id) => isUuid(id))
-      )
-    );
+    const invByItemId = new Map<
+      string,
+      {
+        qty: number;
+        qty_gr: number;
+        qty_ml: number;
+      }
+    >();
 
-    const itemsMap = new Map<string, { code: string; description: string; category_id: string | null; subcategory_id: string | null }>();
+    for (const r of inv) {
+      const itemId = String(r?.item_id ?? "").trim();
+      if (!isUuid(itemId)) continue;
 
-    if (itemIds.length > 0) {
-      const { data: items, error: itemsErr } = await supabaseAdmin
-        .from("items")
-        .select("id, code, description, category_id, subcategory_id")
-        .in("id", itemIds);
+      invByItemId.set(itemId, {
+        qty: Number.isFinite(Number(r?.qty)) ? Number(r?.qty) : 0,
+        qty_gr: Number.isFinite(Number(r?.qty_gr)) ? Number(r?.qty_gr) : 0,
+        qty_ml: Number.isFinite(Number(r?.qty_ml)) ? Number(r?.qty_ml) : 0,
+      });
+    }
 
-      if (itemsErr) return NextResponse.json({ ok: false, error: itemsErr.message }, { status: 500 });
+    let exportItems: CategoryUniverseItem[] = [];
 
-      for (const it of (items || []) as any[]) {
-        const id = String(it?.id ?? "").trim();
-        if (!isUuid(id)) continue;
+    if (logicalCategory.resolvedCategoryId) {
+      const allItems = await loadAllItems();
 
-        itemsMap.set(id, {
-          code: String(it?.code ?? ""),
-          description: String(it?.description ?? ""),
-          category_id: it?.category_id ? String(it.category_id) : null,
-          subcategory_id: it?.subcategory_id ? String(it.subcategory_id) : null,
-        });
+      exportItems = getCategoryItemsUniverse({
+        items: allItems,
+        resolvedCategoryId: logicalCategory.resolvedCategoryId,
+      });
+    } else {
+      const itemIds = Array.from(invByItemId.keys());
+
+      if (itemIds.length > 0) {
+        const { data: items, error: itemsErr } = await supabaseAdmin
+          .from("items")
+          .select(`
+            id,
+            code,
+            description,
+            barcode,
+            prezzo_vendita_eur,
+            is_active,
+            um,
+            peso_kg,
+            volume_ml_per_unit,
+            category_id,
+            subcategory_id
+          `)
+          .in("id", itemIds);
+
+        if (itemsErr) {
+          return NextResponse.json({ ok: false, error: itemsErr.message }, { status: 500 });
+        }
+
+        exportItems = (items ?? []) as CategoryUniverseItem[];
       }
     }
 
-    // nomi categoria/sottocategoria per raggruppamento fogli
-    const catIds = Array.from(new Set(Array.from(itemsMap.values()).map((x) => x.category_id).filter((x): x is string => !!x && isUuid(x))));
-    const subIds = Array.from(new Set(Array.from(itemsMap.values()).map((x) => x.subcategory_id).filter((x): x is string => !!x && isUuid(x))));
+    const catIds = Array.from(
+      new Set(
+        exportItems
+          .map((x) => x.category_id)
+          .filter((x): x is string => !!x && isUuid(x))
+      )
+    );
+    const subIds = Array.from(
+      new Set(
+        exportItems
+          .map((x) => x.subcategory_id)
+          .filter((x): x is string => !!x && isUuid(x))
+      )
+    );
 
     const catNameById = new Map<string, string>();
     const subNameById = new Map<string, string>();
 
     if (catIds.length > 0) {
-      const { data: cats, error: catsErr } = await supabaseAdmin.from("categories").select("id, name").in("id", catIds);
-      if (catsErr) return NextResponse.json({ ok: false, error: catsErr.message }, { status: 500 });
+      const { data: cats, error: catsErr } = await supabaseAdmin
+        .from("categories")
+        .select("id, name")
+        .in("id", catIds);
+
+      if (catsErr) {
+        return NextResponse.json({ ok: false, error: catsErr.message }, { status: 500 });
+      }
+
       for (const c of (cats || []) as any[]) {
         const id = String(c?.id ?? "").trim();
         if (!isUuid(id)) continue;
@@ -234,8 +380,15 @@ export async function GET(req: Request) {
     }
 
     if (subIds.length > 0) {
-      const { data: subs, error: subsErr } = await supabaseAdmin.from("subcategories").select("id, name").in("id", subIds);
-      if (subsErr) return NextResponse.json({ ok: false, error: subsErr.message }, { status: 500 });
+      const { data: subs, error: subsErr } = await supabaseAdmin
+        .from("subcategories")
+        .select("id, name")
+        .in("id", subIds);
+
+      if (subsErr) {
+        return NextResponse.json({ ok: false, error: subsErr.message }, { status: 500 });
+      }
+
       for (const s of (subs || []) as any[]) {
         const id = String(s?.id ?? "").trim();
         if (!isUuid(id)) continue;
@@ -243,24 +396,23 @@ export async function GET(req: Request) {
       }
     }
 
-    const lines = inv
-      .map((r: any) => {
-        const itemId = String(r?.item_id ?? "").trim();
-        const it = itemsMap.get(itemId);
+    const lines = exportItems
+      .map((it) => {
+        const invRow = invByItemId.get(String(it.id).trim());
 
-        const pz = Number(r?.qty ?? 0);
-        const gr = Number(r?.qty_gr ?? 0);
-        const ml = Number(r?.qty_ml ?? 0);
+        const pz = invRow?.qty ?? 0;
+        const gr = invRow?.qty_gr ?? 0;
+        const ml = invRow?.qty_ml ?? 0;
 
-        const cid = it?.category_id ?? null;
-        const sid = it?.subcategory_id ?? null;
+        const cid = it.category_id ?? null;
+        const sid = it.subcategory_id ?? null;
 
-        const cname = cid ? (catNameById.get(cid) || "") : "";
-        const sname = sid ? (subNameById.get(sid) || "") : "";
+        const cname = cid ? catNameById.get(cid) || "" : "";
+        const sname = sid ? subNameById.get(sid) || "" : "";
 
         return {
-          code: it?.code ?? "",
-          description: it?.description ?? "",
+          code: String(it.code ?? ""),
+          description: String(it.description ?? ""),
           qty: Number.isFinite(pz) ? pz : 0,
           qty_gr: Number.isFinite(gr) ? gr : 0,
           qty_ml: Number.isFinite(ml) ? ml : 0,
@@ -268,20 +420,15 @@ export async function GET(req: Request) {
           subcategory_name: sname || null,
         };
       })
-      .filter((x: any) => {
-        const pz = Number(x.qty || 0);
-        const gr = Number(x.qty_gr || 0);
-        const ml = Number(x.qty_ml || 0);
-        return (Number.isFinite(pz) && pz > 0) || (Number.isFinite(gr) && gr > 0) || (Number.isFinite(ml) && ml > 0);
+      .sort((a, b) => {
+        const da = String(a.description ?? "").trim();
+        const db = String(b.description ?? "").trim();
+        const cmp = da.localeCompare(db, "it", { sensitivity: "base" });
+        if (cmp !== 0) return cmp;
+        return String(a.code ?? "").localeCompare(String(b.code ?? ""), "it", {
+          sensitivity: "base",
+        });
       });
-
-    lines.sort((a: any, b: any) => {
-      const da = String(a.description ?? "").trim();
-      const db = String(b.description ?? "").trim();
-      const cmp = da.localeCompare(db, "it", { sensitivity: "base" });
-      if (cmp !== 0) return cmp;
-      return String(a.code ?? "").localeCompare(String(b.code ?? ""), "it", { sensitivity: "base" });
-    });
 
     const xlsx = await buildInventoryXlsx(
       { inventoryDate: inventory_date, operatore, pvLabel, categoryName, subcategoryName },
@@ -295,7 +442,8 @@ export async function GET(req: Request) {
     return new NextResponse(new Uint8Array(xlsx), {
       status: 200,
       headers: {
-        "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "content-type":
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "content-disposition": `attachment; filename="${filename}"`,
         "cache-control": "no-store",
       },
@@ -319,42 +467,64 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
   }
   if (subcategory_id && !isUuid(subcategory_id)) {
-    return NextResponse.json({ ok: false, error: "subcategory_id non valido" }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: "subcategory_id non valido" },
+      { status: 400 }
+    );
   }
   if (!isIsoDate(inventory_date)) {
-    return NextResponse.json({ ok: false, error: "inventory_date non valida (YYYY-MM-DD)" }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: "inventory_date non valida (YYYY-MM-DD)" },
+      { status: 400 }
+    );
   }
 
   let effectivePvId = pv_id_qs;
 
   if (session.role === "punto_vendita") {
-    // PV user: forzo sempre il suo PV
     effectivePvId = pvFromSession || "";
   } else {
-    if (!isUuid(effectivePvId)) return NextResponse.json({ ok: false, error: "pv_id non valido" }, { status: 400 });
+    if (!isUuid(effectivePvId)) {
+      return NextResponse.json({ ok: false, error: "pv_id non valido" }, { status: 400 });
+    }
   }
 
-  // meta: PV + category + subcategory names
-  const pvRes = await supabaseAdmin.from("pvs").select("id, code, name").eq("id", effectivePvId).maybeSingle();
+  const pvRes = await supabaseAdmin
+    .from("pvs")
+    .select("id, code, name")
+    .eq("id", effectivePvId)
+    .maybeSingle();
+
   if (pvRes.error) return NextResponse.json({ ok: false, error: pvRes.error.message }, { status: 500 });
 
-  const pvLabel = pvRes.data ? `${(pvRes.data as any).code} — ${(pvRes.data as any).name}` : effectivePvId;
+  const pvLabel = pvRes.data
+    ? `${(pvRes.data as any).code} — ${(pvRes.data as any).name}`
+    : effectivePvId;
 
   let categoryName = "Tutte";
   if (category_id) {
-    const catRes = await supabaseAdmin.from("categories").select("id, name").eq("id", category_id).maybeSingle();
+    const catRes = await supabaseAdmin
+      .from("categories")
+      .select("id, name")
+      .eq("id", category_id)
+      .maybeSingle();
+
     if (catRes.error) return NextResponse.json({ ok: false, error: catRes.error.message }, { status: 500 });
     categoryName = (catRes.data as any)?.name ?? "";
   }
 
   let subcategoryName = "—";
   if (subcategory_id) {
-    const subRes = await supabaseAdmin.from("subcategories").select("id, name").eq("id", subcategory_id).maybeSingle();
+    const subRes = await supabaseAdmin
+      .from("subcategories")
+      .select("id, name")
+      .eq("id", subcategory_id)
+      .maybeSingle();
+
     if (subRes.error) return NextResponse.json({ ok: false, error: subRes.error.message }, { status: 500 });
     subcategoryName = (subRes.data as any)?.name ?? "";
   }
 
-  // operatore dalla testata (prendo l’ultimo header per id)
   let hq = supabaseAdmin
     .from("inventories_headers")
     .select("id, operatore")
@@ -367,12 +537,15 @@ export async function GET(req: Request) {
   if (subcategory_id) hq = hq.eq("subcategory_id", subcategory_id);
   else hq = hq.is("subcategory_id", null);
 
-  const { data: header, error: headerErr } = await hq.order("id", { ascending: false }).limit(1).maybeSingle();
+  const { data: header, error: headerErr } = await hq
+    .order("id", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
   if (headerErr) return NextResponse.json({ ok: false, error: headerErr.message }, { status: 500 });
 
   const operatore = ((header as any)?.operatore || "").toString().trim() || "—";
 
-  // righe inventario (ATTENZIONE: questo path vecchio può includere più inventari rapidi dello stesso giorno)
   let q = supabaseAdmin
     .from("inventories")
     .select("item_id, qty, qty_gr, qty_ml, created_by_username")
@@ -394,9 +567,18 @@ export async function GET(req: Request) {
 
   const inv = (invRows || []) as any[];
 
-  const itemIds = Array.from(new Set(inv.map((r) => String(r?.item_id ?? "").trim()).filter((id) => isUuid(id))));
+  const itemIds = Array.from(
+    new Set(
+      inv
+        .map((r) => String(r?.item_id ?? "").trim())
+        .filter((id) => isUuid(id))
+    )
+  );
 
-  const itemsMap = new Map<string, { code: string; description: string; category_id: string | null; subcategory_id: string | null }>();
+  const itemsMap = new Map<
+    string,
+    { code: string; description: string; category_id: string | null; subcategory_id: string | null }
+  >();
 
   if (itemIds.length > 0) {
     const { data: items, error: itemsErr } = await supabaseAdmin
@@ -419,15 +601,32 @@ export async function GET(req: Request) {
     }
   }
 
-  const catIds = Array.from(new Set(Array.from(itemsMap.values()).map((x) => x.category_id).filter((x): x is string => !!x && isUuid(x))));
-  const subIds = Array.from(new Set(Array.from(itemsMap.values()).map((x) => x.subcategory_id).filter((x): x is string => !!x && isUuid(x))));
+  const catIds = Array.from(
+    new Set(
+      Array.from(itemsMap.values())
+        .map((x) => x.category_id)
+        .filter((x): x is string => !!x && isUuid(x))
+    )
+  );
+  const subIds = Array.from(
+    new Set(
+      Array.from(itemsMap.values())
+        .map((x) => x.subcategory_id)
+        .filter((x): x is string => !!x && isUuid(x))
+    )
+  );
 
   const catNameById = new Map<string, string>();
   const subNameById = new Map<string, string>();
 
   if (catIds.length > 0) {
-    const { data: cats, error: catsErr } = await supabaseAdmin.from("categories").select("id, name").in("id", catIds);
+    const { data: cats, error: catsErr } = await supabaseAdmin
+      .from("categories")
+      .select("id, name")
+      .in("id", catIds);
+
     if (catsErr) return NextResponse.json({ ok: false, error: catsErr.message }, { status: 500 });
+
     for (const c of (cats || []) as any[]) {
       const id = String(c?.id ?? "").trim();
       if (!isUuid(id)) continue;
@@ -436,8 +635,13 @@ export async function GET(req: Request) {
   }
 
   if (subIds.length > 0) {
-    const { data: subs, error: subsErr } = await supabaseAdmin.from("subcategories").select("id, name").in("id", subIds);
+    const { data: subs, error: subsErr } = await supabaseAdmin
+      .from("subcategories")
+      .select("id, name")
+      .in("id", subIds);
+
     if (subsErr) return NextResponse.json({ ok: false, error: subsErr.message }, { status: 500 });
+
     for (const s of (subs || []) as any[]) {
       const id = String(s?.id ?? "").trim();
       if (!isUuid(id)) continue;
@@ -457,8 +661,8 @@ export async function GET(req: Request) {
       const cid = it?.category_id ?? null;
       const sid = it?.subcategory_id ?? null;
 
-      const cname = cid ? (catNameById.get(cid) || "") : "";
-      const sname = sid ? (subNameById.get(sid) || "") : "";
+      const cname = cid ? catNameById.get(cid) || "" : "";
+      const sname = sid ? subNameById.get(sid) || "" : "";
 
       return {
         code: it?.code ?? "",
@@ -474,7 +678,11 @@ export async function GET(req: Request) {
       const pz = Number(x.qty || 0);
       const gr = Number(x.qty_gr || 0);
       const ml = Number(x.qty_ml || 0);
-      return (Number.isFinite(pz) && pz > 0) || (Number.isFinite(gr) && gr > 0) || (Number.isFinite(ml) && ml > 0);
+      return (
+        (Number.isFinite(pz) && pz > 0) ||
+        (Number.isFinite(gr) && gr > 0) ||
+        (Number.isFinite(ml) && ml > 0)
+      );
     });
 
   lines.sort((a: any, b: any) => {
@@ -482,7 +690,9 @@ export async function GET(req: Request) {
     const db = String(b.description ?? "").trim();
     const cmp = da.localeCompare(db, "it", { sensitivity: "base" });
     if (cmp !== 0) return cmp;
-    return String(a.code ?? "").localeCompare(String(b.code ?? ""), "it", { sensitivity: "base" });
+    return String(a.code ?? "").localeCompare(String(b.code ?? ""), "it", {
+      sensitivity: "base",
+    });
   });
 
   const xlsx = await buildInventoryXlsx(

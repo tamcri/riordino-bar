@@ -186,9 +186,14 @@ export async function GET(req: Request) {
 
     if (effectivePvId) q = q.eq("pv_id", effectivePvId);
 
-    // ✅ filtro categoria SOLO se il parametro è presente
-    if (category_id_filter === null) q = q.is("category_id", null);
-    else if (typeof category_id_filter === "string") q = q.eq("category_id", category_id_filter);
+        // ✅ PV: forza Rapido
+    if (session.role === "punto_vendita") {
+      q = q.is("category_id", null).is("subcategory_id", null);
+    } else {
+      // Admin/Ammin: filtro categoria SOLO se parametro presente
+      if (category_id_filter === null) q = q.is("category_id", null);
+      else if (typeof category_id_filter === "string") q = q.eq("category_id", category_id_filter);
+    }
     // else undefined => nessun filtro
 
     if (subcategory_id) q = q.eq("subcategory_id", subcategory_id);
@@ -257,7 +262,10 @@ export async function GET(req: Request) {
       const qty_ml = Number((r as any).qty_ml ?? 0) || 0;
       const qty_gr = Number((r as any).qty_gr ?? 0) || 0;
 
-      if (qty <= 0 && qty_ml <= 0 && qty_gr <= 0) continue;
+      // ✅ PV/Rapido: tengo anche righe a 0 (servono per "scansionati")
+      if (session.role !== "punto_vendita") {
+        if (qty <= 0 && qty_ml <= 0 && qty_gr <= 0) continue;
+      }
 
       const meta = itemsMap.get(r.item_id);
       const prezzo = meta?.prezzo ?? 0;
@@ -325,9 +333,13 @@ export async function GET(req: Request) {
 
     if (effectivePvId) hq = hq.eq("pv_id", effectivePvId);
 
-    // ✅ filtro categoria SOLO se parametro presente
-    if (category_id_filter === null) hq = hq.is("category_id", null);
-    else if (typeof category_id_filter === "string") hq = hq.eq("category_id", category_id_filter);
+        // ✅ PV: forza Rapido
+    if (session.role === "punto_vendita") {
+      hq = hq.is("category_id", null).is("subcategory_id", null);
+    } else {
+      if (category_id_filter === null) hq = hq.is("category_id", null);
+      else if (typeof category_id_filter === "string") hq = hq.eq("category_id", category_id_filter);
+    }
 
     if (subcategory_id) hq = hq.eq("subcategory_id", subcategory_id);
     if (dateFrom) hq = hq.gte("inventory_date", dateFrom);

@@ -69,8 +69,20 @@ function addInventorySheet(
 ) {
   const ws = wb.addWorksheet(sheetName);
 
+  const normalizedCategory = String(meta.categoryName || "")
+    .trim()
+    .toLowerCase();
+
+  const pzOnlyCategories = new Set(["tabacchi", "gratta e vinci"]);
+  const isPzOnly = pzOnlyCategories.has(normalizedCategory);
+
+  const lastColumn = isPzOnly ? 3 : 5;
+  const headers = isPzOnly
+    ? ["Codice", "Descrizione", "PZ"]
+    : ["Codice", "Descrizione", "PZ", "GR", "ML"];
+
   // Titolo
-  ws.mergeCells("A1:E1");
+  ws.mergeCells(`A1:${isPzOnly ? "C" : "E"}1`);
   ws.getCell("A1").value = "INVENTARIO";
   ws.getCell("A1").font = { bold: true, size: 14 };
   ws.getCell("A1").alignment = { vertical: "middle", horizontal: "left" };
@@ -97,14 +109,17 @@ function addInventorySheet(
 
   // Tabella
   const headerRow = 9;
-  ws.getRow(headerRow).values = ["Codice", "Descrizione", "PZ", "GR", "ML"];
+  ws.getRow(headerRow).values = headers;
   ws.getRow(headerRow).font = { bold: true };
 
   ws.getColumn(1).width = 18;
   ws.getColumn(2).width = 60;
   ws.getColumn(3).width = 10;
-  ws.getColumn(4).width = 10;
-  ws.getColumn(5).width = 12;
+
+  if (!isPzOnly) {
+    ws.getColumn(4).width = 10;
+    ws.getColumn(5).width = 12;
+  }
 
   let rr = headerRow + 1;
 
@@ -117,10 +132,15 @@ function addInventorySheet(
     const gr = Number((line as any).qty_gr || 0);
     const ml = Number((line as any).qty_ml || 0);
 
-    ws.getRow(rr).values = [line.code || "", line.description || "", pz, gr, ml];
-    ws.getCell(rr, 3).numFmt = "0";
-    ws.getCell(rr, 4).numFmt = "0";
-    ws.getCell(rr, 5).numFmt = "0";
+    if (isPzOnly) {
+      ws.getRow(rr).values = [line.code || "", line.description || "", pz];
+      ws.getCell(rr, 3).numFmt = "0";
+    } else {
+      ws.getRow(rr).values = [line.code || "", line.description || "", pz, gr, ml];
+      ws.getCell(rr, 3).numFmt = "0";
+      ws.getCell(rr, 4).numFmt = "0";
+      ws.getCell(rr, 5).numFmt = "0";
+    }
 
     totPz += pz;
     totGr += gr;
@@ -132,17 +152,20 @@ function addInventorySheet(
   const totalRow = rr + 1;
   ws.getCell(totalRow, 2).value = "TOTALE";
   ws.getCell(totalRow, 3).value = totPz || "";
-  ws.getCell(totalRow, 4).value = totGr || "";
-  ws.getCell(totalRow, 5).value = totMl || "";
   ws.getRow(totalRow).font = { bold: true };
   ws.getCell(totalRow, 3).numFmt = "0";
-  ws.getCell(totalRow, 4).numFmt = "0";
-  ws.getCell(totalRow, 5).numFmt = "0";
+
+  if (!isPzOnly) {
+    ws.getCell(totalRow, 4).value = totGr || "";
+    ws.getCell(totalRow, 5).value = totMl || "";
+    ws.getCell(totalRow, 4).numFmt = "0";
+    ws.getCell(totalRow, 5).numFmt = "0";
+  }
 
   // Bordi (puliti)
   const last = totalRow;
   for (let r = headerRow; r <= last; r++) {
-    for (let c = 1; c <= 5; c++) {
+    for (let c = 1; c <= lastColumn; c++) {
       ws.getCell(r, c).border = {
         top: { style: "thin" },
         left: { style: "thin" },

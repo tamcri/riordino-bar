@@ -111,6 +111,30 @@ function newRapidSessionId() {
   return `${s4()}${s4()}-${s4()}-${s4()}-${s4()}-${s4()}${s4()}${s4()}`;
 }
 
+// ✅ PERSISTENZA rapidSessionId (per non perdere bozza dopo F5)
+function rapidSessionStorageKey(pvId: string, dateISO: string) {
+  return `rapid_session_current:${pvId}:${dateISO}`;
+}
+
+function readRapidSessionFromStorage(pvId: string, dateISO: string) {
+  try {
+    const k = rapidSessionStorageKey(pvId, dateISO);
+    const v = localStorage.getItem(k) || "";
+    return isUuid(v) ? v : "";
+  } catch {
+    return "";
+  }
+}
+
+function writeRapidSessionToStorage(pvId: string, dateISO: string, sessionId: string) {
+  try {
+    const k = rapidSessionStorageKey(pvId, dateISO);
+    localStorage.setItem(k, sessionId);
+  } catch {
+    // ignore
+  }
+}
+
 function mlToLitriLabel(ml: number) {
   const l = ml / 1000;
   return `${l.toFixed(1)} L`;
@@ -215,9 +239,12 @@ const [categoryNote, setCategoryNote] = useState("");
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
 
   // ✅ lista “Scansionati”
-  const [scannedIds, setScannedIds] = useState<string[]>([]);
-  const [highlightScannedId, setHighlightScannedId] = useState<string | null>(null);
-  const [showAllScanned, setShowAllScanned] = useState(false);
+const [scannedIds, setScannedIds] = useState<string[]>([]);
+const [highlightScannedId, setHighlightScannedId] = useState<string | null>(null);
+const [showAllScanned, setShowAllScanned] = useState(false);
+
+// ✅ tiene traccia degli articoli eliminati
+const [deletedItemIds, setDeletedItemIds] = useState<string[]>([]);
 
   // ✅ “da aggiungere”
   const [addPzMap, setAddPzMap] = useState<Record<string, string>>({});
@@ -247,6 +274,11 @@ const [categoryNote, setCategoryNote] = useState("");
   // ✅ init da querystring (riapri da storico)
   const didInitFromUrlRef = useRef(false);
   const reopenModeRef = useRef(false);
+  // ✅ vero se il rapid_session_id arriva dall'URL (reopen). Se manca, è un inventario rapido legacy (sessione NULL).
+  const rapidSessionFromUrlRef = useRef<boolean>(false);
+
+  // ✅ evita di sovrascrivere la bozza con stato vuoto durante il primo mount / F5
+const didHydrateDraftRef = useRef(false);
 
   // ✅ valori iniziali da URL (per evitare override dei default al primo load)
   const initFromUrlValuesRef = useRef<{ pvId?: string; categoryId?: string; subcategoryId?: string } | null>(null);
@@ -274,27 +306,55 @@ const [categoryNote, setCategoryNote] = useState("");
     mlModeRef.current = mlModeMap;
   }, [mlModeMap]);
 
+  useEffect(() => {
+  // ✅ se sto riaprendo da storico con sessione in URL, NON tocco niente
+  if (rapidSessionFromUrlRef.current) return;
+
+  if (!pvId) return;
+  if (!inventoryDate || !isIsoDate(inventoryDate)) return;
+
+  const stored = readRapidSessionFromStorage(pvId, inventoryDate);
+
+  if (stored && stored !== rapidSessionId) {
+    // ✅ FONDAMENTALE: sblocco prefill/draft con la nuova sessione
+    lastPrefillKeyRef.current = "";
+
+    setRapidSessionId(stored);
+    return;
+  }
+
+  if (isUuid(rapidSessionId)) {
+    writeRapidSessionToStorage(pvId, inventoryDate, rapidSessionId);
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [pvId, inventoryDate, rapidSessionId]);
+
     // ✅ in RAPIDO calcolo “attivo” usando gli STATE (non i ref),
   // così la lista Scansionati si aggiorna immediatamente (senza lag/race)
   function isActiveFromState(it: Item) {
-    const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
-    const gr = safeGrFromStr(qtyGrMap[it.id] ?? "");
-    const open = safeIntFromStr(openMlMap[it.id] ?? "");
-    const total = safeIntFromStr(totalMlMap[it.id] ?? "");
-    const mode = mlModeMap[it.id] || "fixed";
+  const id = it.id;
 
-    const ml = isMlItem(it);
-    const kg = isKgItem(it) && !ml;
+  const pz = safeIntFromStr(qtyPzMap[id] ?? "");
+  const gr = safeGrFromStr(qtyGrMap[id] ?? "");
+  const open = safeIntFromStr(openMlMap[id] ?? "");
+  const total = safeIntFromStr(totalMlMap[id] ?? "");
+  const mode = (mlModeMap[id] as MlInputMode) || "fixed";
 
-    if (kg) return pz > 0 || gr > 0;
-    if (!ml) return pz > 0;
+  const ml = isMlItem(it);
+  const kg = isKgItem(it) && !ml;
 
-    if (mode === "mixed") return total > 0;
+  if (kg) return pz > 0 || gr > 0;
+  if (!ml) return pz > 0;
 
-    const perUnit = Number(it.volume_ml_per_unit) || 0;
-    const qty_ml = perUnit > 0 ? pz * perUnit + open : open;
-    return qty_ml > 0;
-  }
+  if (mode === "mixed") return total > 0;
+
+  // ✅ FIX: se ho totalMl valorizzato, è attivo anche con PZ=0
+  if (total > 0) return true;
+
+  const perUnit = Number(it.volume_ml_per_unit) || 0;
+  const qty_ml = perUnit > 0 ? pz * perUnit + open : open;
+  return qty_ml > 0;
+}
 
 // ✅ FAILSAFE: in RAPIDO ricostruisco sempre "Scansionati" dagli articoli con quantità > 0
 // Serve per evitare che scannedIds vada perso/reset (bug, refresh, draft, reopen, ecc.)
@@ -302,7 +362,6 @@ useEffect(() => {
   if (inventoryMode !== "rapid") return;
   if (!items.length) return;
 
-    // calcolo gli id "attivi" (qty>0 / gr>0 / ml>0) usando gli STATE
   const activeIds = items.filter((it) => isActiveFromState(it)).map((it) => it.id);
 
   setScannedIds((prev) => {
@@ -315,10 +374,14 @@ useEffect(() => {
     const keepSet = new Set(keep);
     const missing = activeIds.filter((id) => !keepSet.has(id));
 
-    // se non cambia niente, non aggiorno (evito re-render inutili)
-    if (missing.length === 0 && keep.length === prev.length) return prev;
+    const next = [...missing, ...keep];
 
-    return [...missing, ...keep];
+    // ✅ guard robusto: evita update inutili (StrictMode-safe)
+    if (prev.length === next.length && prev.every((v, i) => v === next[i])) {
+      return prev;
+    }
+
+    return next;
   });
 }, [inventoryMode, items, qtyPzMap, qtyGrMap, openMlMap, totalMlMap, mlModeMap]);
 
@@ -376,10 +439,21 @@ const rapidFromQs = (searchParams?.get("rapid_session_id") || "").trim();
 // compat vecchia: alcuni link mettono la sessione in subcategory_id
 const rapidLegacy = (searchParams?.get("subcategory_id") || "").trim();
 
-const rapidId = isUuid(rapidFromQs) ? rapidFromQs : isUuid(rapidLegacy) ? rapidLegacy : "";
+const rapidId = isUuid(rapidFromQs)
+  ? rapidFromQs
+  : isUuid(rapidLegacy)
+  ? rapidLegacy
+  : "";
+
+// ✅ memorizzo se la sessione arriva dall'URL
+rapidSessionFromUrlRef.current = !!rapidId;
 
 if (isRapidUrl && rapidId) {
   setRapidSessionId(rapidId);
+} else if (isRapidUrl) {
+  // ✅ inventario Rapido legacy: in DB rapid_session_id è NULL
+  // Non genero una sessione nuova qui, altrimenti non vedresti gli scansionati al reopen.
+  setRapidSessionId("");
 }
 
     // ✅ Reopen: Standard richiede pv+cat+date, Rapido richiede pv+date
@@ -466,20 +540,24 @@ if (isRapidUrl && rapidId) {
   }
 
   function calcTotalMl(it: Item) {
-    if (!isMlItem(it)) return 0;
+  if (!isMlItem(it)) return 0;
 
-    const mode = getMlMode(it.id);
-    if (mode === "mixed") {
-      return safeIntFromStr(totalMlMap[it.id] ?? "");
-    }
+  const mode = getMlMode(it.id);
 
-    const perUnit = Number(it.volume_ml_per_unit) || 0;
-    if (perUnit <= 0) return 0;
-
-    const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
-    const open = safeIntFromStr(openMlMap[it.id] ?? "");
-    return pz * perUnit + open;
+  if (mode === "mixed") {
+    return safeIntFromStr(totalMlMap[it.id] ?? "");
   }
+
+  const perUnit = Number(it.volume_ml_per_unit) || 0;
+  const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
+  const open = safeIntFromStr(openMlMap[it.id] ?? "");
+  const computed = perUnit > 0 ? pz * perUnit + open : 0;
+
+  const totalFromDb = safeIntFromStr(totalMlMap[it.id] ?? "");
+  if (computed <= 0 && totalFromDb > 0) return totalFromDb;
+
+  return computed;
+}
 
   function calcTotalKg(it: Item) {
     if (!isKgItem(it)) return 0;
@@ -684,6 +762,7 @@ if (isRapidUrl && rapidId) {
 
   // ✅ Persist draft: in Rapido posso avere categoryId vuota (Tutte)
   useEffect(() => {
+    if (!didHydrateDraftRef.current) return; // ✅ QUESTA È LA FIX
     if (!pvId || !inventoryDate) return;
     if (!items.length) return;
     if (inventoryMode !== "rapid" && !categoryId) return;
@@ -912,8 +991,10 @@ if (isRapidUrl && rapidId) {
     if (mode === "mixed") return total > 0;
 
     const perUnit = Number(it.volume_ml_per_unit) || 0;
-    const qty_ml = perUnit > 0 ? pz * perUnit + open : open;
-    return qty_ml > 0;
+    const computed = perUnit > 0 ? pz * perUnit + open : open;
+
+    // ✅ fallback legacy/reopen
+    return computed > 0 || total > 0;
   }
 
   function ensureScannedPresence(itemId: string, active: boolean) {
@@ -1075,76 +1156,76 @@ if (isRapidUrl && rapidId) {
   }
 
    // ✅ RIMUOVI un singolo articolo dalla lista scansionati + azzera tutto
-  function removeFromScanned(itemId: string) {
-    // azzero quantità
-    setQtyPzMap((prev) => ({ ...prev, [itemId]: "" }));
-    setQtyGrMap((prev) => ({ ...prev, [itemId]: "" }));
-    setOpenMlMap((prev) => ({ ...prev, [itemId]: "" }));
-    setTotalMlMap((prev) => ({ ...prev, [itemId]: "" }));
+    function removeFromScanned(itemId: string) {
+  setQtyPzMap((prev) => ({ ...prev, [itemId]: "" }));
+  setQtyGrMap((prev) => ({ ...prev, [itemId]: "" }));
+  setOpenMlMap((prev) => ({ ...prev, [itemId]: "" }));
+  setTotalMlMap((prev) => ({ ...prev, [itemId]: "" }));
 
-    // azzero anche i campi "da aggiungere"
-    setAddPzMap((prev) => ({ ...prev, [itemId]: "" }));
-    setAddGrMap((prev) => ({ ...prev, [itemId]: "" }));
-    setAddOpenMlMap((prev) => ({ ...prev, [itemId]: "" }));
-    setAddTotalMlMap((prev) => ({ ...prev, [itemId]: "" }));
+  setAddPzMap((prev) => ({ ...prev, [itemId]: "" }));
+  setAddGrMap((prev) => ({ ...prev, [itemId]: "" }));
+  setAddOpenMlMap((prev) => ({ ...prev, [itemId]: "" }));
+  setAddTotalMlMap((prev) => ({ ...prev, [itemId]: "" }));
 
-    // tolgo dalla lista
-    setScannedIds((prev) => prev.filter((id) => id !== itemId));
+  // ✅ segna come eliminato vero per il save
+  setDeletedItemIds((prev) => (prev.includes(itemId) ? prev : [...prev, itemId]));
 
-    // se era evidenziato, pulisco
-    setHighlightScannedId((prev) => (prev === itemId ? null : prev));
+  setScannedIds((prev) => prev.filter((id) => id !== itemId));
 
-    // se era in focus, lo chiudo
-    setFocusItemId((prev) => (prev === itemId ? null : prev));
-  }
+  setHighlightScannedId((prev) => (prev === itemId ? null : prev));
+  setFocusItemId((prev) => (prev === itemId ? null : prev));
+}
 
   function clearScannedList() {
-    setQtyPzMap((prev) => {
-      const next = { ...prev };
-      scannedIds.forEach((id) => (next[id] = ""));
-      return next;
-    });
+  setQtyPzMap((prev) => {
+    const next = { ...prev };
+    scannedIds.forEach((id) => (next[id] = ""));
+    return next;
+  });
 
-    setQtyGrMap((prev) => {
-      const next = { ...prev };
-      scannedIds.forEach((id) => (next[id] = ""));
-      return next;
-    });
+  setQtyGrMap((prev) => {
+    const next = { ...prev };
+    scannedIds.forEach((id) => (next[id] = ""));
+    return next;
+  });
 
-    setOpenMlMap((prev) => {
-      const next = { ...prev };
-      scannedIds.forEach((id) => (next[id] = ""));
-      return next;
-    });
+  setOpenMlMap((prev) => {
+    const next = { ...prev };
+    scannedIds.forEach((id) => (next[id] = ""));
+    return next;
+  });
 
-    setTotalMlMap((prev) => {
-      const next = { ...prev };
-      scannedIds.forEach((id) => (next[id] = ""));
-      return next;
-    });
+  setTotalMlMap((prev) => {
+    const next = { ...prev };
+    scannedIds.forEach((id) => (next[id] = ""));
+    return next;
+  });
 
-    setScannedIds([]);
-    setShowAllScanned(false);
-    setAddPzMap({});
-    setAddGrMap({});
-    setAddOpenMlMap({});
-    setAddTotalMlMap({});
-    setHighlightScannedId(null);
+  // ✅ segna gli articoli correnti come eliminati reali
+  setDeletedItemIds(scannedIds);
 
-    setFocusItemId(null);
-    setRapidView("scan");
-    setSearch("");
-    setMsg(null);
-    setError(null);
-    setCategoryNote("");
+  setScannedIds([]);
+  setShowAllScanned(false);
+  setAddPzMap({});
+  setAddGrMap({});
+  setAddOpenMlMap({});
+  setAddTotalMlMap({});
+  setHighlightScannedId(null);
 
+  setFocusItemId(null);
+  setRapidView("scan");
+  setSearch("");
+  setMsg(null);
+  setError(null);
+  setCategoryNote("");
+
+  requestAnimationFrame(() => {
     requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        searchInputRef.current?.focus();
-        searchInputRef.current?.select?.();
-      });
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select?.();
     });
-  }
+  });
+}
 
   function openItemInRapid(it: Item) {
   setMsg(null);
@@ -1410,7 +1491,7 @@ if (isRapidUrl && rapidId) {
     if (inventoryMode === "rapid" || !nextCategoryId) {
       if (inventoryMode !== "rapid") return;
 
-      const resAll = await fetch(`/api/items/list_all?limit=5000`, { cache: "no-store" });
+      const resAll = await fetch(`/api/items/list_all?limit=10000&include_inactive=1`, { cache: "no-store" });
       const jsonAll = await resAll.json().catch(() => null);
       if (!resAll.ok || !jsonAll?.ok) throw new Error(jsonAll?.error || "Errore caricamento articoli");
 
@@ -1505,7 +1586,9 @@ if (isRapidUrl && rapidId) {
   if (inventoryMode === "rapid") {
   params.set("category_id", "null");
   params.set("subcategory_id", "null");
-  params.set("rapid_session_id", rapidSessionId);
+
+  // ✅ legacy reopen: rapid_session_id può essere vuoto -> forzo "null" così il server carica le righe con rapid_session_id NULL
+  params.set("rapid_session_id", isUuid(rapidSessionId) ? rapidSessionId : "null");
 } else {
   params.set("category_id", categoryId);
   if (subcategoryId) params.set("subcategory_id", subcategoryId);
@@ -1527,23 +1610,61 @@ if (isRapidUrl && rapidId) {
       const apiRows = (json.rows || []) as InventoryRowApi[];
       if (!Array.isArray(apiRows) || apiRows.length === 0) return 0;
 
-      const itemSet = new Set(currentItems.map((x) => x.id));
-      const mlItemSet = new Set(currentItems.filter(isMlItem).map((x) => x.id));
+      // ✅ FIX DEFINITIVO: se il DB ha righe che NON esistono in currentItems,
+// le aggiungo agli items in memoria così possono comparire negli scansionati.
+const missingItems: Item[] = [];
+const existingIds = new Set(currentItems.map((x) => x.id));
 
-      const codeToId = new Map<string, string>();
-      for (const it of currentItems) {
-        const codeNorm = String(it.code || "").trim().toUpperCase();
-        if (!codeNorm) continue;
-        if (!codeToId.has(codeNorm)) codeToId.set(codeNorm, it.id);
-      }
+for (const r of apiRows) {
+  const id = String((r as any)?.item_id || "").trim();
+  if (!id || existingIds.has(id)) continue;
 
-      function resolveTargetId(r: InventoryRowApi): string | null {
-        const id = String(r?.item_id || "").trim();
-        if (id && itemSet.has(id)) return id;
+  missingItems.push({
+    id,
+    code: String((r as any)?.code ?? "").trim(),
+    description: String((r as any)?.description ?? "").trim(),
+    barcode: null,
+    prezzo_vendita_eur: (r as any)?.prezzo_vendita_eur ?? null,
+    is_active: true, // non mi interessa qui, mi serve solo per render
+    category_id: null,
+    subcategory_id: null,
+    um: null,
+    peso_kg: null,
+    volume_ml_per_unit: (r as any)?.volume_ml_per_unit ?? null,
+  } as any);
+}
 
-        const codeNorm = String((r as any)?.code || "").trim().toUpperCase();
-        return codeNorm && codeToId.has(codeNorm) ? codeToId.get(codeNorm)! : null;
-      }
+let effectiveItems = currentItems;
+if (missingItems.length) {
+  effectiveItems = [...currentItems, ...missingItems];
+
+  // aggiorno anche lo stato globale items, così la UI li vede
+  setItems((prev) => {
+    const prevIds = new Set(prev.map((x) => x.id));
+    const add = missingItems.filter((x) => !prevIds.has(x.id));
+    return add.length ? [...prev, ...add] : prev;
+  });
+}
+
+      const itemSet = new Set(effectiveItems.map((x) => x.id));
+      const mlItemSet = new Set(effectiveItems.filter(isMlItem).map((x) => x.id));
+
+      // ✅ Set ID articoli caricati
+const itemIdSet = new Set(currentItems.map((x) => x.id));
+
+// ✅ Fallback robusto: se item_id non lo trovo, provo col CODE
+const codeToId = new Map<string, string>();
+for (const it of currentItems) {
+  const c = String(it.code || "").trim().toUpperCase();
+  if (!c) continue;
+  if (!codeToId.has(c)) codeToId.set(c, it.id);
+}
+
+function resolveTargetId(r: InventoryRowApi): string | null {
+  const id = String((r as any)?.item_id || "").trim();
+  if (id) return id; // ✅ accetta SEMPRE l’item_id dal DB
+  return null;
+}
 
       setQtyPzMap((prev) => {
         const next = { ...prev };
@@ -1568,15 +1689,21 @@ if (isRapidUrl && rapidId) {
         return next;
       });
 
-      setOpenMlMap((prev) => {
+            setOpenMlMap((prev) => {
         const next = { ...prev };
         for (const r of apiRows) {
           const targetId = resolveTargetId(r);
           if (!targetId) continue;
           if (!mlItemSet.has(targetId)) continue;
 
-          const mlOpen = Number((r as any).ml_open ?? 0) || 0;
-          next[targetId] = mlOpen > 0 ? String(Math.trunc(mlOpen)) : "";
+          const item = effectiveItems.find((x) => x.id === targetId);
+          const perUnit = Number(item?.volume_ml_per_unit ?? 0) || 0;
+
+          const qty = Number((r as any).qty ?? 0) || 0;
+          const total = Number((r as any).qty_ml ?? 0) || 0;
+
+          const open = Math.max(0, Math.trunc(total - qty * perUnit));
+          next[targetId] = open > 0 ? String(open) : "";
         }
         return next;
       });
@@ -1679,13 +1806,16 @@ if (isRapidUrl && rapidId) {
   lastPrefillKeyRef.current = key;
 
   (async () => {
-    const applied = await prefillFromServer(items);
-    ensureMlDefaults(items);
+  const applied = await prefillFromServer(items);
+  ensureMlDefaults(items);
 
-    if (!(reopenModeRef.current && applied > 0)) {
-      loadDraftIfAny(items);
-    }
-  })();
+  if (!(reopenModeRef.current && applied > 0)) {
+    loadDraftIfAny(items);
+  }
+
+  // ✅ ora è sicuro salvare la bozza
+  didHydrateDraftRef.current = true;
+})();
   // eslint-disable-next-line react-hooks/exhaustive-deps
 }, [pvId, categoryId, subcategoryId, rapidSessionId, inventoryDate, items.length, inventoryMode]);
 
@@ -1728,11 +1858,15 @@ if (isRapidUrl && rapidId) {
       return next;
     });
 
-      // ✅ Rapido: nuova sessione per NON sovrascrivere inventari stesso PV+giorno
-  setRapidSessionId(newRapidSessionId());
-  lastPrefillKeyRef.current = "";
+    // ✅ nuova sessione Rapido (così riparti davvero da zero)
+const nextSession = newRapidSessionId();
+setRapidSessionId(nextSession);
+if (pvId && isIsoDate(inventoryDate)) writeRapidSessionToStorage(pvId, inventoryDate, nextSession);
 
-    clearDraft();
+// ✅ sblocco prefill/draft
+lastPrefillKeyRef.current = "";
+
+clearDraft();
   }
 
   async function save(mode: "close" | "continue") {
@@ -1749,32 +1883,36 @@ if (isRapidUrl && rapidId) {
     setError(null);
 
     try {
-      const rows = items
-        .map((it) => {
-          if (isMlItem(it)) {
-            const m = getMlMode(it.id);
-            if (m === "mixed") {
-              const totalMl = safeIntFromStr(totalMlMap[it.id] ?? "");
-              if (totalMl <= 0) return { item_id: it.id, qty: 0, qty_ml: 0, qty_gr: 0, ml_mode: "mixed" as const };
-              return { item_id: it.id, qty: 0, qty_ml: totalMl, qty_gr: 0, ml_mode: "mixed" as const };
-            }
+      const deletedSet = new Set(deletedItemIds);
 
-            const perUnit = Number(it.volume_ml_per_unit) || 0;
-            const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
-            const open = safeIntFromStr(openMlMap[it.id] ?? "");
-            const qty_ml = perUnit > 0 ? pz * perUnit + open : open;
+const rows = items
+  .map((it) => {
+    const itemId = String(it.id || "").trim();
 
-            if (qty_ml <= 0) return { item_id: it.id, qty: 0, qty_ml: 0, qty_gr: 0, ml_mode: "fixed" as const };
-            return { item_id: it.id, qty: pz, qty_ml, qty_gr: 0, ml_mode: "fixed" as const };
-          }
+    // ✅ se è stato eliminato, lo mando esplicitamente a zero
+    if (deletedSet.has(itemId)) {
+      return {
+        item_id: itemId,
+        qty: 0,
+        qty_ml: 0,
+        qty_gr: 0,
+      };
+    }
 
-          const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
-          const gr = isKgItem(it) ? safeGrFromStr(qtyGrMap[it.id] ?? "") : 0;
-
-          if (pz <= 0 && gr <= 0) return { item_id: it.id, qty: 0, qty_ml: 0, qty_gr: 0 };
-          return { item_id: it.id, qty: pz, qty_ml: 0, qty_gr: gr };
-        })
-        .filter((r: any) => (Number(r.qty) || 0) > 0 || (Number(r.qty_ml) || 0) > 0 || (Number(r.qty_gr) || 0) > 0);
+    return {
+      item_id: itemId,
+      qty: Number(qtyPzMap[itemId] || 0),
+      qty_ml: Number(totalMlMap[itemId] || 0),
+      qty_gr: Number(qtyGrMap[itemId] || 0),
+    };
+  })
+  .filter(
+    (r: any) =>
+      deletedSet.has(String(r.item_id || "").trim()) ||
+      (Number(r.qty) || 0) > 0 ||
+      (Number(r.qty_ml) || 0) > 0 ||
+      (Number(r.qty_gr) || 0) > 0
+  );
 
       if (rows.length === 0) {
         setError("Nessuna riga con quantità > 0. Inserisci almeno un valore prima di salvare.");
@@ -1848,11 +1986,14 @@ console.log(
 
       setMsg(mode === "continue" ? `Salvato. Puoi continuare. — righe: ${json.saved}` : `Salvataggio OK — righe: ${json.saved}`);
 
-      if (mode === "close") {
-        resetAfterClose();
-      } else {
-        persistDraft();
-      }
+      // ✅ pulisco gli articoli eliminati dopo il salvataggio
+setDeletedItemIds([]);
+
+if (mode === "close") {
+  resetAfterClose();
+} else {
+  persistDraft();
+}
     } catch (e: any) {
       setError(e?.message || "Errore salvataggio");
     } finally {
