@@ -1007,57 +1007,66 @@ if (isRapidUrl && rapidId) {
   }
 
   function setPz(itemId: string, v: string) {
-    const cleaned = onlyDigits(v);
-    setQtyPzMap((prev) => ({ ...prev, [itemId]: cleaned }));
-    setHighlightScannedId(itemId);
+  const cleaned = onlyDigits(v);
+  setQtyPzMap((prev) => ({ ...prev, [itemId]: cleaned }));
+  setHighlightScannedId(itemId);
 
-    const it = items.find((x) => x.id === itemId);
-    if (it) {
-      const nextPz = safeIntFromStr(cleaned);
-      ensureScannedPresence(itemId, isActiveWithOverrides(it, { pz: nextPz }));
-      if (isActiveWithOverrides(it, { pz: nextPz })) highlightAndMoveToTop(itemId);
-    }
+  // ✅ se reinserisco l'articolo non deve restare tra gli eliminati
+  setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
+
+  const it = items.find((x) => x.id === itemId);
+  if (it) {
+    const nextPz = safeIntFromStr(cleaned);
+    ensureScannedPresence(itemId, isActiveWithOverrides(it, { pz: nextPz }));
+    if (isActiveWithOverrides(it, { pz: nextPz })) highlightAndMoveToTop(itemId);
   }
+}
 
   function setGr(itemId: string, v: string) {
-    const cleaned = onlyDigits(v);
-    const capped = String(Math.min(MAX_GR, Number(cleaned || "0") || 0));
-    setQtyGrMap((prev) => ({ ...prev, [itemId]: cleaned ? capped : "" }));
-    setHighlightScannedId(itemId);
+  const cleaned = onlyDigits(v);
+  setQtyGrMap((prev) => ({ ...prev, [itemId]: cleaned }));
+  setHighlightScannedId(itemId);
 
-    const it = items.find((x) => x.id === itemId);
-    if (it) {
-      const nextGr = safeGrFromStr(cleaned ? capped : "");
-      ensureScannedPresence(itemId, isActiveWithOverrides(it, { gr: nextGr }));
-      if (isActiveWithOverrides(it, { gr: nextGr })) highlightAndMoveToTop(itemId);
-    }
+  // ✅ se reinserisco l'articolo non deve restare tra gli eliminati
+  setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
+
+  const it = items.find((x) => x.id === itemId);
+  if (it) {
+    const nextGr = safeIntFromStr(cleaned);
+    ensureScannedPresence(itemId, isActiveWithOverrides(it, { gr: nextGr }));
+    if (isActiveWithOverrides(it, { gr: nextGr })) highlightAndMoveToTop(itemId);
   }
+}
 
   function setOpenMl(itemId: string, v: string) {
-    const cleaned = onlyDigits(v);
-    setOpenMlMap((prev) => ({ ...prev, [itemId]: cleaned }));
-    setHighlightScannedId(itemId);
+  const cleaned = onlyDigits(v);
+  setOpenMlMap((prev) => ({ ...prev, [itemId]: cleaned }));
+  setHighlightScannedId(itemId);
 
-    const it = items.find((x) => x.id === itemId);
-    if (it) {
-      const nextOpen = safeIntFromStr(cleaned);
-      ensureScannedPresence(itemId, isActiveWithOverrides(it, { openMl: nextOpen }));
-      if (isActiveWithOverrides(it, { openMl: nextOpen })) highlightAndMoveToTop(itemId);
-    }
+  // ✅ se reinserisco l'articolo non deve restare tra gli eliminati
+  setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
+
+  const it = items.find((x) => x.id === itemId);
+  if (it) {
+    ensureScannedPresence(itemId, true);
+    highlightAndMoveToTop(itemId);
   }
+}
 
   function setTotalMl(itemId: string, v: string) {
-    const cleaned = onlyDigits(v);
-    setTotalMlMap((prev) => ({ ...prev, [itemId]: cleaned }));
-    setHighlightScannedId(itemId);
+  const cleaned = onlyDigits(v);
+  setTotalMlMap((prev) => ({ ...prev, [itemId]: cleaned }));
+  setHighlightScannedId(itemId);
 
-    const it = items.find((x) => x.id === itemId);
-    if (it) {
-      const nextTotal = safeIntFromStr(cleaned);
-      ensureScannedPresence(itemId, isActiveWithOverrides(it, { totalMl: nextTotal }));
-      if (isActiveWithOverrides(it, { totalMl: nextTotal })) highlightAndMoveToTop(itemId);
-    }
+  // ✅ se reinserisco l'articolo non deve restare tra gli eliminati
+  setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
+
+  const it = items.find((x) => x.id === itemId);
+  if (it) {
+    ensureScannedPresence(itemId, true);
+    highlightAndMoveToTop(itemId);
   }
+}
 
   function setMlMode(itemId: string, mode: MlInputMode) {
     setMlModeMap((prev) => ({ ...prev, [itemId]: mode }));
@@ -1081,8 +1090,12 @@ if (isRapidUrl && rapidId) {
   }
 
   function addQty(itemId: string) {
-    const it = items.find((x) => x.id === itemId);
-    if (!it) return;
+
+  // ✅ se aggiungo di nuovo quantità l'articolo non deve restare eliminato
+  setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
+
+  const it = items.find((x) => x.id === itemId);
+  if (!it) return;
 
     // ✅ KG
     if (isKgItem(it) && !isMlItem(it)) {
@@ -1899,12 +1912,15 @@ const rows = items
       };
     }
 
-    return {
-      item_id: itemId,
-      qty: Number(qtyPzMap[itemId] || 0),
-      qty_ml: Number(totalMlMap[itemId] || 0),
-      qty_gr: Number(qtyGrMap[itemId] || 0),
-    };
+    const totalMl = Number(totalMlMap[itemId] || 0);
+const openMl = Number(openMlMap[itemId] || 0);
+
+return {
+  item_id: itemId,
+  qty: Number(qtyPzMap[itemId] || 0),
+  qty_ml: totalMl > 0 ? totalMl : openMl,
+  qty_gr: Number(qtyGrMap[itemId] || 0),
+};
   })
   .filter(
     (r: any) =>
