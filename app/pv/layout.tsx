@@ -59,6 +59,13 @@ export default function PvLayout({ children }: { children: React.ReactNode }) {
           >
             Scarico Rimanenze
           </Link>
+
+          <Link
+            href="/pv/riepilogo-incassato"
+            className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-amber-600 text-white hover:bg-amber-700"
+          >
+            Riepilogo Incassato
+          </Link>
         </div>
       </nav>
 
@@ -66,4 +73,3 @@ export default function PvLayout({ children }: { children: React.ReactNode }) {
     </div>
   );
 }
-
