@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
 type SupplierPayment = {
   id: number;
@@ -59,6 +59,8 @@ function parseMoney(value: string): number | null {
 
 export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const viewMode = searchParams.get("mode") === "view";
 
   const [loading, setLoading] = useState(true);
   const [msg, setMsg] = useState<string | null>(null);
@@ -296,27 +298,29 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
           <ReadOnlyField label="Da Versare" value={String(daVersare)} />
 
           <EditableField
-            label="Tot. Versato"
-            value={totVersato}
-            setValue={setTotVersato}
-            disabled={isClosed}
-          />
+          label="Tot. Versato"
+          value={totVersato}
+          setValue={setTotVersato}
+         disabled={isClosed || viewMode}
+        />
 
           <ReadOnlyField label="Fondo Cassa" value={String(fondoCassa ?? "")} />
           <ReadOnlyField label="Stato" value={isClosed ? "Chiuso" : "Aperto"} />
         </div>
       </div>
 
-      <div className="flex justify-end">
-        <button
-          onClick={salvaTotVersato}
-          disabled={saving || isClosed}
-          className="rounded-lg bg-green-600 px-6 py-3 font-semibold text-white disabled:opacity-50"
-          type="button"
-        >
-          {saving ? "Salvo..." : "Salva Tot. Versato"}
-        </button>
+      {!viewMode && (
+       <div className="flex justify-end">
+       <button
+       onClick={salvaTotVersato}
+       disabled={saving || isClosed}
+       className="rounded-lg bg-green-600 px-6 py-3 font-semibold text-white disabled:opacity-50"
+       type="button"
+       >
+      {saving ? "Salvo..." : "Salva Tot. Versato"}
+      </button>
       </div>
+      )}
     </div>
   );
 }

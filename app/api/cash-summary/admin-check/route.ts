@@ -58,8 +58,19 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Metrica non valida" }, { status: 400 });
     }
 
-    if (!status) {
-      return NextResponse.json({ ok: false, error: "Stato non valido" }, { status: 400 });
+    // 🔹 se status è null → cancella lo stato
+    if (status === null) {
+      const { error } = await supabaseAdmin
+        .from("cash_summary_metric_checks")
+        .delete()
+        .eq("summary_id", summaryId)
+        .eq("metric_key", metricKey);
+
+      if (error) {
+        return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+      }
+
+      return NextResponse.json({ ok: true, deleted: true });
     }
 
     const payload = {

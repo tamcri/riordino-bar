@@ -311,20 +311,32 @@ export default function RiepilogoIncassatoClient() {
                       </td>
 
                       <td className="p-2 text-center">
-                        {!row.is_closed ? (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              router.push(`/pv/riepilogo-incassato/${row.id}`)
-                            }
-                            className="rounded-lg border px-3 py-1.5 hover:bg-gray-50"
-                          >
-                            Apri
-                          </button>
-                        ) : (
-                          <span className="text-gray-400">—</span>
-                        )}
-                      </td>
+  <div className="flex items-center justify-center gap-2">
+
+    <button
+      type="button"
+      onClick={() =>
+        router.push(`/pv/riepilogo-incassato/${row.id}?mode=view`)
+      }
+      className="rounded-lg border px-3 py-1.5 hover:bg-gray-50"
+    >
+      Dettaglio
+    </button>
+
+    {!row.is_closed && (
+      <button
+        type="button"
+        onClick={() =>
+          router.push(`/pv/riepilogo-incassato/${row.id}`)
+        }
+        className="rounded-lg bg-blue-600 px-3 py-1.5 text-white hover:bg-blue-700"
+      >
+        Apri
+      </button>
+    )}
+
+  </div>
+</td>
                     </tr>
                   );
                 })}

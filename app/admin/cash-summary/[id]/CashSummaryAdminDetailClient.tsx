@@ -111,7 +111,7 @@ export default function CashSummaryAdminDetailClient({ id }: { id: string }) {
   const [supplierResults, setSupplierResults] = useState<SupplierSearchRow[]>([]);
   const [supplierLoading, setSupplierLoading] = useState(false);
   const [selectedSupplier, setSelectedSupplier] = useState<SupplierSearchRow | null>(null);
-  const [supplierAmount, setSupplierAmount] = useState<number | null>(null);
+  const [supplierAmountInput, setSupplierAmountInput] = useState("");
 
   const supplierSearchInputRef = useRef<HTMLInputElement | null>(null);
   const supplierAmountInputRef = useRef<HTMLInputElement | null>(null);
@@ -213,12 +213,14 @@ export default function CashSummaryAdminDetailClient({ id }: { id: string }) {
     setSupplierSearch("");
     setSupplierResults([]);
     setSelectedSupplier(null);
-    setSupplierAmount(null);
+    setSupplierAmountInput("");
     setSupplierLoading(false);
   }
 
   function addSupplierFromModal() {
-    if (!selectedSupplier || supplierAmount === null) return;
+    const parsedAmount = parseMoney(supplierAmountInput);
+
+    if (!selectedSupplier || parsedAmount === null) return;
 
     setSuppliers((prev) => [
       ...prev,
@@ -226,7 +228,7 @@ export default function CashSummaryAdminDetailClient({ id }: { id: string }) {
         id: `new-${Date.now()}-${prev.length}`,
         supplier_code: selectedSupplier.code ?? "",
         supplier_name: selectedSupplier.name ?? "",
-        amount: roundMoney(supplierAmount),
+        amount: roundMoney(parsedAmount),
       },
     ]);
 
@@ -464,8 +466,8 @@ export default function CashSummaryAdminDetailClient({ id }: { id: string }) {
                   </td>
                   <td className="p-2">
                     <input
-                      type="number"
-                      step="0.01"
+                      type="text"
+                      inputMode="decimal"
                       className="w-full rounded border p-2 text-right"
                       value={row.amount ?? ""}
                       onChange={(e) => {
@@ -609,7 +611,7 @@ export default function CashSummaryAdminDetailClient({ id }: { id: string }) {
                     type="button"
                     onClick={() => {
                       setSelectedSupplier(row);
-                      setSupplierAmount(null);
+                      setSupplierAmountInput("");
 
                       setTimeout(() => {
                         const input = supplierAmountInputRef.current;
@@ -657,9 +659,9 @@ export default function CashSummaryAdminDetailClient({ id }: { id: string }) {
                 type="text"
                 inputMode="decimal"
                 className="w-full rounded-lg border bg-white p-2 text-right"
-                value={supplierAmount ?? ""}
+                value={supplierAmountInput}
                 placeholder="Importo"
-                onChange={(e) => setSupplierAmount(parseMoney(e.target.value))}
+                onChange={(e) => setSupplierAmountInput(e.target.value)}
               />
             </div>
 
@@ -678,7 +680,8 @@ export default function CashSummaryAdminDetailClient({ id }: { id: string }) {
               <button
                 type="button"
                 onClick={addSupplierFromModal}
-                className="rounded-lg bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800"
+                disabled={!selectedSupplier || parseMoney(supplierAmountInput) === null}
+                className="rounded-lg bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800 disabled:opacity-50"
               >
                 Aggiungi
               </button>
@@ -725,6 +728,9 @@ function EditableNumberField({
   onCommentChange?: (value: string) => void;
   onCommentClear?: () => void;
 }) {
+  const [showComment, setShowComment] = useState(false);
+  const hasComment = Boolean(comment && comment.trim() !== "");
+
   return (
     <div className="rounded-xl border bg-gray-50 p-3">
       <div className="text-xs text-gray-500">{label}</div>
@@ -740,25 +746,60 @@ function EditableNumberField({
 
       {onCommentChange && (
         <div className="mt-3">
-          <div className="mb-1 flex items-center justify-between gap-2">
-            <div className="text-xs text-gray-500">Nota</div>
-            {comment && comment.trim() !== "" && onCommentClear && (
+          {!showComment ? (
+            <div className="flex items-center justify-between gap-2">
               <button
                 type="button"
-                onClick={onCommentClear}
-                className="text-xs text-red-600 hover:underline"
+                onClick={() => setShowComment(true)}
+                className="inline-flex items-center gap-2 rounded-lg border border-dashed px-2.5 py-1.5 text-xs text-gray-600 hover:bg-white"
               >
-                Cancella
+                <span className="text-sm font-semibold leading-none">+</span>
+                <span>Nota</span>
               </button>
-            )}
-          </div>
 
-          <textarea
-            className="min-h-[78px] w-full rounded-lg border bg-white p-2 text-sm"
-            placeholder="Aggiungi una nota su questo campo..."
-            value={comment ?? ""}
-            onChange={(e) => onCommentChange(e.target.value)}
-          />
+              {hasComment && (
+                <button
+                  type="button"
+                  onClick={() => setShowComment(true)}
+                  className="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700 hover:bg-amber-100"
+                >
+                  <span className="h-2 w-2 rounded-full bg-amber-500" />
+                  Nota presente
+                </button>
+              )}
+            </div>
+          ) : (
+            <div>
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <div className="text-xs text-gray-500">Nota</div>
+                <div className="flex items-center gap-3">
+                  {hasComment && onCommentClear && (
+                    <button
+                      type="button"
+                      onClick={onCommentClear}
+                      className="text-xs text-red-600 hover:underline"
+                    >
+                      Cancella
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setShowComment(false)}
+                    className="text-xs text-gray-500 hover:underline"
+                  >
+                    Chiudi
+                  </button>
+                </div>
+              </div>
+
+              <textarea
+                className="min-h-[78px] w-full rounded-lg border bg-white p-2 text-sm"
+                placeholder="Aggiungi una nota su questo campo..."
+                value={comment ?? ""}
+                onChange={(e) => onCommentChange(e.target.value)}
+              />
+            </div>
+          )}
         </div>
       )}
     </div>

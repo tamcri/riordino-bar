@@ -244,6 +244,7 @@ export default function CashSummaryAdminClient() {
   const [metric, setMetric] = useState<MetricKey>("incasso_totale");
   const [showDetail, setShowDetail] = useState(false);
   const [detailSavingKey, setDetailSavingKey] = useState<string | null>(null);
+  const [detailFilter, setDetailFilter] = useState<"all" | "check">("all");
 
   const [selectedComparePvIds, setSelectedComparePvIds] = useState<string[]>([]);
 
@@ -413,20 +414,28 @@ export default function CashSummaryAdminClient() {
     );
   }
 
-  async function saveDetailCheck(summaryId: string, metricKey: MetricKey, status: CheckState) {
+  async function saveDetailCheck(summaryId: string, metricKey: MetricKey, status: CheckState | null) {
     const savingKey = `${summaryId}:${metricKey}`;
     setDetailSavingKey(savingKey);
     setMsg(null);
 
     const previousChecks = checksBySummary;
 
-    setChecksBySummary((prev) => ({
-      ...prev,
-      [summaryId]: {
-        ...(prev[summaryId] ?? {}),
-        [metricKey]: status,
-      },
-    }));
+    setChecksBySummary((prev) => {
+      const currentRowChecks = prev[summaryId] ?? {};
+      const nextRowChecks = { ...currentRowChecks };
+
+      if (status === null) {
+        delete nextRowChecks[metricKey];
+      } else {
+        nextRowChecks[metricKey] = status;
+      }
+
+      return {
+        ...prev,
+        [summaryId]: nextRowChecks,
+      };
+    });
 
     try {
       const res = await fetch("/api/cash-summary/admin-check", {
@@ -562,6 +571,7 @@ export default function CashSummaryAdminClient() {
 
     return {
       rows: entries,
+      total,
       average: avg,
     };
   }, [computedRows, metric]);
@@ -621,6 +631,13 @@ export default function CashSummaryAdminClient() {
         status: row.metric_checks[metric] ?? null,
       }));
   }, [computedRows, metric]);
+
+  const filteredDetailRows = useMemo(() => {
+    if (detailFilter === "check") {
+      return detailRows.filter((row) => row.status === "check");
+    }
+    return detailRows;
+  }, [detailRows, detailFilter]);
 
   const currentMetricCheckCount = useMemo(() => {
     return detailRows.filter((row) => row.status === "check").length;
@@ -858,9 +875,20 @@ export default function CashSummaryAdminClient() {
           )}
         </div>
 
-        <div className="mt-4 flex justify-end">
+        <div className="mt-4 flex justify-end gap-3">
           <div className="rounded-xl border bg-slate-50 px-4 py-3 text-right">
-            <div className="text-xs uppercase tracking-wide text-gray-500">Media giornaliera</div>
+            <div className="text-xs uppercase tracking-wide text-gray-500">
+              Totale {metricLabel(metric)}
+            </div>
+            <div className="text-lg font-semibold text-slate-900">
+              {formatEuro(chartData.total)}
+            </div>
+          </div>
+
+          <div className="rounded-xl border bg-slate-50 px-4 py-3 text-right">
+            <div className="text-xs uppercase tracking-wide text-gray-500">
+              Media giornaliera
+            </div>
             <div className="text-lg font-semibold text-slate-900">
               {formatEuro(chartData.average)}
             </div>
@@ -877,6 +905,32 @@ export default function CashSummaryAdminClient() {
                 <p className="mt-1 text-sm text-gray-600">
                   Segna le righe come OK oppure Da ricontrollare.
                 </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDetailFilter("all")}
+                  className={`rounded-full border px-3 py-1.5 text-sm transition ${
+                    detailFilter === "all"
+                      ? "border-slate-900 bg-slate-900 text-white"
+                      : "border-gray-300 bg-white text-slate-700 hover:bg-gray-50"
+                  }`}
+                >
+                  Tutti
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setDetailFilter("check")}
+                  className={`rounded-full border px-3 py-1.5 text-sm transition ${
+                    detailFilter === "check"
+                      ? "border-orange-600 bg-orange-600 text-white"
+                      : "border-orange-300 bg-orange-50 text-orange-700 hover:bg-orange-100"
+                  }`}
+                >
+                  Solo da ricontrollare
+                </button>
               </div>
             </div>
 
@@ -899,7 +953,7 @@ export default function CashSummaryAdminClient() {
                   </tr>
                 </thead>
                 <tbody>
-                  {detailRows.map((row) => {
+                  {filteredDetailRows.map((row) => {
                     const status = row.status;
                     const isSaving = detailSavingKey === `${row.id}:${metric}`;
 
@@ -931,7 +985,9 @@ export default function CashSummaryAdminClient() {
                           <div className="flex justify-center gap-2">
                             <button
                               type="button"
-                              onClick={() => saveDetailCheck(row.id, metric, "ok")}
+                              onClick={() =>
+                                saveDetailCheck(row.id, metric, status === "ok" ? null : "ok")
+                              }
                               disabled={isSaving}
                               className="rounded-lg border border-green-600 px-3 py-1 text-green-700 hover:bg-green-50 disabled:opacity-50"
                             >
@@ -939,7 +995,9 @@ export default function CashSummaryAdminClient() {
                             </button>
                             <button
                               type="button"
-                              onClick={() => saveDetailCheck(row.id, metric, "check")}
+                              onClick={() =>
+                                saveDetailCheck(row.id, metric, status === "check" ? null : "check")
+                              }
                               disabled={isSaving}
                               className="rounded-lg border border-orange-600 px-3 py-1 text-orange-700 hover:bg-orange-50 disabled:opacity-50"
                             >
@@ -951,10 +1009,12 @@ export default function CashSummaryAdminClient() {
                     );
                   })}
 
-                  {detailRows.length === 0 && (
+                  {filteredDetailRows.length === 0 && (
                     <tr className="border-t">
                       <td className="p-3 text-gray-500" colSpan={6}>
-                        Nessun movimento disponibile.
+                        {detailFilter === "check"
+                          ? "Nessun movimento da ricontrollare."
+                          : "Nessun movimento disponibile."}
                       </td>
                     </tr>
                   )}
@@ -1031,10 +1091,10 @@ export default function CashSummaryAdminClient() {
 
               return (
                 <div key={row.pv_id} className="space-y-1">
-                <div className="flex items-center justify-between text-sm">
-               <span className="truncate font-medium">{row.pv_label}</span>
-              <span className="font-semibold">{formatEuro(row.total)}</span>
-              </div>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="truncate font-medium">{row.pv_label}</span>
+                    <span className="font-semibold">{formatEuro(row.total)}</span>
+                  </div>
                   <div className="h-4 overflow-hidden rounded bg-gray-100">
                     <div
                       className={row.total < 0 ? "h-full bg-red-600" : ""}
@@ -1078,7 +1138,6 @@ export default function CashSummaryAdminClient() {
                 <th className="p-2 text-right">Δ Fondo Cassa</th>
                 <th className="p-2 text-center">Stato</th>
                 <th className="p-2 text-center">Azioni</th>
-                            
               </tr>
             </thead>
 
