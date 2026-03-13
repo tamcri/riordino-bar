@@ -32,8 +32,7 @@ function normNullParam(v: any): string | null {
 function normCode(v: any) {
   const raw = String(v ?? "").trim();
   if (!raw) return "";
-  const firstToken = raw.split(/\s+/)[0] || "";
-  return firstToken.trim().toUpperCase().replace(/\s+/g, "");
+  return raw.toUpperCase().replace(/\s+/g, " ").trim();
 }
 
 function clampInt(n: any) {
