@@ -182,10 +182,36 @@ function normNullParam(v: unknown): string | null {
 }
 
 function normCode(v: unknown) {
-  const raw = String(v ?? "").trim();
+  const raw = String(v ?? "").trim().toUpperCase();
   if (!raw) return "";
-  const firstToken = raw.split(/\s+/)[0] || "";
-  return firstToken.trim().toUpperCase().replace(/\s+/g, "");
+  return raw.replace(/\s+/g, " ").trim();
+}
+
+function normCodeCompact(v: unknown) {
+  return normCode(v).replace(/\s+/g, "");
+}
+
+function buildCodePrefixes(code: unknown): string[] {
+  const normalized = normCode(code);
+  if (!normalized) return [];
+
+  const compact = normalized.replace(/\s+/g, "");
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+
+  const out = new Set<string>();
+
+  if (compact) out.add(compact);
+
+  if (tokens.length > 0) {
+    out.add(tokens[0]);
+  }
+
+  for (let i = 1; i <= tokens.length; i += 1) {
+    const joinedCompact = tokens.slice(0, i).join("");
+    if (joinedCompact) out.add(joinedCompact);
+  }
+
+  return Array.from(out);
 }
 
 function normUm(um: unknown): "PZ" | "KG" | "LT" | "ALTRO" {
@@ -387,6 +413,22 @@ async function loadInventoryRows(headerId: string): Promise<InventoryRowRaw[]> {
   return (data ?? []) as unknown as InventoryRowRaw[];
 }
 
+function resolveUniqueInventoryMatch<T extends { items?: { code?: string | null } | null }>(
+  rows: T[],
+  progressivoCode: string
+): T | null {
+  const target = normCodeCompact(progressivoCode);
+  if (!target) return null;
+
+  const matches = rows.filter((row) => {
+    const itemCode = normCodeCompact(row.items?.code);
+    if (!itemCode) return false;
+    return itemCode.startsWith(target);
+  });
+
+  return matches.length === 1 ? matches[0] : null;
+}
+
 async function loadProgressiviMap(
   pvId: string,
   inventoryDate: string,
@@ -395,17 +437,23 @@ async function loadProgressiviMap(
   const out = new Map<string, number>();
   if (!codes.length) return out;
 
+  const codePrefixes = Array.from(
+    new Set(
+      codes.flatMap((code) => buildCodePrefixes(code))
+    )
+  );
+
   const { data, error } = await supabaseAdmin
     .from("inventory_progressivi_rows")
     .select("item_code, giacenza_qta1_fiscale")
     .eq("pv_id", pvId)
     .eq("inventory_date", inventoryDate)
-    .in("item_code", codes);
+    .in("item_code", codePrefixes);
 
   if (error) throw error;
 
   for (const row of (data ?? []) as ProgressivoRowRaw[]) {
-    const code = normCode(row.item_code);
+    const code = normCodeCompact(row.item_code);
     if (!code) continue;
     out.set(code, round2(toNum(row.giacenza_qta1_fiscale)));
   }
@@ -488,7 +536,7 @@ async function loadRecountedItemCodes(currentHeaderId: string): Promise<Set<stri
 
   const out = new Set<string>();
   for (const row of data ?? []) {
-    const code = normCode((row as any)?.item_code);
+    const code = normCodeCompact((row as any)?.item_code);
     if (!code) continue;
     out.add(code);
   }
@@ -634,21 +682,6 @@ async function computeLiveProgressiviData(
   const currentRows = await loadInventoryRows(currentHeader.id);
   const previousRows = prevHeader ? await loadInventoryRows(prevHeader.id) : [];
 
-  const currentMap = new Map<string, InventoryRowRaw>();
-  const previousMap = new Map<string, InventoryRowRaw>();
-
-  for (const row of currentRows) {
-    const code = normCode(row.items?.code);
-    if (!code) continue;
-    currentMap.set(code, row);
-  }
-
-  for (const row of previousRows) {
-    const code = normCode(row.items?.code);
-    if (!code) continue;
-    previousMap.set(code, row);
-  }
-
   const resolvedCurrentLogicalCategory = resolveLogicalCategory({
     categoryId: currentHeader.category_id,
     label: currentHeader.label,
@@ -666,7 +699,7 @@ async function computeLiveProgressiviData(
     });
 
     for (const item of categoryUniverse) {
-      const code = normCode(item.code);
+      const code = normCodeCompact(item.code);
       if (!code) continue;
       universeMap.set(code, item);
     }
@@ -674,8 +707,35 @@ async function computeLiveProgressiviData(
     universeCodes = Array.from(universeMap.keys());
   }
 
+  const currentInventoryByResolvedCode = new Map<string, InventoryRowRaw>();
+  const previousInventoryByResolvedCode = new Map<string, InventoryRowRaw>();
+
+  for (const universeCode of universeCodes) {
+    const currentMatch = resolveUniqueInventoryMatch(currentRows, universeCode);
+    if (currentMatch) {
+      currentInventoryByResolvedCode.set(universeCode, currentMatch);
+    }
+
+    const previousMatch = resolveUniqueInventoryMatch(previousRows, universeCode);
+    if (previousMatch) {
+      previousInventoryByResolvedCode.set(universeCode, previousMatch);
+    }
+  }
+
+  const extraCurrentCodes = currentRows
+    .map((row) => normCodeCompact(row.items?.code))
+    .filter(Boolean);
+
+  const extraPreviousCodes = previousRows
+    .map((row) => normCodeCompact(row.items?.code))
+    .filter(Boolean);
+
   const codes = Array.from(
-    new Set([...universeCodes, ...currentMap.keys(), ...previousMap.keys()])
+    new Set([
+      ...universeCodes,
+      ...extraCurrentCodes,
+      ...extraPreviousCodes,
+    ])
   ).sort((a, b) => a.localeCompare(b, "it"));
 
   const [currentProgMap, previousProgMap] = await Promise.all([
@@ -686,8 +746,16 @@ async function computeLiveProgressiviData(
   ]);
 
   const rows: ProgressiviBlockRow[] = codes.map((code) => {
-    const cur = currentMap.get(code) ?? null;
-    const prev = previousMap.get(code) ?? null;
+    const cur =
+      currentInventoryByResolvedCode.get(code) ??
+      currentRows.find((row) => normCodeCompact(row.items?.code) === code) ??
+      null;
+
+    const prev =
+      previousInventoryByResolvedCode.get(code) ??
+      previousRows.find((row) => normCodeCompact(row.items?.code) === code) ??
+      null;
+
     const universeItem = universeMap.get(code) ?? null;
     const base = cur ?? prev;
 
@@ -715,7 +783,7 @@ async function computeLiveProgressiviData(
 
     return {
       item_id: base?.item_id ?? universeItem?.id ?? null,
-      item_code: code,
+      item_code: String(base?.items?.code ?? universeItem?.code ?? code).trim(),
       description: String(base?.items?.description ?? universeItem?.description ?? "").trim(),
       um: (base?.items?.um ?? universeItem?.um ?? null) as string | null,
       prezzo_vendita_eur: price,
@@ -793,23 +861,21 @@ export async function getProgressiviReportData(
     finalRows = created.rows.length > 0
       ? created.rows.map(snapshotRowToBlockRow)
       : live.rows;
-      } else {
+  } else {
     const snapshot = await loadProgressiviSnapshot(existingSnapshot.id);
     const liveByCode = new Map<string, ProgressiviBlockRow>();
 
     for (const row of live.rows) {
-      liveByCode.set(row.item_code, row);
+      liveByCode.set(normCodeCompact(row.item_code), row);
     }
 
-    // ✅ aggiorno SOLO gli articoli davvero ricontati
     const recountedCodes = await loadRecountedItemCodes(live.currentHeader.id);
 
     const updatedSnapshotRows: ProgressiviSnapshotRow[] = [];
 
     for (const snapRow of snapshot.rows) {
-      const normalizedCode = normCode(snapRow.item_code);
+      const normalizedCode = normCodeCompact(snapRow.item_code);
 
-      // se NON è stato ricontato, lascio la riga congelata
       if (!recountedCodes.has(normalizedCode)) {
         updatedSnapshotRows.push(snapRow);
         continue;
@@ -817,7 +883,6 @@ export async function getProgressiviReportData(
 
       const liveRow = liveByCode.get(normalizedCode);
 
-      // se per qualche motivo non trovo la riga live, tengo quella snapshot
       if (!liveRow) {
         updatedSnapshotRows.push(snapRow);
         continue;
