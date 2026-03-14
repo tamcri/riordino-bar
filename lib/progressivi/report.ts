@@ -11,6 +11,7 @@ import {
   createProgressiviSnapshot,
   findExistingProgressiviSnapshot,
   loadProgressiviSnapshot,
+  replaceProgressiviSnapshotRows,
   updateSingleProgressiviSnapshotRow,
   type ProgressiviSnapshotRow,
 } from "@/lib/progressivi/snapshot";
@@ -129,7 +130,8 @@ type ProgressivoRowRaw = {
 
 type ProgressivoNormalizedRow = {
   raw_code: string;
-  normalized_code: string;
+  normalized_code_legacy: string;
+  normalized_code_compact: string;
   giacenza_qta1_fiscale: number;
 };
 
@@ -188,36 +190,16 @@ function normNullParam(v: unknown): string | null {
 }
 
 function normCode(v: unknown) {
-  const raw = String(v ?? "").trim().toUpperCase();
+  const raw = String(v ?? "").trim();
   if (!raw) return "";
-  return raw.replace(/\s+/g, " ").trim();
+  const firstToken = raw.split(/\s+/)[0] || "";
+  return firstToken.trim().toUpperCase().replace(/\s+/g, "");
 }
 
 function normCodeCompact(v: unknown) {
-  return normCode(v).replace(/\s+/g, "");
-}
-
-function buildCodePrefixes(code: unknown): string[] {
-  const normalized = normCode(code);
-  if (!normalized) return [];
-
-  const compact = normalized.replace(/\s+/g, "");
-  const tokens = normalized.split(/\s+/).filter(Boolean);
-
-  const out = new Set<string>();
-
-  if (compact) out.add(compact);
-
-  if (tokens.length > 0) {
-    out.add(tokens[0]);
-  }
-
-  for (let i = 1; i <= tokens.length; i += 1) {
-    const joinedCompact = tokens.slice(0, i).join("");
-    if (joinedCompact) out.add(joinedCompact);
-  }
-
-  return Array.from(out);
+  const raw = String(v ?? "").trim().toUpperCase();
+  if (!raw) return "";
+  return raw.replace(/\s+/g, "");
 }
 
 function normUm(um: unknown): "PZ" | "KG" | "LT" | "ALTRO" {
@@ -249,6 +231,22 @@ function calcInventario(row: InventoryRowRaw | null | undefined) {
   if (um === "LT") return round2(qtyMl / 1000);
   if (um === "KG") return round2(qty * pesoKg + qtyGr / 1000);
   return round2(qty);
+}
+
+function sameNormalizedCodeSet(
+  left: string[],
+  right: string[]
+): boolean {
+  if (left.length !== right.length) return false;
+
+  const leftSet = new Set(left);
+  if (leftSet.size !== right.length) return false;
+
+  for (const code of right) {
+    if (!leftSet.has(code)) return false;
+  }
+
+  return true;
 }
 
 async function loadCategories(): Promise<LogicalCategory[]> {
@@ -423,16 +421,41 @@ function resolveUniqueInventoryMatch<T extends { items?: { code?: string | null 
   rows: T[],
   progressivoCode: string
 ): T | null {
-  const target = normCodeCompact(progressivoCode);
-  if (!target) return null;
+  const targetCompact = normCodeCompact(progressivoCode);
+  const targetLegacy = normCode(progressivoCode);
 
-  const matches = rows.filter((row) => {
-    const itemCode = normCodeCompact(row.items?.code);
-    if (!itemCode) return false;
-    return itemCode.startsWith(target);
+  if (!targetCompact && !targetLegacy) return null;
+
+  const exactCompactMatches = rows.filter((row) => {
+    const itemCodeCompact = normCodeCompact(row.items?.code);
+    return !!itemCodeCompact && itemCodeCompact === targetCompact;
   });
 
-  return matches.length === 1 ? matches[0] : null;
+  if (exactCompactMatches.length === 1) return exactCompactMatches[0];
+  if (exactCompactMatches.length > 1) return null;
+
+  const legacyMatches = rows.filter((row) => {
+    const itemCodeCompact = normCodeCompact(row.items?.code);
+    const itemCodeLegacy = normCode(row.items?.code);
+
+    if (!itemCodeCompact && !itemCodeLegacy) return false;
+
+    if (targetCompact && itemCodeCompact && itemCodeCompact.startsWith(targetCompact)) {
+      return true;
+    }
+
+    if (targetLegacy && itemCodeLegacy && itemCodeLegacy === targetLegacy) {
+      return true;
+    }
+
+    if (targetLegacy && itemCodeLegacy && itemCodeLegacy.startsWith(targetLegacy)) {
+      return true;
+    }
+
+    return false;
+  });
+
+  return legacyMatches.length === 1 ? legacyMatches[0] : null;
 }
 
 async function loadProgressiviRows(
@@ -450,10 +473,11 @@ async function loadProgressiviRows(
   return ((data ?? []) as ProgressivoRowRaw[])
     .map((row) => ({
       raw_code: String(row.item_code ?? "").trim(),
-      normalized_code: normCodeCompact(row.item_code),
-      giacenza_qta1_fiscale: round2(toNum(row.giacenza_qta1_fiscale)),
+      normalized_code_legacy: normCode(row.item_code),
+      normalized_code_compact: normCodeCompact(row.item_code),
+      giacenza_qta1_fiscale: toNum(row.giacenza_qta1_fiscale),
     }))
-    .filter((row) => row.normalized_code);
+    .filter((row) => row.normalized_code_legacy || row.normalized_code_compact);
 }
 
 async function resolvePreviousHeader(
@@ -543,17 +567,30 @@ function resolveUniqueProgressivoValue(
   progressiviRows: ProgressivoNormalizedRow[],
   fullItemCode: string
 ): number {
-  const target = normCodeCompact(fullItemCode);
-  if (!target) return 0;
+  const targetCompact = normCodeCompact(fullItemCode);
+  const targetLegacy = normCode(fullItemCode);
 
-  const matches = progressiviRows.filter((row) => {
-    if (!row.normalized_code) return false;
-    return target.startsWith(row.normalized_code);
+  if (!targetCompact && !targetLegacy) return 0;
+
+  const exactCompactMatches = progressiviRows.filter((row) => {
+    return !!row.normalized_code_compact && row.normalized_code_compact === targetCompact;
   });
 
-  if (matches.length !== 1) return 0;
+  if (exactCompactMatches.length === 1) {
+    return exactCompactMatches[0].giacenza_qta1_fiscale;
+  }
 
-  return round2(matches[0].giacenza_qta1_fiscale);
+  if (exactCompactMatches.length > 1) return 0;
+
+  const exactLegacyMatches = progressiviRows.filter((row) => {
+    return !!row.normalized_code_legacy && row.normalized_code_legacy === targetLegacy;
+  });
+
+  if (exactLegacyMatches.length === 1) {
+    return exactLegacyMatches[0].giacenza_qta1_fiscale;
+  }
+
+  return 0;
 }
 
 function computeTotals(rows: ProgressiviBlockRow[]) {
@@ -700,11 +737,19 @@ async function computeLiveProgressiviData(
     categories,
   });
 
+  const allItems = await loadAllItems();
+
   let universeCodes: string[] = [];
   const universeMap = new Map<string, CategoryUniverseItem>();
+  const allItemsMap = new Map<string, CategoryUniverseItem>();
 
-  if (resolvedCurrentLogicalCategory.resolvedCategoryId) {
-    const allItems = await loadAllItems();
+  for (const item of allItems) {
+    const compactCode = normCodeCompact(item.code);
+    if (!compactCode) continue;
+    allItemsMap.set(compactCode, item);
+  }
+
+  if (currentHeader.category_id !== null && resolvedCurrentLogicalCategory.resolvedCategoryId) {
     const categoryUniverse = getCategoryItemsUniverse({
       items: allItems,
       resolvedCategoryId: resolvedCurrentLogicalCategory.resolvedCategoryId,
@@ -736,60 +781,76 @@ async function computeLiveProgressiviData(
 
   const extraCurrentCodes = currentRows
     .map((row) => normCodeCompact(row.items?.code))
-    .filter(Boolean);
+    .filter(Boolean) as string[];
 
   const extraPreviousCodes = previousRows
     .map((row) => normCodeCompact(row.items?.code))
-    .filter(Boolean);
+    .filter(Boolean) as string[];
+
+  const [currentProgressiviRows, previousProgressiviRows] = await Promise.all([
+    loadProgressiviRows(currentHeader.pv_id, currentHeader.inventory_date),
+    prevHeader
+      ? loadProgressiviRows(currentHeader.pv_id, prevHeader.inventory_date)
+      : Promise.resolve([]),
+  ]);
+
+  const progressiviCodesCurrent = currentProgressiviRows
+    .map((row) => row.normalized_code_compact)
+    .filter(Boolean) as string[];
+
+  const progressiviCodesPrevious = previousProgressiviRows
+    .map((row) => row.normalized_code_compact)
+    .filter(Boolean) as string[];
 
   const codes = Array.from(
     new Set([
       ...universeCodes,
       ...extraCurrentCodes,
       ...extraPreviousCodes,
+      ...progressiviCodesCurrent,
+      ...progressiviCodesPrevious,
     ])
   ).sort((a, b) => a.localeCompare(b, "it"));
 
-  const [currentProgressiviRows, previousProgressiviRows] = await Promise.all([
-  loadProgressiviRows(currentHeader.pv_id, currentHeader.inventory_date),
-  prevHeader
-    ? loadProgressiviRows(currentHeader.pv_id, prevHeader.inventory_date)
-    : Promise.resolve([]),
-]);
+  const rows: ProgressiviBlockRow[] = codes.map((code) => {
+    const cur =
+      currentInventoryByResolvedCode.get(code) ??
+      currentRows.find((row) => normCodeCompact(row.items?.code) === code) ??
+      null;
 
-const rows: ProgressiviBlockRow[] = codes.map((code) => {
-  const cur =
-    currentInventoryByResolvedCode.get(code) ??
-    currentRows.find((row) => normCodeCompact(row.items?.code) === code) ??
-    null;
+    const prev =
+      previousInventoryByResolvedCode.get(code) ??
+      previousRows.find((row) => normCodeCompact(row.items?.code) === code) ??
+      null;
 
-  const prev =
-    previousInventoryByResolvedCode.get(code) ??
-    previousRows.find((row) => normCodeCompact(row.items?.code) === code) ??
-    null;
+    const universeItem = universeMap.get(code) ?? null;
+    const anyItem = allItemsMap.get(code) ?? null;
+    const base = cur ?? prev;
 
-  const universeItem = universeMap.get(code) ?? null;
-  const base = cur ?? prev;
+    const price = round2(
+      toNum(
+        base?.items?.prezzo_vendita_eur ??
+          universeItem?.prezzo_vendita_eur ??
+          anyItem?.prezzo_vendita_eur
+      )
+    );
 
-  const price = round2(
-    toNum(base?.items?.prezzo_vendita_eur ?? universeItem?.prezzo_vendita_eur)
-  );
+    const prevInventario = calcInventario(prev);
+    const currInventario = calcInventario(cur);
 
-  const prevInventario = calcInventario(prev);
-  const currInventario = calcInventario(cur);
+    const progressivoSourceCode = String(
+      base?.items?.code ?? universeItem?.code ?? anyItem?.code ?? code
+    ).trim();
 
-  const progressivoSourceCode =
-    String(base?.items?.code ?? universeItem?.code ?? code).trim();
+    const prevGest = resolveUniqueProgressivoValue(
+      previousProgressiviRows,
+      progressivoSourceCode
+    );
 
-  const prevGest = resolveUniqueProgressivoValue(
-    previousProgressiviRows,
-    progressivoSourceCode
-  );
-
-  const currGest = resolveUniqueProgressivoValue(
-    currentProgressiviRows,
-    progressivoSourceCode
-  );
+    const currGest = resolveUniqueProgressivoValue(
+      currentProgressiviRows,
+      progressivoSourceCode
+    );
 
     const prevCaricoNonReg = 0;
     const currCaricoNonReg = 0;
@@ -804,10 +865,12 @@ const rows: ProgressiviBlockRow[] = codes.map((code) => {
     const valoreDifferenza = round2(differenza * price);
 
     return {
-      item_id: base?.item_id ?? universeItem?.id ?? null,
-      item_code: String(base?.items?.code ?? universeItem?.code ?? code).trim(),
-      description: String(base?.items?.description ?? universeItem?.description ?? "").trim(),
-      um: (base?.items?.um ?? universeItem?.um ?? null) as string | null,
+      item_id: base?.item_id ?? universeItem?.id ?? anyItem?.id ?? null,
+      item_code: String(base?.items?.code ?? universeItem?.code ?? anyItem?.code ?? code).trim(),
+      description: String(
+        base?.items?.description ?? universeItem?.description ?? anyItem?.description ?? ""
+      ).trim(),
+      um: (base?.items?.um ?? universeItem?.um ?? anyItem?.um ?? null) as string | null,
       prezzo_vendita_eur: price,
       previous: {
         inventario: prevInventario,
@@ -880,46 +943,113 @@ export async function getProgressiviReportData(
       rows: live.rows.map((row) => blockRowToSnapshotInput(row)),
     });
 
-    finalRows = created.rows.length > 0
-      ? created.rows.map(snapshotRowToBlockRow)
-      : live.rows;
+    finalRows = created.rows.length > 0 ? created.rows.map(snapshotRowToBlockRow) : live.rows;
   } else {
     const snapshot = await loadProgressiviSnapshot(existingSnapshot.id);
-    const liveByCode = new Map<string, ProgressiviBlockRow>();
 
-    for (const row of live.rows) {
-      liveByCode.set(normCodeCompact(row.item_code), row);
-    }
+    if (snapshot.rows.length === 0) {
+      const { error: deleteRowsError } = await supabaseAdmin
+        .from("progressivi_report_rows")
+        .delete()
+        .eq("report_header_id", existingSnapshot.id);
 
-    const recountedCodes = await loadRecountedItemCodes(live.currentHeader.id);
-
-    const updatedSnapshotRows: ProgressiviSnapshotRow[] = [];
-
-    for (const snapRow of snapshot.rows) {
-      const normalizedCode = normCodeCompact(snapRow.item_code);
-
-      if (!recountedCodes.has(normalizedCode)) {
-        updatedSnapshotRows.push(snapRow);
-        continue;
+      if (deleteRowsError) {
+        throw new Error(
+          `Errore cancellazione righe snapshot vuoto: ${deleteRowsError.message}`
+        );
       }
 
-      const liveRow = liveByCode.get(normalizedCode);
+      const { error: deleteHeaderError } = await supabaseAdmin
+        .from("progressivi_report_headers")
+        .delete()
+        .eq("id", existingSnapshot.id);
 
-      if (!liveRow) {
-        updatedSnapshotRows.push(snapRow);
-        continue;
+      if (deleteHeaderError) {
+        throw new Error(
+          `Errore cancellazione header snapshot vuoto: ${deleteHeaderError.message}`
+        );
       }
 
-      const updated = await updateSingleProgressiviSnapshotRow({
-        report_header_id: existingSnapshot.id,
-        item_code: snapRow.item_code,
-        row: blockRowToSnapshotInput(liveRow, true, live.currentHeader.id),
+      const recreated = await createProgressiviSnapshot({
+        header: {
+          pv_id: live.currentHeader.pv_id,
+          current_header_id: live.currentHeader.id,
+          previous_header_id: live.previousHeader?.id ?? null,
+          inventory_date_current: live.currentHeader.inventory_date,
+          inventory_date_previous: live.previousHeader?.inventory_date ?? null,
+          category_id: live.currentHeader.category_id,
+          subcategory_id: live.currentHeader.subcategory_id,
+          label: live.currentHeader.label ?? null,
+          logical_category_id: live.logicalCategory.resolvedCategoryId,
+          logical_category_name: live.logicalCategory.resolvedCategoryName,
+          created_by_username: null,
+        },
+        rows: live.rows.map((row) => blockRowToSnapshotInput(row)),
       });
 
-      updatedSnapshotRows.push(updated);
-    }
+      finalRows =
+        recreated.rows.length > 0
+          ? recreated.rows.map(snapshotRowToBlockRow)
+          : live.rows;
+    } else {
+      const snapshotCodes = snapshot.rows
+        .map((row) => normCodeCompact(row.item_code))
+        .filter(Boolean);
 
-    finalRows = updatedSnapshotRows.map(snapshotRowToBlockRow);
+      const liveCodes = live.rows
+        .map((row) => normCodeCompact(row.item_code))
+        .filter(Boolean);
+
+      const mustRealignSnapshot = !sameNormalizedCodeSet(snapshotCodes, liveCodes);
+
+      if (mustRealignSnapshot) {
+        const replacedRows = await replaceProgressiviSnapshotRows({
+          report_header_id: existingSnapshot.id,
+          rows: live.rows.map((row) => blockRowToSnapshotInput(row)),
+        });
+
+        finalRows =
+          replacedRows.length > 0
+            ? replacedRows.map(snapshotRowToBlockRow)
+            : live.rows;
+      } else {
+        const liveByCode = new Map<string, ProgressiviBlockRow>();
+
+        for (const row of live.rows) {
+          liveByCode.set(normCodeCompact(row.item_code), row);
+        }
+
+        const recountedCodes = await loadRecountedItemCodes(live.currentHeader.id);
+
+        const updatedSnapshotRows: ProgressiviSnapshotRow[] = [];
+
+        for (const snapRow of snapshot.rows) {
+          const normalizedCode = normCodeCompact(snapRow.item_code);
+
+          if (!recountedCodes.has(normalizedCode)) {
+            updatedSnapshotRows.push(snapRow);
+            continue;
+          }
+
+          const liveRow = liveByCode.get(normalizedCode);
+
+          if (!liveRow) {
+            updatedSnapshotRows.push(snapRow);
+            continue;
+          }
+
+          const updated = await updateSingleProgressiviSnapshotRow({
+            report_header_id: existingSnapshot.id,
+            item_code: snapRow.item_code,
+            row: blockRowToSnapshotInput(liveRow, true, live.currentHeader.id),
+          });
+
+          updatedSnapshotRows.push(updated);
+        }
+
+        finalRows = updatedSnapshotRows.map(snapshotRowToBlockRow);
+      }
+    }
   }
 
   const totals = computeTotals(finalRows);

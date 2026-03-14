@@ -169,6 +169,20 @@ export async function createProgressiviSnapshot(
   header: ProgressiviSnapshotHeader;
   rows: ProgressiviSnapshotRow[];
 }> {
+  const normalizedInputRows = input.rows
+    .map((row) => ({
+      ...row,
+      item_code: String(row.item_code ?? "").trim(),
+      description: String(row.description ?? "").trim(),
+    }))
+    .filter((row) => row.item_code);
+
+  if (normalizedInputRows.length === 0) {
+    throw new Error(
+      "Impossibile creare snapshot progressivi: nessuna riga valida da salvare."
+    );
+  }
+
   const { data: headerData, error: headerErr } = await supabaseAdmin
     .from("progressivi_report_headers")
     .insert({
@@ -192,24 +206,27 @@ export async function createProgressiviSnapshot(
 
   const header = headerData as ProgressiviSnapshotHeader;
 
-  const rowsPayload = input.rows
+  const rowsPayload = normalizedInputRows
     .map((row) => normalizeSnapshotRow(header.id, row))
     .filter((row) => row.item_code);
-
-  if (rowsPayload.length === 0) {
-    return { header, rows: [] };
-  }
 
   const { data: rowsData, error: rowsErr } = await supabaseAdmin
     .from("progressivi_report_rows")
     .insert(rowsPayload)
     .select("*");
 
-  if (rowsErr) throw rowsErr;
+  if (rowsErr) {
+    await supabaseAdmin
+      .from("progressivi_report_headers")
+      .delete()
+      .eq("id", header.id);
+
+    throw rowsErr;
+  }
 
   return {
     header,
-    rows: ((rowsData ?? []) as ProgressiviSnapshotRow[]),
+    rows: (rowsData ?? []) as ProgressiviSnapshotRow[],
   };
 }
 
@@ -239,7 +256,7 @@ export async function loadProgressiviSnapshot(snapshotId: string): Promise<{
 
   return {
     header: headerData as ProgressiviSnapshotHeader,
-    rows: ((rowsData ?? []) as ProgressiviSnapshotRow[]),
+    rows: (rowsData ?? []) as ProgressiviSnapshotRow[],
   };
 }
 

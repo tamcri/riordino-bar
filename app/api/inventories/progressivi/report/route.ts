@@ -105,7 +105,7 @@ export async function GET(req: Request) {
       { width: 18 }, // M Curr Valore inventario
       { width: 14 }, // N Differenza
       { width: 18 }, // O Valore differenza
-      { width: 12 }, // P Prezzo unitario nascosto
+      { width: 12 }, // P Prezzo unitario
     ];
 
     ws.mergeCells("A1:P1");
@@ -203,19 +203,22 @@ export async function GET(req: Request) {
       excelRow.getCell(4).value = row.previous.inventario;
       excelRow.getCell(5).value = row.previous.giacenza_da_gestionale;
       excelRow.getCell(6).value = 0;
-      excelRow.getCell(7).value = { formula: `${prevInventarioCell}-${prevGestCell}-${prevCaricoCell}` };
+      excelRow.getCell(7).value = {
+        formula: `${prevInventarioCell}-${prevGestCell}-${prevCaricoCell}`,
+      };
       excelRow.getCell(8).value = { formula: euroFormula(priceCell, prevInventarioCell) };
 
       excelRow.getCell(9).value = row.current.inventario;
       excelRow.getCell(10).value = row.current.giacenza_da_gestionale;
       excelRow.getCell(11).value = 0;
-      excelRow.getCell(12).value = { formula: `${currInventarioCell}-${currGestCell}-${currCaricoCell}` };
+      excelRow.getCell(12).value = {
+        formula: `${currInventarioCell}-${currGestCell}-${currCaricoCell}`,
+      };
       excelRow.getCell(13).value = { formula: euroFormula(priceCell, currInventarioCell) };
 
       excelRow.getCell(14).value = { formula: `${currGiacenzaCell}-${prevGiacenzaCell}` };
       excelRow.getCell(15).value = { formula: euroFormula(priceCell, diffCell) };
 
-      // colonna tecnica nascosta
       excelRow.getCell(16).value = row.prezzo_vendita_eur;
 
       excelRow.alignment = { vertical: "middle", wrapText: true };
@@ -283,15 +286,14 @@ export async function GET(req: Request) {
 
     ws.autoFilter = {
       from: { row: 4, column: 1 },
-      to: { row: 4, column: 15 },
+      to: { row: 4, column: 16 },
     };
 
-    ws.getColumn(16).hidden = true;
     ws.getRow(1).height = 22;
     ws.getRow(3).height = 20;
 
     const noteRowIndex = rowIndex + 2;
-    ws.mergeCells(`A${noteRowIndex}:O${noteRowIndex}`);
+    ws.mergeCells(`A${noteRowIndex}:P${noteRowIndex}`);
     ws.getCell(`A${noteRowIndex}`).value =
       "Nota: le colonne 'CARICO NON REGISTRATO' sono modificabili solo nel file Excel. Le colonne GIACENZA, DIFFERENZA e VALORE DIFFERENZA si aggiornano automaticamente tramite formula.";
     ws.getCell(`A${noteRowIndex}`).font = {
@@ -305,7 +307,8 @@ export async function GET(req: Request) {
     return new NextResponse(new Uint8Array(buf as ArrayBuffer), {
       status: 200,
       headers: {
-        "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "content-type":
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "content-disposition": `attachment; filename="${filename}"`,
         "cache-control": "no-store",
       },
