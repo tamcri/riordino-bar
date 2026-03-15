@@ -12,7 +12,6 @@ import {
   findExistingProgressiviSnapshot,
   loadProgressiviSnapshot,
   replaceProgressiviSnapshotRows,
-  updateSingleProgressiviSnapshotRow,
   type ProgressiviSnapshotRow,
 } from "@/lib/progressivi/snapshot";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
@@ -241,6 +240,15 @@ function round2(n: number) {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
+/**
+ * Normalizza i numeri quantità eliminando il rumore floating
+ * senza trasformarli in importi a 2 decimali.
+ */
+function normalizeQty(n: number) {
+  if (!Number.isFinite(n)) return 0;
+  return Number(n.toFixed(6));
+}
+
 function calcInventario(row: InventoryRowRaw | null | undefined) {
   if (!row) return 0;
 
@@ -250,22 +258,9 @@ function calcInventario(row: InventoryRowRaw | null | undefined) {
   const qtyGr = toNum(row.qty_gr);
   const pesoKg = toNum(row.items?.peso_kg);
 
-  if (um === "LT") return qtyMl / 1000;
-  if (um === "KG") return qty * pesoKg + qtyGr / 1000;
-  return qty;
-}
-
-function sameNormalizedCodeSet(left: string[], right: string[]): boolean {
-  if (left.length !== right.length) return false;
-
-  const leftSet = new Set(left);
-  if (leftSet.size !== right.length) return false;
-
-  for (const code of right) {
-    if (!leftSet.has(code)) return false;
-  }
-
-  return true;
+  if (um === "LT") return normalizeQty(qtyMl / 1000);
+  if (um === "KG") return normalizeQty(qty * pesoKg + qtyGr / 1000);
+  return normalizeQty(qty);
 }
 
 async function loadCategories(): Promise<LogicalCategory[]> {
@@ -494,7 +489,7 @@ async function loadProgressiviRows(
       raw_code: String(row.item_code ?? "").trim(),
       normalized_code_legacy: normCode(row.item_code),
       normalized_code_compact: normCodeCompact(row.item_code),
-      giacenza_qta1_fiscale: toExactDecimal(row.giacenza_qta1_fiscale),
+      giacenza_qta1_fiscale: normalizeQty(toExactDecimal(row.giacenza_qta1_fiscale)),
     }))
     .filter((row) => row.normalized_code_legacy || row.normalized_code_compact);
 }
@@ -608,7 +603,7 @@ function resolveUniqueProgressivoValue(
   });
 
   if (exactCompactMatches.length === 1) {
-    return exactCompactMatches[0].giacenza_qta1_fiscale;
+    return normalizeQty(exactCompactMatches[0].giacenza_qta1_fiscale);
   }
 
   if (exactCompactMatches.length > 1) return 0;
@@ -618,7 +613,7 @@ function resolveUniqueProgressivoValue(
   });
 
   if (exactLegacyMatches.length === 1) {
-    return exactLegacyMatches[0].giacenza_qta1_fiscale;
+    return normalizeQty(exactLegacyMatches[0].giacenza_qta1_fiscale);
   }
 
   return 0;
@@ -627,23 +622,31 @@ function resolveUniqueProgressivoValue(
 function computeTotals(rows: ProgressiviBlockRow[]) {
   return rows.reduce(
     (acc, row) => {
-      acc.previous.inventario += row.previous.inventario;
-      acc.previous.giacenza_da_gestionale += row.previous.giacenza_da_gestionale;
-      acc.previous.carico_non_registrato += row.previous.carico_non_registrato;
-      acc.previous.giacenza += row.previous.giacenza;
+      acc.previous.inventario = normalizeQty(acc.previous.inventario + row.previous.inventario);
+      acc.previous.giacenza_da_gestionale = normalizeQty(
+        acc.previous.giacenza_da_gestionale + row.previous.giacenza_da_gestionale
+      );
+      acc.previous.carico_non_registrato = normalizeQty(
+        acc.previous.carico_non_registrato + row.previous.carico_non_registrato
+      );
+      acc.previous.giacenza = normalizeQty(acc.previous.giacenza + row.previous.giacenza);
       acc.previous.valore_giacenza = round2(
         acc.previous.valore_giacenza + row.previous.valore_giacenza
       );
 
-      acc.current.inventario += row.current.inventario;
-      acc.current.giacenza_da_gestionale += row.current.giacenza_da_gestionale;
-      acc.current.carico_non_registrato += row.current.carico_non_registrato;
-      acc.current.giacenza += row.current.giacenza;
+      acc.current.inventario = normalizeQty(acc.current.inventario + row.current.inventario);
+      acc.current.giacenza_da_gestionale = normalizeQty(
+        acc.current.giacenza_da_gestionale + row.current.giacenza_da_gestionale
+      );
+      acc.current.carico_non_registrato = normalizeQty(
+        acc.current.carico_non_registrato + row.current.carico_non_registrato
+      );
+      acc.current.giacenza = normalizeQty(acc.current.giacenza + row.current.giacenza);
       acc.current.valore_giacenza = round2(
         acc.current.valore_giacenza + row.current.valore_giacenza
       );
 
-      acc.riscontro.differenza += row.riscontro.differenza;
+      acc.riscontro.differenza = normalizeQty(acc.riscontro.differenza + row.riscontro.differenza);
       acc.riscontro.valore_differenza = round2(
         acc.riscontro.valore_differenza + row.riscontro.valore_differenza
       );
@@ -685,19 +688,19 @@ function blockRowToSnapshotInput(
     um: row.um,
     prezzo_vendita_eur: row.prezzo_vendita_eur,
 
-    previous_inventario: row.previous.inventario,
-    previous_gestionale: row.previous.giacenza_da_gestionale,
-    previous_carico_non_registrato: row.previous.carico_non_registrato,
-    previous_giacenza: row.previous.giacenza,
+    previous_inventario: normalizeQty(row.previous.inventario),
+    previous_gestionale: normalizeQty(row.previous.giacenza_da_gestionale),
+    previous_carico_non_registrato: normalizeQty(row.previous.carico_non_registrato),
+    previous_giacenza: normalizeQty(row.previous.giacenza),
     previous_valore: row.previous.valore_giacenza,
 
-    current_inventario: row.current.inventario,
-    current_gestionale: row.current.giacenza_da_gestionale,
-    current_carico_non_registrato: row.current.carico_non_registrato,
-    current_giacenza: row.current.giacenza,
+    current_inventario: normalizeQty(row.current.inventario),
+    current_gestionale: normalizeQty(row.current.giacenza_da_gestionale),
+    current_carico_non_registrato: normalizeQty(row.current.carico_non_registrato),
+    current_giacenza: normalizeQty(row.current.giacenza),
     current_valore: row.current.valore_giacenza,
 
-    differenza: row.riscontro.differenza,
+    differenza: normalizeQty(row.riscontro.differenza),
     valore_differenza: row.riscontro.valore_differenza,
 
     is_recounted: isRecounted,
@@ -714,21 +717,21 @@ function snapshotRowToBlockRow(row: ProgressiviSnapshotRow): ProgressiviBlockRow
     um: row.um,
     prezzo_vendita_eur: round2(toNum(row.prezzo_vendita_eur)),
     previous: {
-      inventario: toNum(row.previous_inventario),
-      giacenza_da_gestionale: toExactDecimal(row.previous_gestionale),
-      carico_non_registrato: toNum(row.previous_carico_non_registrato),
-      giacenza: toNum(row.previous_giacenza),
+      inventario: normalizeQty(toNum(row.previous_inventario)),
+      giacenza_da_gestionale: normalizeQty(toExactDecimal(row.previous_gestionale)),
+      carico_non_registrato: normalizeQty(toNum(row.previous_carico_non_registrato)),
+      giacenza: normalizeQty(toNum(row.previous_giacenza)),
       valore_giacenza: round2(toNum(row.previous_valore)),
     },
     current: {
-      inventario: toNum(row.current_inventario),
-      giacenza_da_gestionale: toExactDecimal(row.current_gestionale),
-      carico_non_registrato: toNum(row.current_carico_non_registrato),
-      giacenza: toNum(row.current_giacenza),
+      inventario: normalizeQty(toNum(row.current_inventario)),
+      giacenza_da_gestionale: normalizeQty(toExactDecimal(row.current_gestionale)),
+      carico_non_registrato: normalizeQty(toNum(row.current_carico_non_registrato)),
+      giacenza: normalizeQty(toNum(row.current_giacenza)),
       valore_giacenza: round2(toNum(row.current_valore)),
     },
     riscontro: {
-      differenza: toNum(row.differenza),
+      differenza: normalizeQty(toNum(row.differenza)),
       valore_differenza: round2(toNum(row.valore_differenza)),
     },
   };
@@ -878,13 +881,13 @@ async function computeLiveProgressiviData(
     const prevCaricoNonReg = 0;
     const currCaricoNonReg = 0;
 
-    const prevGiacenza = (prevInventario - prevGest) - prevCaricoNonReg;
-    const currGiacenza = (currInventario - currGest) - currCaricoNonReg;
+    const prevGiacenza = normalizeQty((prevInventario - prevGest) - prevCaricoNonReg);
+    const currGiacenza = normalizeQty((currInventario - currGest) - currCaricoNonReg);
 
     const prevValore = round2(prevInventario * price);
     const currValore = round2(currInventario * price);
 
-    const differenza = currGiacenza - prevGiacenza;
+    const differenza = normalizeQty(currGiacenza - prevGiacenza);
     const valoreDifferenza = round2(differenza * price);
 
     return {
@@ -947,6 +950,10 @@ export async function getProgressiviReportData(
   });
 
   let finalRows: ProgressiviBlockRow[] = [];
+  const recountedCodes = await loadRecountedItemCodesForHeaders([
+    live.currentHeader.id,
+    live.previousHeader?.id ?? null,
+  ]);
 
   if (!existingSnapshot) {
     const created = await createProgressiviSnapshot({
@@ -963,7 +970,13 @@ export async function getProgressiviReportData(
         logical_category_name: live.logicalCategory.resolvedCategoryName,
         created_by_username: null,
       },
-      rows: live.rows.map((row) => blockRowToSnapshotInput(row)),
+      rows: live.rows.map((row) =>
+        blockRowToSnapshotInput(
+          row,
+          recountedCodes.has(normCodeCompact(row.item_code)),
+          recountedCodes.has(normCodeCompact(row.item_code)) ? live.currentHeader.id : null
+        )
+      ),
     });
 
     finalRows = created.rows.length > 0 ? created.rows.map(snapshotRowToBlockRow) : live.rows;
@@ -1007,7 +1020,13 @@ export async function getProgressiviReportData(
           logical_category_name: live.logicalCategory.resolvedCategoryName,
           created_by_username: null,
         },
-        rows: live.rows.map((row) => blockRowToSnapshotInput(row)),
+        rows: live.rows.map((row) =>
+          blockRowToSnapshotInput(
+            row,
+            recountedCodes.has(normCodeCompact(row.item_code)),
+            recountedCodes.has(normCodeCompact(row.item_code)) ? live.currentHeader.id : null
+          )
+        ),
       });
 
       finalRows =
@@ -1015,89 +1034,28 @@ export async function getProgressiviReportData(
           ? recreated.rows.map(snapshotRowToBlockRow)
           : live.rows;
     } else {
-      const snapshotCodes = snapshot.rows
-        .map((row) => normCodeCompact(row.item_code))
-        .filter(Boolean);
+      /**
+       * FIX IMPORTANTE:
+       * Se esiste già uno snapshot, NON congeliamo più i valori vecchi.
+       * Riallineiamo sempre tutte le righe ai dati live del database.
+       *
+       * La riconta resta solo come flag/audit nello snapshot.
+       */
+      const replacedRows = await replaceProgressiviSnapshotRows({
+        report_header_id: existingSnapshot.id,
+        rows: live.rows.map((row) =>
+          blockRowToSnapshotInput(
+            row,
+            recountedCodes.has(normCodeCompact(row.item_code)),
+            recountedCodes.has(normCodeCompact(row.item_code)) ? live.currentHeader.id : null
+          )
+        ),
+      });
 
-      const liveCodes = live.rows
-        .map((row) => normCodeCompact(row.item_code))
-        .filter(Boolean);
-
-      const recountedCodes = await loadRecountedItemCodesForHeaders([
-        live.currentHeader.id,
-        live.previousHeader?.id ?? null,
-      ]);
-
-      const liveByCode = new Map<string, ProgressiviBlockRow>();
-
-      for (const row of live.rows) {
-        liveByCode.set(normCodeCompact(row.item_code), row);
-      }
-
-      const mustRealignSnapshot = !sameNormalizedCodeSet(snapshotCodes, liveCodes);
-
-      if (mustRealignSnapshot) {
-        const mergedRowsMap = new Map<string, ProgressiviBlockRow>();
-
-        for (const snapRow of snapshot.rows) {
-          const normalizedCode = normCodeCompact(snapRow.item_code);
-          const liveRow = liveByCode.get(normalizedCode);
-
-          if (recountedCodes.has(normalizedCode) && liveRow) {
-            mergedRowsMap.set(normalizedCode, liveRow);
-          } else {
-            mergedRowsMap.set(normalizedCode, snapshotRowToBlockRow(snapRow));
-          }
-        }
-
-        for (const [normalizedCode, liveRow] of liveByCode.entries()) {
-          if (!mergedRowsMap.has(normalizedCode)) {
-            mergedRowsMap.set(normalizedCode, liveRow);
-          }
-        }
-
-        const mergedRows = Array.from(mergedRowsMap.values()).sort((a, b) =>
-          a.item_code.localeCompare(b.item_code, "it")
-        );
-
-        const replacedRows = await replaceProgressiviSnapshotRows({
-          report_header_id: existingSnapshot.id,
-          rows: mergedRows.map((row) => blockRowToSnapshotInput(row)),
-        });
-
-        finalRows =
-          replacedRows.length > 0
-            ? replacedRows.map(snapshotRowToBlockRow)
-            : mergedRows;
-      } else {
-        const updatedSnapshotRows: ProgressiviSnapshotRow[] = [];
-
-        for (const snapRow of snapshot.rows) {
-          const normalizedCode = normCodeCompact(snapRow.item_code);
-
-          if (!recountedCodes.has(normalizedCode)) {
-            updatedSnapshotRows.push(snapRow);
-            continue;
-          }
-
-          const liveRow = liveByCode.get(normalizedCode);
-
-          if (!liveRow) {
-            updatedSnapshotRows.push(snapRow);
-            continue;
-          }
-
-          const updated = await updateSingleProgressiviSnapshotRow({
-            report_header_id: existingSnapshot.id,
-            item_code: snapRow.item_code,
-            row: blockRowToSnapshotInput(liveRow, true, live.currentHeader.id),
-          });
-
-          updatedSnapshotRows.push(updated);
-        }
-
-        finalRows = updatedSnapshotRows.map(snapshotRowToBlockRow);
-      }
+      finalRows =
+        replacedRows.length > 0
+          ? replacedRows.map(snapshotRowToBlockRow)
+          : live.rows;
     }
   }
 
