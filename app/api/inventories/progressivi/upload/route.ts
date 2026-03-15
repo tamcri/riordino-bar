@@ -28,17 +28,15 @@ function normCodeCompact(v: any) {
   return String(v ?? "").trim().toUpperCase().replace(/\s+/g, "");
 }
 
+function isTotalRowCode(v: any) {
+  const s = String(v ?? "").trim().toLowerCase().replace(/\s+/g, "");
+  if (!s) return false;
+  return s.includes("totalegenerale") || s === "totale";
+}
+
 /**
- * ✅ Parser numerico robusto:
- * - "1.234,56" => 1234.56
- * - "13.375"   => 13.375 (dot = decimale, NON migliaia)
- * - "13,375"   => 13.375
- * - "3.000"    => 3000 (qui è ambiguo, ma se nel file è formato IT classico, è migliaia)
- *
- * Regola:
- * - se ci sono sia "." che "," => "." migliaia, "," decimale
- * - se c'è solo "," => "," decimale
- * - se c'è solo "." => "." decimale (NON rimuovere)
+ * Parser numerico "normale" per carico/scarico.
+ * Qui va bene un number JS.
  */
 function toNum(v: any): number | null {
   if (v === null || v === undefined || v === "") return null;
@@ -60,6 +58,47 @@ function toNum(v: any): number | null {
 
   const x = Number(s);
   return Number.isFinite(x) ? x : null;
+}
+
+/**
+ * ✅ Per giacenza fiscale NON vogliamo arrotondamenti.
+ * Ritorno il valore come stringa numerica normalizzata:
+ * - "12,245" -> "12.245"
+ * - "12.245" -> "12.245"
+ * - 12.245   -> "12.245"
+ * - "1.234,56" -> "1234.56"
+ *
+ * Senza Number(), così non perdiamo precisione/formattazione decimale.
+ */
+function toExactDecimalString(v: any): string | null {
+  if (v === null || v === undefined || v === "") return null;
+
+  if (typeof v === "number") {
+    if (!Number.isFinite(v)) return null;
+    return String(v);
+  }
+
+  let s = String(v).trim();
+  if (!s) return null;
+
+  s = s.replace(/\s+/g, "");
+
+  const hasDot = s.includes(".");
+  const hasComma = s.includes(",");
+
+  if (hasDot && hasComma) {
+    // formato tipo 1.234,56
+    s = s.replace(/\./g, "").replace(",", ".");
+  } else if (hasComma && !hasDot) {
+    // formato tipo 12,245
+    s = s.replace(",", ".");
+  }
+  // se ha solo il punto, lo lasciamo così
+
+  // validazione minima
+  if (!/^-?\d+(\.\d+)?$/.test(s)) return null;
+
+  return s;
 }
 
 // equivalenza PZ + frazione (ML o GR) se presenti
@@ -138,7 +177,11 @@ function buildHeaders(aoa: any[][], headerRowIdx: number) {
   return headers;
 }
 
-async function loadRecountedItemCodesForDate(pv_id: string, inventory_date: string) {
+/**
+ * ✅ Riconta valida SOLO per quella data progressivo che stai caricando.
+ * Non si porta avanti sugli inventari successivi.
+ */
+async function loadRecountedItemCodesForExactDate(pv_id: string, inventory_date: string) {
   const { data, error } = await supabaseAdmin
     .from("inventory_recount_events")
     .select("item_code")
@@ -219,11 +262,22 @@ export async function POST(req: Request) {
       const code = String(row[idxCod] ?? "").trim();
       if (!code) continue;
 
+      // ✅ escludi righe totale / totale generale
+      if (isTotalRowCode(code)) continue;
+
       const tot_carico_qta1 = toNum(row[idxCar]);
       const tot_scarico_qta1 = toNum(row[idxSca]);
-      const giacenza_qta1_fiscale = toNum(row[idxFis]);
 
-      if (tot_carico_qta1 === null && tot_scarico_qta1 === null && giacenza_qta1_fiscale === null) continue;
+      // ✅ nessun arrotondamento sulla giacenza fiscale
+      const giacenza_qta1_fiscale = toExactDecimalString(row[idxFis]);
+
+      if (
+        tot_carico_qta1 === null &&
+        tot_scarico_qta1 === null &&
+        giacenza_qta1_fiscale === null
+      ) {
+        continue;
+      }
 
       const normalized = normCodeCompact(code);
       if (!normalized) continue;
@@ -246,7 +300,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Nessuna riga valida trovata nel file" }, { status: 400 });
     }
 
-    const recountedCodes = await loadRecountedItemCodesForDate(pv_id, inventory_date);
+    const recountedCodes = await loadRecountedItemCodesForExactDate(pv_id, inventory_date);
 
     const { data: prevHeader, error: prevErr } = await supabaseAdmin
       .from("inventory_progressivi_rows")
@@ -279,6 +333,9 @@ export async function POST(req: Request) {
 
       for (const pr of prevRows || []) {
         const prevCode = String((pr as any)?.item_code ?? "").trim();
+        if (!prevCode) continue;
+        if (isTotalRowCode(prevCode)) continue;
+
         const normalizedPrevCode = normCodeCompact(prevCode);
         if (!normalizedPrevCode) continue;
 
@@ -288,7 +345,11 @@ export async function POST(req: Request) {
           item_code: prevCode,
           tot_carico_qta1: (pr as any)?.tot_carico_qta1 ?? null,
           tot_scarico_qta1: (pr as any)?.tot_scarico_qta1 ?? null,
-          giacenza_qta1_fiscale: (pr as any)?.giacenza_qta1_fiscale ?? null,
+          giacenza_qta1_fiscale:
+            (pr as any)?.giacenza_qta1_fiscale !== null &&
+            (pr as any)?.giacenza_qta1_fiscale !== undefined
+              ? String((pr as any).giacenza_qta1_fiscale)
+              : null,
           created_by: session.username,
         });
       }
@@ -303,6 +364,7 @@ export async function POST(req: Request) {
           mergedMap.set(code, {
             ...base,
             item_code: uploaded.item_code || base.item_code,
+            // ✅ aggiorno SOLO la giacenza fiscale
             giacenza_qta1_fiscale: uploaded.giacenza_qta1_fiscale,
             created_by: session.username,
           });
