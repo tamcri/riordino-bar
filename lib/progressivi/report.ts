@@ -233,10 +233,7 @@ function calcInventario(row: InventoryRowRaw | null | undefined) {
   return round2(qty);
 }
 
-function sameNormalizedCodeSet(
-  left: string[],
-  right: string[]
-): boolean {
+function sameNormalizedCodeSet(left: string[], right: string[]): boolean {
   if (left.length !== right.length) return false;
 
   const leftSet = new Set(left);
@@ -698,12 +695,12 @@ function snapshotRowToBlockRow(row: ProgressiviSnapshotRow): ProgressiviBlockRow
       valore_giacenza: round2(toNum(row.previous_valore)),
     },
     current: {
-      inventario: round2(toNum(row.current_inventario)),
-      giacenza_da_gestionale: round2(toNum(row.current_gestionale)),
-      carico_non_registrato: round2(toNum(row.current_carico_non_registrato)),
-      giacenza: round2(toNum(row.current_giacenza)),
-      valore_giacenza: round2(toNum(row.current_valore)),
-    },
+  inventario: round2(toNum(row.current_inventario)),
+  giacenza_da_gestionale: round2(toNum(row.current_gestionale)),
+  carico_non_registrato: round2(toNum(row.current_carico_non_registrato)),
+  giacenza: round2(toNum(row.current_giacenza)),
+  valore_giacenza: round2(toNum(row.current_valore)),
+},
     riscontro: {
       differenza: round2(toNum(row.differenza)),
       valore_differenza: round2(toNum(row.valore_differenza)),
@@ -1000,27 +997,49 @@ export async function getProgressiviReportData(
         .map((row) => normCodeCompact(row.item_code))
         .filter(Boolean);
 
+      const recountedCodes = await loadRecountedItemCodes(live.currentHeader.id);
+      const liveByCode = new Map<string, ProgressiviBlockRow>();
+
+      for (const row of live.rows) {
+        liveByCode.set(normCodeCompact(row.item_code), row);
+      }
+
       const mustRealignSnapshot = !sameNormalizedCodeSet(snapshotCodes, liveCodes);
 
       if (mustRealignSnapshot) {
+        const mergedRowsMap = new Map<string, ProgressiviBlockRow>();
+
+        for (const snapRow of snapshot.rows) {
+          const normalizedCode = normCodeCompact(snapRow.item_code);
+          const liveRow = liveByCode.get(normalizedCode);
+
+          if (recountedCodes.has(normalizedCode) && liveRow) {
+            mergedRowsMap.set(normalizedCode, liveRow);
+          } else {
+            mergedRowsMap.set(normalizedCode, snapshotRowToBlockRow(snapRow));
+          }
+        }
+
+        for (const [normalizedCode, liveRow] of liveByCode.entries()) {
+          if (!mergedRowsMap.has(normalizedCode)) {
+            mergedRowsMap.set(normalizedCode, liveRow);
+          }
+        }
+
+        const mergedRows = Array.from(mergedRowsMap.values()).sort((a, b) =>
+          a.item_code.localeCompare(b.item_code, "it")
+        );
+
         const replacedRows = await replaceProgressiviSnapshotRows({
           report_header_id: existingSnapshot.id,
-          rows: live.rows.map((row) => blockRowToSnapshotInput(row)),
+          rows: mergedRows.map((row) => blockRowToSnapshotInput(row)),
         });
 
         finalRows =
           replacedRows.length > 0
             ? replacedRows.map(snapshotRowToBlockRow)
-            : live.rows;
+            : mergedRows;
       } else {
-        const liveByCode = new Map<string, ProgressiviBlockRow>();
-
-        for (const row of live.rows) {
-          liveByCode.set(normCodeCompact(row.item_code), row);
-        }
-
-        const recountedCodes = await loadRecountedItemCodes(live.currentHeader.id);
-
         const updatedSnapshotRows: ProgressiviSnapshotRow[] = [];
 
         for (const snapRow of snapshot.rows) {

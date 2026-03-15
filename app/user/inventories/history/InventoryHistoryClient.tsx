@@ -187,8 +187,8 @@ function buildRowsParamsFromGroup(g: InventoryGroup) {
   return p;
 }
 
-/** URL riapertura inventario (modifica) */
-function buildReopenUrl(g: InventoryGroup, role: string | null) {
+/** URL riapertura inventario (modifica / riconta) */
+function buildReopenUrl(g: InventoryGroup, role: string | null, reopenMode: "edit" | "recount" = "edit") {
   const p = new URLSearchParams();
   p.set("pv_id", g.pv_id);
   p.set("inventory_date", g.inventory_date);
@@ -218,6 +218,7 @@ function buildReopenUrl(g: InventoryGroup, role: string | null) {
 
   const base = role === "punto_vendita" ? "/pv/inventario" : "/user/inventories";
   p.set("reopen", "1");
+  p.set("reopen_mode", reopenMode);
   return `${base}?${p.toString()}`;
 }
 
@@ -1075,35 +1076,65 @@ export default function InventoryHistoryClient() {
               return (
                 <div className="flex flex-col">
                   {(me.role === "admin" || me.role === "amministrativo") && (
-                    <button
-                      className={`text-left rounded-lg px-3 py-2 hover:bg-gray-50 text-sm ${!canReopen ? "opacity-50" : ""}`}
-                      onClick={() => {
-                        setActionsOpenKey(null);
-                        setMenuPos(null);
+                    <>
+                      <button
+                        className={`text-left rounded-lg px-3 py-2 hover:bg-gray-50 text-sm ${!canReopen ? "opacity-50" : ""}`}
+                        onClick={() => {
+                          setActionsOpenKey(null);
+                          setMenuPos(null);
 
-                        if (!canReopen) {
-                          alert("Non puoi modificare questo inventario: è stato creato da un altro utente (vincolo attivo lato server).");
-                          return;
-                        }
+                          if (!canReopen) {
+                            alert("Non puoi modificare questo inventario: è stato creato da un altro utente (vincolo attivo lato server).");
+                            return;
+                          }
 
-                        // ✅ Rapido: se manca rapid_session_id (inventari vecchi), NON blocco.
-                        // Avviso solo: potrebbe riaprire “vuoto” oppure prendere righe legacy (sessione NULL).
-                        if (isRapid && !rs) {
-                          const ok = window.confirm(
-                            "Questo inventario è in modalità Rapido ma non ha rapid_session_id (vecchio inventario).\n" +
-                              "Posso comunque provare a riaprirlo, ma gli scansionati potrebbero non combaciare.\n\n" +
-                              "Vuoi continuare?"
-                          );
-                          if (!ok) return;
-                        }
+                          // ✅ Rapido: se manca rapid_session_id (inventari vecchi), NON blocco.
+                          // Avviso solo: potrebbe riaprire “vuoto” oppure prendere righe legacy (sessione NULL).
+                          if (isRapid && !rs) {
+                            const ok = window.confirm(
+                              "Questo inventario è in modalità Rapido ma non ha rapid_session_id (vecchio inventario).\n" +
+                                "Posso comunque provare a riaprirlo, ma gli scansionati potrebbero non combaciare.\n\n" +
+                                "Vuoi continuare?"
+                            );
+                            if (!ok) return;
+                          }
 
-                        router.push(buildReopenUrl(g, me.role));
-                      }}
-                      role="menuitem"
-                      title={!canReopen ? "Inventario creato da altro utente" : "Riapri l'inventario per modificare"}
-                    >
-                      Riapri (modifica)
-                    </button>
+                          router.push(buildReopenUrl(g, me.role, "edit"));
+                        }}
+                        role="menuitem"
+                        title={!canReopen ? "Inventario creato da altro utente" : "Apri l'inventario per modificare"}
+                      >
+                        Modifica
+                      </button>
+
+                      <button
+                        className={`text-left rounded-lg px-3 py-2 hover:bg-gray-50 text-sm ${!canReopen ? "opacity-50" : ""}`}
+                        onClick={() => {
+                          setActionsOpenKey(null);
+                          setMenuPos(null);
+
+                          if (!canReopen) {
+                            alert("Non puoi ricontare questo inventario: è stato creato da un altro utente (vincolo attivo lato server).");
+                            return;
+                          }
+
+                          if (isRapid && !rs) {
+                            const ok = window.confirm(
+                              "Questo inventario è in modalità Rapido ma non ha rapid_session_id (vecchio inventario).\n" +
+                                "Posso comunque provare a riaprirlo, ma gli scansionati potrebbero non combaciare.\n\n" +
+                                "Vuoi continuare?"
+                            );
+                            if (!ok) return;
+                          }
+
+                          router.push(buildReopenUrl(g, me.role, "recount"));
+                        }}
+                        role="menuitem"
+                        title={!canReopen ? "Inventario creato da altro utente" : "Apri l'inventario in modalità riconta"}
+                      >
+                        Riconta
+                      </button>
+                    </>
                   )}
 
                   <button

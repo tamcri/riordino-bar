@@ -39,6 +39,7 @@ type InventoryRowApi = {
 
 type MlInputMode = "fixed" | "mixed"; // fixed=PZ+ML aperti, mixed=solo Totale ML
 type InventoryMode = "standard" | "rapid";
+type ReopenActionMode = "edit" | "recount";
 
 const INVENTORY_MODE_LS_KEY = "inv_mode_admin"; // (best effort) ricordiamo l'ultima scelta nel browser
 
@@ -66,7 +67,7 @@ function onlyDigits(v: string) {
 function normText(v: any) {
   return String(v ?? "")
     .replace(/[\u0000-\u001F\u007F]/g, "") // control chars
-    .replace(/\s+/g, " ")                 // spazi multipli
+    .replace(/\s+/g, " ") // spazi multipli
     .trim()
     .toLowerCase();
 }
@@ -204,8 +205,8 @@ export default function InventoryClient() {
 
   const [operatore, setOperatore] = useState("");
 
-// ✅ Nota categoria (solo testo libero, per colpo d’occhio)
-const [categoryNote, setCategoryNote] = useState("");
+  // ✅ Nota categoria (solo testo libero, per colpo d’occhio)
+  const [categoryNote, setCategoryNote] = useState("");
 
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -239,12 +240,12 @@ const [categoryNote, setCategoryNote] = useState("");
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
 
   // ✅ lista “Scansionati”
-const [scannedIds, setScannedIds] = useState<string[]>([]);
-const [highlightScannedId, setHighlightScannedId] = useState<string | null>(null);
-const [showAllScanned, setShowAllScanned] = useState(false);
+  const [scannedIds, setScannedIds] = useState<string[]>([]);
+  const [highlightScannedId, setHighlightScannedId] = useState<string | null>(null);
+  const [showAllScanned, setShowAllScanned] = useState(false);
 
-// ✅ tiene traccia degli articoli eliminati
-const [deletedItemIds, setDeletedItemIds] = useState<string[]>([]);
+  // ✅ tiene traccia degli articoli eliminati
+  const [deletedItemIds, setDeletedItemIds] = useState<string[]>([]);
 
   // ✅ “da aggiungere”
   const [addPzMap, setAddPzMap] = useState<Record<string, string>>({});
@@ -274,11 +275,13 @@ const [deletedItemIds, setDeletedItemIds] = useState<string[]>([]);
   // ✅ init da querystring (riapri da storico)
   const didInitFromUrlRef = useRef(false);
   const reopenModeRef = useRef(false);
+  const reopenActionModeRef = useRef<ReopenActionMode>("edit");
+  const [reopenActionMode, setReopenActionMode] = useState<ReopenActionMode>("edit");
   // ✅ vero se il rapid_session_id arriva dall'URL (reopen). Se manca, è un inventario rapido legacy (sessione NULL).
   const rapidSessionFromUrlRef = useRef<boolean>(false);
 
   // ✅ evita di sovrascrivere la bozza con stato vuoto durante il primo mount / F5
-const didHydrateDraftRef = useRef(false);
+  const didHydrateDraftRef = useRef(false);
 
   // ✅ valori iniziali da URL (per evitare override dei default al primo load)
   const initFromUrlValuesRef = useRef<{ pvId?: string; categoryId?: string; subcategoryId?: string } | null>(null);
@@ -307,83 +310,83 @@ const didHydrateDraftRef = useRef(false);
   }, [mlModeMap]);
 
   useEffect(() => {
-  // ✅ se sto riaprendo da storico con sessione in URL, NON tocco niente
-  if (rapidSessionFromUrlRef.current) return;
+    // ✅ se sto riaprendo da storico con sessione in URL, NON tocco niente
+    if (rapidSessionFromUrlRef.current) return;
 
-  if (!pvId) return;
-  if (!inventoryDate || !isIsoDate(inventoryDate)) return;
+    if (!pvId) return;
+    if (!inventoryDate || !isIsoDate(inventoryDate)) return;
 
-  const stored = readRapidSessionFromStorage(pvId, inventoryDate);
+    const stored = readRapidSessionFromStorage(pvId, inventoryDate);
 
-  if (stored && stored !== rapidSessionId) {
-    // ✅ FONDAMENTALE: sblocco prefill/draft con la nuova sessione
-    lastPrefillKeyRef.current = "";
+    if (stored && stored !== rapidSessionId) {
+      // ✅ FONDAMENTALE: sblocco prefill/draft con la nuova sessione
+      lastPrefillKeyRef.current = "";
 
-    setRapidSessionId(stored);
-    return;
-  }
-
-  if (isUuid(rapidSessionId)) {
-    writeRapidSessionToStorage(pvId, inventoryDate, rapidSessionId);
-  }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [pvId, inventoryDate, rapidSessionId]);
-
-    // ✅ in RAPIDO calcolo “attivo” usando gli STATE (non i ref),
-  // così la lista Scansionati si aggiorna immediatamente (senza lag/race)
-  function isActiveFromState(it: Item) {
-  const id = it.id;
-
-  const pz = safeIntFromStr(qtyPzMap[id] ?? "");
-  const gr = safeGrFromStr(qtyGrMap[id] ?? "");
-  const open = safeIntFromStr(openMlMap[id] ?? "");
-  const total = safeIntFromStr(totalMlMap[id] ?? "");
-  const mode = (mlModeMap[id] as MlInputMode) || "fixed";
-
-  const ml = isMlItem(it);
-  const kg = isKgItem(it) && !ml;
-
-  if (kg) return pz > 0 || gr > 0;
-  if (!ml) return pz > 0;
-
-  if (mode === "mixed") return total > 0;
-
-  // ✅ FIX: se ho totalMl valorizzato, è attivo anche con PZ=0
-  if (total > 0) return true;
-
-  const perUnit = Number(it.volume_ml_per_unit) || 0;
-  const qty_ml = perUnit > 0 ? pz * perUnit + open : open;
-  return qty_ml > 0;
-}
-
-// ✅ FAILSAFE: in RAPIDO ricostruisco sempre "Scansionati" dagli articoli con quantità > 0
-// Serve per evitare che scannedIds vada perso/reset (bug, refresh, draft, reopen, ecc.)
-useEffect(() => {
-  if (inventoryMode !== "rapid") return;
-  if (!items.length) return;
-
-  const activeIds = items.filter((it) => isActiveFromState(it)).map((it) => it.id);
-
-  setScannedIds((prev) => {
-    const activeSet = new Set(activeIds);
-
-    // tengo l'ordine esistente, ma butto fuori quelli non più attivi
-    const keep = prev.filter((id) => activeSet.has(id));
-
-    // aggiungo quelli attivi che mancano (in cima, così li vedi subito)
-    const keepSet = new Set(keep);
-    const missing = activeIds.filter((id) => !keepSet.has(id));
-
-    const next = [...missing, ...keep];
-
-    // ✅ guard robusto: evita update inutili (StrictMode-safe)
-    if (prev.length === next.length && prev.every((v, i) => v === next[i])) {
-      return prev;
+      setRapidSessionId(stored);
+      return;
     }
 
-    return next;
-  });
-}, [inventoryMode, items, qtyPzMap, qtyGrMap, openMlMap, totalMlMap, mlModeMap]);
+    if (isUuid(rapidSessionId)) {
+      writeRapidSessionToStorage(pvId, inventoryDate, rapidSessionId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pvId, inventoryDate, rapidSessionId]);
+
+  // ✅ in RAPIDO calcolo “attivo” usando gli STATE (non i ref),
+  // così la lista Scansionati si aggiorna immediatamente (senza lag/race)
+  function isActiveFromState(it: Item) {
+    const id = it.id;
+
+    const pz = safeIntFromStr(qtyPzMap[id] ?? "");
+    const gr = safeGrFromStr(qtyGrMap[id] ?? "");
+    const open = safeIntFromStr(openMlMap[id] ?? "");
+    const total = safeIntFromStr(totalMlMap[id] ?? "");
+    const mode = (mlModeMap[id] as MlInputMode) || "fixed";
+
+    const ml = isMlItem(it);
+    const kg = isKgItem(it) && !ml;
+
+    if (kg) return pz > 0 || gr > 0;
+    if (!ml) return pz > 0;
+
+    if (mode === "mixed") return total > 0;
+
+    // ✅ FIX: se ho totalMl valorizzato, è attivo anche con PZ=0
+    if (total > 0) return true;
+
+    const perUnit = Number(it.volume_ml_per_unit) || 0;
+    const qty_ml = perUnit > 0 ? pz * perUnit + open : open;
+    return qty_ml > 0;
+  }
+
+  // ✅ FAILSAFE: in RAPIDO ricostruisco sempre "Scansionati" dagli articoli con quantità > 0
+  // Serve per evitare che scannedIds vada perso/reset (bug, refresh, draft, reopen, ecc.)
+  useEffect(() => {
+    if (inventoryMode !== "rapid") return;
+    if (!items.length) return;
+
+    const activeIds = items.filter((it) => isActiveFromState(it)).map((it) => it.id);
+
+    setScannedIds((prev) => {
+      const activeSet = new Set(activeIds);
+
+      // tengo l'ordine esistente, ma butto fuori quelli non più attivi
+      const keep = prev.filter((id) => activeSet.has(id));
+
+      // aggiungo quelli attivi che mancano (in cima, così li vedi subito)
+      const keepSet = new Set(keep);
+      const missing = activeIds.filter((id) => !keepSet.has(id));
+
+      const next = [...missing, ...keep];
+
+      // ✅ guard robusto: evita update inutili (StrictMode-safe)
+      if (prev.length === next.length && prev.every((v, i) => v === next[i])) {
+        return prev;
+      }
+
+      return next;
+    });
+  }, [inventoryMode, items, qtyPzMap, qtyGrMap, openMlMap, totalMlMap, mlModeMap]);
 
   const isRapidMobileBar = inventoryMode === "rapid" && rapidView === "scan";
 
@@ -409,19 +412,19 @@ useEffect(() => {
   }
 
   // ✅ HARD RULE: in Rapido non esistono categorie/sottocategorie
- function forceRapidCategoryNull() {
-  // UI: in Rapido la categoria resta “Nessuna (Tutte)”
-  setCategoryId("");
+  function forceRapidCategoryNull() {
+    // UI: in Rapido la categoria resta “Nessuna (Tutte)”
+    setCategoryId("");
 
-  // ✅ In Rapido NON usiamo subcategoryId (nel DB resta NULL)
-  setSubcategoryId("");
-}
+    // ✅ In Rapido NON usiamo subcategoryId (nel DB resta NULL)
+    setSubcategoryId("");
+  }
 
-// ✅ appena montiamo la pagina: in Rapido categoria sempre vuota
-useEffect(() => {
-  forceRapidCategoryNull();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, []);
+  // ✅ appena montiamo la pagina: in Rapido categoria sempre vuota
+  useEffect(() => {
+    forceRapidCategoryNull();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (didInitFromUrlRef.current) return;
@@ -431,39 +434,47 @@ useEffect(() => {
     const date = (searchParams?.get("inventory_date") || "").trim();
     const op = (searchParams?.get("operatore") || "").trim();
 
+    const reopenActionRaw = (searchParams?.get("reopen_mode") || "").trim().toLowerCase();
+    const nextReopenActionMode: ReopenActionMode =
+      reopenActionRaw === "recount" ? "recount" : "edit";
+
+    reopenActionModeRef.current = nextReopenActionMode;
+    setReopenActionMode(nextReopenActionMode);
+
     // ✅ supporto riapertura Rapido esplicita
     const m = (searchParams?.get("mode") || "").trim().toLowerCase();
     const isRapidUrl = m === "rapid";
-// ✅ supporto riapertura Rapido
-const rapidFromQs = (searchParams?.get("rapid_session_id") || "").trim();
-// compat vecchia: alcuni link mettono la sessione in subcategory_id
-const rapidLegacy = (searchParams?.get("subcategory_id") || "").trim();
 
-const rapidId = isUuid(rapidFromQs)
-  ? rapidFromQs
-  : isUuid(rapidLegacy)
-  ? rapidLegacy
-  : "";
+    // ✅ supporto riapertura Rapido
+    const rapidFromQs = (searchParams?.get("rapid_session_id") || "").trim();
+    // compat vecchia: alcuni link mettono la sessione in subcategory_id
+    const rapidLegacy = (searchParams?.get("subcategory_id") || "").trim();
 
-// ✅ memorizzo se la sessione arriva dall'URL
-rapidSessionFromUrlRef.current = !!rapidId;
+    const rapidId = isUuid(rapidFromQs)
+      ? rapidFromQs
+      : isUuid(rapidLegacy)
+      ? rapidLegacy
+      : "";
 
-if (isRapidUrl && rapidId) {
-  setRapidSessionId(rapidId);
-} else if (isRapidUrl) {
-  // ✅ inventario Rapido legacy: in DB rapid_session_id è NULL
-  // Non genero una sessione nuova qui, altrimenti non vedresti gli scansionati al reopen.
-  setRapidSessionId("");
-}
+    // ✅ memorizzo se la sessione arriva dall'URL
+    rapidSessionFromUrlRef.current = !!rapidId;
+
+    if (isRapidUrl && rapidId) {
+      setRapidSessionId(rapidId);
+    } else if (isRapidUrl) {
+      // ✅ inventario Rapido legacy: in DB rapid_session_id è NULL
+      // Non genero una sessione nuova qui, altrimenti non vedresti gli scansionati al reopen.
+      setRapidSessionId("");
+    }
 
     // ✅ Reopen: Standard richiede pv+cat+date, Rapido richiede pv+date
     reopenModeRef.current = isRapidUrl ? !!(pv && date) : false;
 
     // ✅ Rapido fisso: se URL dice rapid, applico solo vista + categorie null
-  if (isRapidUrl) {
-  setRapidView("scan");
-  forceRapidCategoryNull();
-}
+    if (isRapidUrl) {
+      setRapidView("scan");
+      forceRapidCategoryNull();
+    }
 
     initFromUrlValuesRef.current = {
       pvId: pv || undefined,
@@ -480,35 +491,35 @@ if (isRapidUrl && rapidId) {
 
   // ✅ se passo a Rapido “per qualsiasi motivo” => azzero categorie sempre
   useEffect(() => {
-  if (inventoryMode !== "rapid") return;
-  if (rapidView !== "scan") return;
-  if (!focusItemId) return;
+    if (inventoryMode !== "rapid") return;
+    if (rapidView !== "scan") return;
+    if (!focusItemId) return;
 
-  // ✅ Solo iOS: auto-scroll + focus (su Android evito tastiera che si apre subito)
-  if (!isIOSDevice()) return;
+    // ✅ Solo iOS: auto-scroll + focus (su Android evito tastiera che si apre subito)
+    if (!isIOSDevice()) return;
 
-  const it = items.find((x) => x.id === focusItemId);
-  if (!it) return;
+    const it = items.find((x) => x.id === focusItemId);
+    if (!it) return;
 
-  requestAnimationFrame(() => {
     requestAnimationFrame(() => {
-      const ml = isMlItem(it);
-      const kg = isKgItem(it) && !ml;
+      requestAnimationFrame(() => {
+        const ml = isMlItem(it);
+        const kg = isKgItem(it) && !ml;
 
-      const target = kg ? rapidGrInputRef.current : ml ? rapidMlInputRef.current : rapidPzInputRef.current;
-      if (!target) return;
+        const target = kg ? rapidGrInputRef.current : ml ? rapidMlInputRef.current : rapidPzInputRef.current;
+        if (!target) return;
 
-      try {
-        target.scrollIntoView({ block: "center", behavior: "smooth" });
-      } catch {}
+        try {
+          target.scrollIntoView({ block: "center", behavior: "smooth" });
+        } catch {}
 
-      window.setTimeout(() => {
-        target.focus();
-        target.select?.();
-      }, 150);
+        window.setTimeout(() => {
+          target.focus();
+          target.select?.();
+        }, 150);
+      });
     });
-  });
-}, [inventoryMode, rapidView, focusItemId, items]);
+  }, [inventoryMode, rapidView, focusItemId, items]);
 
   // ✅ persisto modalità (best-effort)
   useEffect(() => {
@@ -526,7 +537,7 @@ if (isRapidUrl && rapidId) {
     return !!operatore.trim() && !!pvId && catOk && items.length > 0;
   }, [operatore, pvId, categoryId, items.length, inventoryMode]);
 
-    const draftKey = useMemo(() => {
+  const draftKey = useMemo(() => {
     if (inventoryMode === "rapid") {
       return `inv_draft_admin:${pvId}:RAPID:${rapidSessionId}:${inventoryDate}`;
     }
@@ -540,24 +551,24 @@ if (isRapidUrl && rapidId) {
   }
 
   function calcTotalMl(it: Item) {
-  if (!isMlItem(it)) return 0;
+    if (!isMlItem(it)) return 0;
 
-  const mode = getMlMode(it.id);
+    const mode = getMlMode(it.id);
 
-  if (mode === "mixed") {
-    return safeIntFromStr(totalMlMap[it.id] ?? "");
+    if (mode === "mixed") {
+      return safeIntFromStr(totalMlMap[it.id] ?? "");
+    }
+
+    const perUnit = Number(it.volume_ml_per_unit) || 0;
+    const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
+    const open = safeIntFromStr(openMlMap[it.id] ?? "");
+    const computed = perUnit > 0 ? pz * perUnit + open : 0;
+
+    const totalFromDb = safeIntFromStr(totalMlMap[it.id] ?? "");
+    if (computed <= 0 && totalFromDb > 0) return totalFromDb;
+
+    return computed;
   }
-
-  const perUnit = Number(it.volume_ml_per_unit) || 0;
-  const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
-  const open = safeIntFromStr(openMlMap[it.id] ?? "");
-  const computed = perUnit > 0 ? pz * perUnit + open : 0;
-
-  const totalFromDb = safeIntFromStr(totalMlMap[it.id] ?? "");
-  if (computed <= 0 && totalFromDb > 0) return totalFromDb;
-
-  return computed;
-}
 
   function calcTotalKg(it: Item) {
     if (!isKgItem(it)) return 0;
@@ -876,24 +887,24 @@ if (isRapidUrl && rapidId) {
   }, [items, search, focusItemId]);
 
   const scannedItems = useMemo(() => {
-  // ✅ In RAPIDO: non mi fido di scannedIds (può svuotarsi per reset/draft/reopen).
-  // La lista "Scansionati" la ricavo SEMPRE dagli item con quantità > 0.
-  if (inventoryMode === "rapid") {
-        const active = items.filter((it) => isActiveFromState(it));
+    // ✅ In RAPIDO: non mi fido di scannedIds (può svuotarsi per reset/draft/reopen).
+    // La lista "Scansionati" la ricavo SEMPRE dagli item con quantità > 0.
+    if (inventoryMode === "rapid") {
+      const active = items.filter((it) => isActiveFromState(it));
 
-    // se ho anche scannedIds, lo uso solo per mantenere un ordine "umano"
-    const order = new Map<string, number>();
-    scannedIds.forEach((id, idx) => order.set(id, idx));
+      // se ho anche scannedIds, lo uso solo per mantenere un ordine "umano"
+      const order = new Map<string, number>();
+      scannedIds.forEach((id, idx) => order.set(id, idx));
 
-    active.sort((a, b) => (order.get(a.id) ?? 1e9) - (order.get(b.id) ?? 1e9));
+      active.sort((a, b) => (order.get(a.id) ?? 1e9) - (order.get(b.id) ?? 1e9));
 
-    return active;
-  }
+      return active;
+    }
 
-  // ✅ Standard: come prima (dipende da scannedIds)
-  const byId = new Map(items.map((it) => [it.id, it]));
-  return scannedIds.map((id) => byId.get(id)).filter(Boolean) as Item[];
-}, [items, scannedIds, inventoryMode, qtyPzMap, qtyGrMap, openMlMap, totalMlMap, mlModeMap]);
+    // ✅ Standard: come prima (dipende da scannedIds)
+    const byId = new Map(items.map((it) => [it.id, it]));
+    return scannedIds.map((id) => byId.get(id)).filter(Boolean) as Item[];
+  }, [items, scannedIds, inventoryMode, qtyPzMap, qtyGrMap, openMlMap, totalMlMap, mlModeMap]);
 
   const scannedItemsVisible = useMemo(() => {
     if (showAllScanned) return scannedItems;
@@ -1007,66 +1018,66 @@ if (isRapidUrl && rapidId) {
   }
 
   function setPz(itemId: string, v: string) {
-  const cleaned = onlyDigits(v);
-  setQtyPzMap((prev) => ({ ...prev, [itemId]: cleaned }));
-  setHighlightScannedId(itemId);
+    const cleaned = onlyDigits(v);
+    setQtyPzMap((prev) => ({ ...prev, [itemId]: cleaned }));
+    setHighlightScannedId(itemId);
 
-  // ✅ se reinserisco l'articolo non deve restare tra gli eliminati
-  setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
+    // ✅ se reinserisco l'articolo non deve restare tra gli eliminati
+    setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
 
-  const it = items.find((x) => x.id === itemId);
-  if (it) {
-    const nextPz = safeIntFromStr(cleaned);
-    ensureScannedPresence(itemId, isActiveWithOverrides(it, { pz: nextPz }));
-    if (isActiveWithOverrides(it, { pz: nextPz })) highlightAndMoveToTop(itemId);
+    const it = items.find((x) => x.id === itemId);
+    if (it) {
+      const nextPz = safeIntFromStr(cleaned);
+      ensureScannedPresence(itemId, isActiveWithOverrides(it, { pz: nextPz }));
+      if (isActiveWithOverrides(it, { pz: nextPz })) highlightAndMoveToTop(itemId);
+    }
   }
-}
 
   function setGr(itemId: string, v: string) {
-  const cleaned = onlyDigits(v);
-  setQtyGrMap((prev) => ({ ...prev, [itemId]: cleaned }));
-  setHighlightScannedId(itemId);
+    const cleaned = onlyDigits(v);
+    setQtyGrMap((prev) => ({ ...prev, [itemId]: cleaned }));
+    setHighlightScannedId(itemId);
 
-  // ✅ se reinserisco l'articolo non deve restare tra gli eliminati
-  setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
+    // ✅ se reinserisco l'articolo non deve restare tra gli eliminati
+    setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
 
-  const it = items.find((x) => x.id === itemId);
-  if (it) {
-    const nextGr = safeIntFromStr(cleaned);
-    ensureScannedPresence(itemId, isActiveWithOverrides(it, { gr: nextGr }));
-    if (isActiveWithOverrides(it, { gr: nextGr })) highlightAndMoveToTop(itemId);
+    const it = items.find((x) => x.id === itemId);
+    if (it) {
+      const nextGr = safeIntFromStr(cleaned);
+      ensureScannedPresence(itemId, isActiveWithOverrides(it, { gr: nextGr }));
+      if (isActiveWithOverrides(it, { gr: nextGr })) highlightAndMoveToTop(itemId);
+    }
   }
-}
 
   function setOpenMl(itemId: string, v: string) {
-  const cleaned = onlyDigits(v);
-  setOpenMlMap((prev) => ({ ...prev, [itemId]: cleaned }));
-  setHighlightScannedId(itemId);
+    const cleaned = onlyDigits(v);
+    setOpenMlMap((prev) => ({ ...prev, [itemId]: cleaned }));
+    setHighlightScannedId(itemId);
 
-  // ✅ se reinserisco l'articolo non deve restare tra gli eliminati
-  setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
+    // ✅ se reinserisco l'articolo non deve restare tra gli eliminati
+    setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
 
-  const it = items.find((x) => x.id === itemId);
-  if (it) {
-    ensureScannedPresence(itemId, true);
-    highlightAndMoveToTop(itemId);
+    const it = items.find((x) => x.id === itemId);
+    if (it) {
+      ensureScannedPresence(itemId, true);
+      highlightAndMoveToTop(itemId);
+    }
   }
-}
 
   function setTotalMl(itemId: string, v: string) {
-  const cleaned = onlyDigits(v);
-  setTotalMlMap((prev) => ({ ...prev, [itemId]: cleaned }));
-  setHighlightScannedId(itemId);
+    const cleaned = onlyDigits(v);
+    setTotalMlMap((prev) => ({ ...prev, [itemId]: cleaned }));
+    setHighlightScannedId(itemId);
 
-  // ✅ se reinserisco l'articolo non deve restare tra gli eliminati
-  setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
+    // ✅ se reinserisco l'articolo non deve restare tra gli eliminati
+    setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
 
-  const it = items.find((x) => x.id === itemId);
-  if (it) {
-    ensureScannedPresence(itemId, true);
-    highlightAndMoveToTop(itemId);
+    const it = items.find((x) => x.id === itemId);
+    if (it) {
+      ensureScannedPresence(itemId, true);
+      highlightAndMoveToTop(itemId);
+    }
   }
-}
 
   function setMlMode(itemId: string, mode: MlInputMode) {
     setMlModeMap((prev) => ({ ...prev, [itemId]: mode }));
@@ -1090,12 +1101,11 @@ if (isRapidUrl && rapidId) {
   }
 
   function addQty(itemId: string) {
+    // ✅ se aggiungo di nuovo quantità l'articolo non deve restare eliminato
+    setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
 
-  // ✅ se aggiungo di nuovo quantità l'articolo non deve restare eliminato
-  setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
-
-  const it = items.find((x) => x.id === itemId);
-  if (!it) return;
+    const it = items.find((x) => x.id === itemId);
+    if (!it) return;
 
     // ✅ KG
     if (isKgItem(it) && !isMlItem(it)) {
@@ -1168,210 +1178,210 @@ if (isRapidUrl && rapidId) {
     highlightAndMoveToTop(itemId);
   }
 
-   // ✅ RIMUOVI un singolo articolo dalla lista scansionati + azzera tutto
-    function removeFromScanned(itemId: string) {
-  setQtyPzMap((prev) => ({ ...prev, [itemId]: "" }));
-  setQtyGrMap((prev) => ({ ...prev, [itemId]: "" }));
-  setOpenMlMap((prev) => ({ ...prev, [itemId]: "" }));
-  setTotalMlMap((prev) => ({ ...prev, [itemId]: "" }));
+  // ✅ RIMUOVI un singolo articolo dalla lista scansionati + azzera tutto
+  function removeFromScanned(itemId: string) {
+    setQtyPzMap((prev) => ({ ...prev, [itemId]: "" }));
+    setQtyGrMap((prev) => ({ ...prev, [itemId]: "" }));
+    setOpenMlMap((prev) => ({ ...prev, [itemId]: "" }));
+    setTotalMlMap((prev) => ({ ...prev, [itemId]: "" }));
 
-  setAddPzMap((prev) => ({ ...prev, [itemId]: "" }));
-  setAddGrMap((prev) => ({ ...prev, [itemId]: "" }));
-  setAddOpenMlMap((prev) => ({ ...prev, [itemId]: "" }));
-  setAddTotalMlMap((prev) => ({ ...prev, [itemId]: "" }));
+    setAddPzMap((prev) => ({ ...prev, [itemId]: "" }));
+    setAddGrMap((prev) => ({ ...prev, [itemId]: "" }));
+    setAddOpenMlMap((prev) => ({ ...prev, [itemId]: "" }));
+    setAddTotalMlMap((prev) => ({ ...prev, [itemId]: "" }));
 
-  // ✅ segna come eliminato vero per il save
-  setDeletedItemIds((prev) => (prev.includes(itemId) ? prev : [...prev, itemId]));
+    // ✅ segna come eliminato vero per il save
+    setDeletedItemIds((prev) => (prev.includes(itemId) ? prev : [...prev, itemId]));
 
-  setScannedIds((prev) => prev.filter((id) => id !== itemId));
+    setScannedIds((prev) => prev.filter((id) => id !== itemId));
 
-  setHighlightScannedId((prev) => (prev === itemId ? null : prev));
-  setFocusItemId((prev) => (prev === itemId ? null : prev));
-}
-
-  function clearScannedList() {
-  setQtyPzMap((prev) => {
-    const next = { ...prev };
-    scannedIds.forEach((id) => (next[id] = ""));
-    return next;
-  });
-
-  setQtyGrMap((prev) => {
-    const next = { ...prev };
-    scannedIds.forEach((id) => (next[id] = ""));
-    return next;
-  });
-
-  setOpenMlMap((prev) => {
-    const next = { ...prev };
-    scannedIds.forEach((id) => (next[id] = ""));
-    return next;
-  });
-
-  setTotalMlMap((prev) => {
-    const next = { ...prev };
-    scannedIds.forEach((id) => (next[id] = ""));
-    return next;
-  });
-
-  // ✅ segna gli articoli correnti come eliminati reali
-  setDeletedItemIds(scannedIds);
-
-  setScannedIds([]);
-  setShowAllScanned(false);
-  setAddPzMap({});
-  setAddGrMap({});
-  setAddOpenMlMap({});
-  setAddTotalMlMap({});
-  setHighlightScannedId(null);
-
-  setFocusItemId(null);
-  setRapidView("scan");
-  setSearch("");
-  setMsg(null);
-  setError(null);
-  setCategoryNote("");
-
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      searchInputRef.current?.focus();
-      searchInputRef.current?.select?.();
-    });
-  });
-}
-
-  function openItemInRapid(it: Item) {
-  setMsg(null);
-  setError(null);
-  setFocusItemId(it.id);
-  setRapidView("scan");
-  setSearch("");
-
-  // ✅ NON aggiungere automaticamente agli scansionati se non ha quantità
-  // Se è già "attivo" (qty > 0 / ml > 0 / gr > 0) allora lo metto in cima.
-  const activeNow = isActiveWithOverrides(it);
-
-  setScannedIds((prev) => {
-    const has = prev.includes(it.id);
-
-    if (activeNow) {
-      // metti in cima (o aggiungi se manca)
-      return has ? [it.id, ...prev.filter((x) => x !== it.id)] : [it.id, ...prev];
-    }
-
-    // se non è attivo NON deve stare in lista (e se c'era per sbaglio lo tolgo)
-    return has ? prev.filter((x) => x !== it.id) : prev;
-  });
-
-  setHighlightScannedId(it.id);
-
-  requestAnimationFrame(() => {
-    scrollIntoViewById(`inv-scanned-row-${it.id}`);
-    scrollIntoViewById(`inv-item-row-${it.id}`);
-  });
-}
-
-  function focusRapidQtyNow(it: Item) {
-  const ml = isMlItem(it);
-  const kg = isKgItem(it) && !ml;
-
-  // IMPORTANTISSIMO iOS: focus deve avvenire subito nel tap
-  requestAnimationFrame(() => {
-    if (kg) {
-      rapidGrInputRef.current?.focus();
-      rapidGrInputRef.current?.select?.();
-      return;
-    }
-    if (ml) {
-      rapidMlInputRef.current?.focus();
-      rapidMlInputRef.current?.select?.();
-      return;
-    }
-    rapidPzInputRef.current?.focus();
-    rapidPzInputRef.current?.select?.();
-  });
-}
-
-  function handleScanEnter(rawOverride?: string, fromScanner?: boolean) {
-  const raw = String(rawOverride ?? search);
-  const qNorm = normText(raw);
-
-  if (!qNorm) return;
-
-  console.log("[SEARCH DEBUG]", {
-  qNorm,
-  itemsLen: items.length,
-  hasTwix: items.some((x) => normText(x.code) === "twix"),
-});
-
-  const digits = onlyDigits(qNorm);
-  const isLikelyBarcode = digits.length >= 8;
-
-  let found: Item | undefined;
-
-  if (isLikelyBarcode) {
-    found = items.find((it) => {
-      const bcDigits = onlyDigits(normText(it.barcode));
-      const codeDigits = onlyDigits(normText(it.code));
-      return (bcDigits && bcDigits === digits) || (codeDigits && codeDigits === digits);
-    });
-
-    if (!found) {
-      found = items.find((it) => {
-        const bcDigits = onlyDigits(normText(it.barcode));
-        return digits && bcDigits.includes(digits);
-      });
-    }
-  } else {
-    // 1) match esatto su CODE
-    found = items.find((it) => normText(it.code) === qNorm);
-
-    // 2) startsWith su CODE
-    if (!found) {
-      found = items.find((it) => normText(it.code).startsWith(qNorm));
-    }
-
-    // 3) includes su DESCRIZIONE
-    if (!found) {
-      found = items.find((it) => normText(it.description).includes(qNorm));
-    }
-
-    // 4) includes su CODE (fallback)
-    if (!found) {
-      found = items.find((it) => normText(it.code).includes(qNorm));
-    }
+    setHighlightScannedId((prev) => (prev === itemId ? null : prev));
+    setFocusItemId((prev) => (prev === itemId ? null : prev));
   }
 
-  setSearch("");
-  setSuggestionsOpen(false);
+  function clearScannedList() {
+    setQtyPzMap((prev) => {
+      const next = { ...prev };
+      scannedIds.forEach((id) => (next[id] = ""));
+      return next;
+    });
 
-  if (!found) {
-    // ✅ se sembra un barcode, apro flusso di associazione
-    if (isLikelyBarcode && digits) {
+    setQtyGrMap((prev) => {
+      const next = { ...prev };
+      scannedIds.forEach((id) => (next[id] = ""));
+      return next;
+    });
+
+    setOpenMlMap((prev) => {
+      const next = { ...prev };
+      scannedIds.forEach((id) => (next[id] = ""));
+      return next;
+    });
+
+    setTotalMlMap((prev) => {
+      const next = { ...prev };
+      scannedIds.forEach((id) => (next[id] = ""));
+      return next;
+    });
+
+    // ✅ segna gli articoli correnti come eliminati reali
+    setDeletedItemIds(scannedIds);
+
+    setScannedIds([]);
+    setShowAllScanned(false);
+    setAddPzMap({});
+    setAddGrMap({});
+    setAddOpenMlMap({});
+    setAddTotalMlMap({});
+    setHighlightScannedId(null);
+
+    setFocusItemId(null);
+    setRapidView("scan");
+    setSearch("");
+    setMsg(null);
+    setError(null);
+    setCategoryNote("");
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select?.();
+      });
+    });
+  }
+
+  function openItemInRapid(it: Item) {
+    setMsg(null);
+    setError(null);
+    setFocusItemId(it.id);
+    setRapidView("scan");
+    setSearch("");
+
+    // ✅ NON aggiungere automaticamente agli scansionati se non ha quantità
+    // Se è già "attivo" (qty > 0 / ml > 0 / gr > 0) allora lo metto in cima.
+    const activeNow = isActiveWithOverrides(it);
+
+    setScannedIds((prev) => {
+      const has = prev.includes(it.id);
+
+      if (activeNow) {
+        // metti in cima (o aggiungi se manca)
+        return has ? [it.id, ...prev.filter((x) => x !== it.id)] : [it.id, ...prev];
+      }
+
+      // se non è attivo NON deve stare in lista (e se c'era per sbaglio lo tolgo)
+      return has ? prev.filter((x) => x !== it.id) : prev;
+    });
+
+    setHighlightScannedId(it.id);
+
+    requestAnimationFrame(() => {
+      scrollIntoViewById(`inv-scanned-row-${it.id}`);
+      scrollIntoViewById(`inv-item-row-${it.id}`);
+    });
+  }
+
+  function focusRapidQtyNow(it: Item) {
+    const ml = isMlItem(it);
+    const kg = isKgItem(it) && !ml;
+
+    // IMPORTANTISSIMO iOS: focus deve avvenire subito nel tap
+    requestAnimationFrame(() => {
+      if (kg) {
+        rapidGrInputRef.current?.focus();
+        rapidGrInputRef.current?.select?.();
+        return;
+      }
+      if (ml) {
+        rapidMlInputRef.current?.focus();
+        rapidMlInputRef.current?.select?.();
+        return;
+      }
+      rapidPzInputRef.current?.focus();
+      rapidPzInputRef.current?.select?.();
+    });
+  }
+
+  function handleScanEnter(rawOverride?: string, fromScanner?: boolean) {
+    const raw = String(rawOverride ?? search);
+    const qNorm = normText(raw);
+
+    if (!qNorm) return;
+
+    console.log("[SEARCH DEBUG]", {
+      qNorm,
+      itemsLen: items.length,
+      hasTwix: items.some((x) => normText(x.code) === "twix"),
+    });
+
+    const digits = onlyDigits(qNorm);
+    const isLikelyBarcode = digits.length >= 8;
+
+    let found: Item | undefined;
+
+    if (isLikelyBarcode) {
+      found = items.find((it) => {
+        const bcDigits = onlyDigits(normText(it.barcode));
+        const codeDigits = onlyDigits(normText(it.code));
+        return (bcDigits && bcDigits === digits) || (codeDigits && codeDigits === digits);
+      });
+
+      if (!found) {
+        found = items.find((it) => {
+          const bcDigits = onlyDigits(normText(it.barcode));
+          return digits && bcDigits.includes(digits);
+        });
+      }
+    } else {
+      // 1) match esatto su CODE
+      found = items.find((it) => normText(it.code) === qNorm);
+
+      // 2) startsWith su CODE
+      if (!found) {
+        found = items.find((it) => normText(it.code).startsWith(qNorm));
+      }
+
+      // 3) includes su DESCRIZIONE
+      if (!found) {
+        found = items.find((it) => normText(it.description).includes(qNorm));
+      }
+
+      // 4) includes su CODE (fallback)
+      if (!found) {
+        found = items.find((it) => normText(it.code).includes(qNorm));
+      }
+    }
+
+    setSearch("");
+    setSuggestionsOpen(false);
+
+    if (!found) {
+      // ✅ se sembra un barcode, apro flusso di associazione
+      if (isLikelyBarcode && digits) {
+        setMsg(null);
+        setError(null);
+        setUnknownBarcode(digits);
+        setAssocStep("confirm");
+        setAssocQuery("");
+        setAssocResults([]);
+        setAssocError(null);
+        requestAnimationFrame(() => focusSearchSoon());
+        return;
+      }
+
       setMsg(null);
-      setError(null);
-      setUnknownBarcode(digits);
-      setAssocStep("confirm");
-      setAssocQuery("");
-      setAssocResults([]);
-      setAssocError(null);
+      setError("Articolo non trovato.");
       requestAnimationFrame(() => focusSearchSoon());
       return;
     }
 
+    setError(null);
     setMsg(null);
-    setError("Articolo non trovato.");
-    requestAnimationFrame(() => focusSearchSoon());
-    return;
+
+    if (fromScanner) vibrateOk();
+
+    openItemInRapid(found);
   }
-
-  setError(null);
-  setMsg(null);
-
-  if (fromScanner) vibrateOk();
-
-  openItemInRapid(found);
-}
 
   async function runAssocSearch(q: string) {
     const qq = String(q || "").trim();
@@ -1596,17 +1606,17 @@ if (isRapidUrl && rapidId) {
       params.set("pv_id", pvId);
       params.set("inventory_date", inventoryDate);
 
-  if (inventoryMode === "rapid") {
-  params.set("category_id", "null");
-  params.set("subcategory_id", "null");
+      if (inventoryMode === "rapid") {
+        params.set("category_id", "null");
+        params.set("subcategory_id", "null");
 
-  // ✅ legacy reopen: rapid_session_id può essere vuoto -> forzo "null" così il server carica le righe con rapid_session_id NULL
-  params.set("rapid_session_id", isUuid(rapidSessionId) ? rapidSessionId : "null");
-} else {
-  params.set("category_id", categoryId);
-  if (subcategoryId) params.set("subcategory_id", subcategoryId);
-  else params.set("subcategory_id", "null");
-}
+        // ✅ legacy reopen: rapid_session_id può essere vuoto -> forzo "null" così il server carica le righe con rapid_session_id NULL
+        params.set("rapid_session_id", isUuid(rapidSessionId) ? rapidSessionId : "null");
+      } else {
+        params.set("category_id", categoryId);
+        if (subcategoryId) params.set("subcategory_id", subcategoryId);
+        else params.set("subcategory_id", "null");
+      }
 
       const res = await fetch(`/api/inventories/rows?${params.toString()}`, { cache: "no-store" });
       const json = await res.json().catch(() => null);
@@ -1617,67 +1627,67 @@ if (isRapidUrl && rapidId) {
         setOperatore(json.operatore.trim());
       }
       if (!categoryNote.trim() && typeof json?.label === "string" && json.label.trim()) {
-       setCategoryNote(json.label.trim());
+        setCategoryNote(json.label.trim());
       }
 
       const apiRows = (json.rows || []) as InventoryRowApi[];
       if (!Array.isArray(apiRows) || apiRows.length === 0) return 0;
 
       // ✅ FIX DEFINITIVO: se il DB ha righe che NON esistono in currentItems,
-// le aggiungo agli items in memoria così possono comparire negli scansionati.
-const missingItems: Item[] = [];
-const existingIds = new Set(currentItems.map((x) => x.id));
+      // le aggiungo agli items in memoria così possono comparire negli scansionati.
+      const missingItems: Item[] = [];
+      const existingIds = new Set(currentItems.map((x) => x.id));
 
-for (const r of apiRows) {
-  const id = String((r as any)?.item_id || "").trim();
-  if (!id || existingIds.has(id)) continue;
+      for (const r of apiRows) {
+        const id = String((r as any)?.item_id || "").trim();
+        if (!id || existingIds.has(id)) continue;
 
-  missingItems.push({
-    id,
-    code: String((r as any)?.code ?? "").trim(),
-    description: String((r as any)?.description ?? "").trim(),
-    barcode: null,
-    prezzo_vendita_eur: (r as any)?.prezzo_vendita_eur ?? null,
-    is_active: true, // non mi interessa qui, mi serve solo per render
-    category_id: null,
-    subcategory_id: null,
-    um: null,
-    peso_kg: null,
-    volume_ml_per_unit: (r as any)?.volume_ml_per_unit ?? null,
-  } as any);
-}
+        missingItems.push({
+          id,
+          code: String((r as any)?.code ?? "").trim(),
+          description: String((r as any)?.description ?? "").trim(),
+          barcode: null,
+          prezzo_vendita_eur: (r as any)?.prezzo_vendita_eur ?? null,
+          is_active: true, // non mi interessa qui, mi serve solo per render
+          category_id: null,
+          subcategory_id: null,
+          um: null,
+          peso_kg: null,
+          volume_ml_per_unit: (r as any)?.volume_ml_per_unit ?? null,
+        } as any);
+      }
 
-let effectiveItems = currentItems;
-if (missingItems.length) {
-  effectiveItems = [...currentItems, ...missingItems];
+      let effectiveItems = currentItems;
+      if (missingItems.length) {
+        effectiveItems = [...currentItems, ...missingItems];
 
-  // aggiorno anche lo stato globale items, così la UI li vede
-  setItems((prev) => {
-    const prevIds = new Set(prev.map((x) => x.id));
-    const add = missingItems.filter((x) => !prevIds.has(x.id));
-    return add.length ? [...prev, ...add] : prev;
-  });
-}
+        // aggiorno anche lo stato globale items, così la UI li vede
+        setItems((prev) => {
+          const prevIds = new Set(prev.map((x) => x.id));
+          const add = missingItems.filter((x) => !prevIds.has(x.id));
+          return add.length ? [...prev, ...add] : prev;
+        });
+      }
 
       const itemSet = new Set(effectiveItems.map((x) => x.id));
       const mlItemSet = new Set(effectiveItems.filter(isMlItem).map((x) => x.id));
 
       // ✅ Set ID articoli caricati
-const itemIdSet = new Set(currentItems.map((x) => x.id));
+      const itemIdSet = new Set(currentItems.map((x) => x.id));
 
-// ✅ Fallback robusto: se item_id non lo trovo, provo col CODE
-const codeToId = new Map<string, string>();
-for (const it of currentItems) {
-  const c = String(it.code || "").trim().toUpperCase();
-  if (!c) continue;
-  if (!codeToId.has(c)) codeToId.set(c, it.id);
-}
+      // ✅ Fallback robusto: se item_id non lo trovo, provo col CODE
+      const codeToId = new Map<string, string>();
+      for (const it of currentItems) {
+        const c = String(it.code || "").trim().toUpperCase();
+        if (!c) continue;
+        if (!codeToId.has(c)) codeToId.set(c, it.id);
+      }
 
-function resolveTargetId(r: InventoryRowApi): string | null {
-  const id = String((r as any)?.item_id || "").trim();
-  if (id) return id; // ✅ accetta SEMPRE l’item_id dal DB
-  return null;
-}
+      function resolveTargetId(r: InventoryRowApi): string | null {
+        const id = String((r as any)?.item_id || "").trim();
+        if (id) return id; // ✅ accetta SEMPRE l’item_id dal DB
+        return null;
+      }
 
       setQtyPzMap((prev) => {
         const next = { ...prev };
@@ -1702,7 +1712,7 @@ function resolveTargetId(r: InventoryRowApi): string | null {
         return next;
       });
 
-            setOpenMlMap((prev) => {
+      setOpenMlMap((prev) => {
         const next = { ...prev };
         for (const r of apiRows) {
           const targetId = resolveTargetId(r);
@@ -1804,33 +1814,33 @@ function resolveTargetId(r: InventoryRowApi): string | null {
   }, [subcategoryId]);
 
   useEffect(() => {
-  if (!pvId || !inventoryDate) return;
-  if (!isIsoDate(inventoryDate)) return;
-  if (!items.length) return;
+    if (!pvId || !inventoryDate) return;
+    if (!isIsoDate(inventoryDate)) return;
+    if (!items.length) return;
 
-  const effCat = inventoryMode === "rapid" ? "null" : categoryId || "";
-  if (!effCat) return;
+    const effCat = inventoryMode === "rapid" ? "null" : categoryId || "";
+    if (!effCat) return;
 
-  // ✅ IMPORTANTISSIMO: in Rapido la chiave deve includere la sessione
-  const effSub = inventoryMode === "rapid" ? (rapidSessionId || "null") : subcategoryId || "null";
+    // ✅ IMPORTANTISSIMO: in Rapido la chiave deve includere la sessione
+    const effSub = inventoryMode === "rapid" ? rapidSessionId || "null" : subcategoryId || "null";
 
-  const key = `prefill:${pvId}:${effCat}:${effSub}:${inventoryDate}`;
-  if (lastPrefillKeyRef.current === key) return;
-  lastPrefillKeyRef.current = key;
+    const key = `prefill:${pvId}:${effCat}:${effSub}:${inventoryDate}`;
+    if (lastPrefillKeyRef.current === key) return;
+    lastPrefillKeyRef.current = key;
 
-  (async () => {
-  const applied = await prefillFromServer(items);
-  ensureMlDefaults(items);
+    (async () => {
+      const applied = await prefillFromServer(items);
+      ensureMlDefaults(items);
 
-  if (!(reopenModeRef.current && applied > 0)) {
-    loadDraftIfAny(items);
-  }
+      if (!(reopenModeRef.current && applied > 0)) {
+        loadDraftIfAny(items);
+      }
 
-  // ✅ ora è sicuro salvare la bozza
-  didHydrateDraftRef.current = true;
-})();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [pvId, categoryId, subcategoryId, rapidSessionId, inventoryDate, items.length, inventoryMode]);
+      // ✅ ora è sicuro salvare la bozza
+      didHydrateDraftRef.current = true;
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pvId, categoryId, subcategoryId, rapidSessionId, inventoryDate, items.length, inventoryMode]);
 
   function resetAfterClose() {
     setOperatore("");
@@ -1872,14 +1882,18 @@ function resolveTargetId(r: InventoryRowApi): string | null {
     });
 
     // ✅ nuova sessione Rapido (così riparti davvero da zero)
-const nextSession = newRapidSessionId();
-setRapidSessionId(nextSession);
-if (pvId && isIsoDate(inventoryDate)) writeRapidSessionToStorage(pvId, inventoryDate, nextSession);
+    const nextSession = newRapidSessionId();
+    setRapidSessionId(nextSession);
+    if (pvId && isIsoDate(inventoryDate)) writeRapidSessionToStorage(pvId, inventoryDate, nextSession);
 
-// ✅ sblocco prefill/draft
-lastPrefillKeyRef.current = "";
+    // ✅ sblocco prefill/draft
+    lastPrefillKeyRef.current = "";
 
-clearDraft();
+    // ✅ chiudo la modalità di riapertura: nuovo inventario = modifica normale
+    reopenActionModeRef.current = "edit";
+    setReopenActionMode("edit");
+
+    clearDraft();
   }
 
   async function save(mode: "close" | "continue") {
@@ -1898,75 +1912,78 @@ clearDraft();
     try {
       const deletedSet = new Set(deletedItemIds);
 
-const rows = items
-  .map((it) => {
-    const itemId = String(it.id || "").trim();
+      const rows = items
+        .map((it) => {
+          const itemId = String(it.id || "").trim();
 
-    // ✅ se è stato eliminato, lo mando esplicitamente a zero
-    if (deletedSet.has(itemId)) {
-      return {
-        item_id: itemId,
-        qty: 0,
-        qty_ml: 0,
-        qty_gr: 0,
-      };
-    }
+          // ✅ se è stato eliminato, lo mando esplicitamente a zero
+          if (deletedSet.has(itemId)) {
+            return {
+              item_id: itemId,
+              qty: 0,
+              qty_ml: 0,
+              qty_gr: 0,
+            };
+          }
 
-    const totalMl = Number(totalMlMap[itemId] || 0);
-const openMl = Number(openMlMap[itemId] || 0);
+          const totalMl = Number(totalMlMap[itemId] || 0);
+          const openMl = Number(openMlMap[itemId] || 0);
 
-return {
-  item_id: itemId,
-  qty: Number(qtyPzMap[itemId] || 0),
-  qty_ml: totalMl > 0 ? totalMl : openMl,
-  qty_gr: Number(qtyGrMap[itemId] || 0),
-};
-  })
-  .filter(
-    (r: any) =>
-      deletedSet.has(String(r.item_id || "").trim()) ||
-      (Number(r.qty) || 0) > 0 ||
-      (Number(r.qty_ml) || 0) > 0 ||
-      (Number(r.qty_gr) || 0) > 0
-  );
+          return {
+            item_id: itemId,
+            qty: Number(qtyPzMap[itemId] || 0),
+            qty_ml: totalMl > 0 ? totalMl : openMl,
+            qty_gr: Number(qtyGrMap[itemId] || 0),
+          };
+        })
+        .filter(
+          (r: any) =>
+            deletedSet.has(String(r.item_id || "").trim()) ||
+            (Number(r.qty) || 0) > 0 ||
+            (Number(r.qty_ml) || 0) > 0 ||
+            (Number(r.qty_gr) || 0) > 0
+        );
 
       if (rows.length === 0) {
         setError("Nessuna riga con quantità > 0. Inserisci almeno un valore prima di salvare.");
         return;
       }
 
-const basePayload = {
-  pv_id: pvId,
-  category_id: inventoryMode === "rapid" ? null : categoryId,
-  subcategory_id: inventoryMode === "rapid" ? null : subcategoryId || null,
-  inventory_date: dateToUse,
-  operatore: operatore.trim(),
+      const basePayload = {
+        pv_id: pvId,
+        category_id: inventoryMode === "rapid" ? null : categoryId,
+        subcategory_id: inventoryMode === "rapid" ? null : subcategoryId || null,
+        inventory_date: dateToUse,
+        operatore: operatore.trim(),
 
-  // ✅ Nota rapida (salvata in inventories_headers.label)
-  label: inventoryMode === "rapid" ? (categoryNote.trim() || null) : null,
+        // ✅ Nota rapida (salvata in inventories_headers.label)
+        label: inventoryMode === "rapid" ? categoryNote.trim() || null : null,
 
-  rows,
-  mode,
+        rows,
+        mode,
+        recount_mode: reopenActionMode === "recount",
 
-  // ✅ Rapido: chiave anti-sovrascrittura (UUID)
-  rapid_session_id: inventoryMode === "rapid" ? rapidSessionId : null,
-};
+        // ✅ Rapido: chiave anti-sovrascrittura (UUID)
+        rapid_session_id: inventoryMode === "rapid" ? rapidSessionId : null,
+      };
 
-if (inventoryMode === "rapid" && !isUuid(rapidSessionId)) {
-  setError("Rapido: rapid_session_id non valido. Premi Nuovo/Pulisci e riprova.");
-  return;
-}
+      if (inventoryMode === "rapid" && !isUuid(rapidSessionId)) {
+        setError("Rapido: rapid_session_id non valido. Premi Nuovo/Pulisci e riprova.");
+        return;
+      }
 
-console.log(
-  "SAVE DEBUG → rapidSessionId(state):",
-  rapidSessionId,
-  "| inventoryMode:",
-  inventoryMode,
-  "| payload rapid_session_id:",
-  (basePayload as any).rapid_session_id,
-  "| payload keys:",
-  Object.keys(basePayload as any)
-);
+      console.log(
+        "SAVE DEBUG → rapidSessionId(state):",
+        rapidSessionId,
+        "| inventoryMode:",
+        inventoryMode,
+        "| payload rapid_session_id:",
+        (basePayload as any).rapid_session_id,
+        "| payload recount_mode:",
+        (basePayload as any).recount_mode,
+        "| payload keys:",
+        Object.keys(basePayload as any)
+      );
 
       let res = await fetch("/api/inventories/save", {
         method: "POST",
@@ -2003,13 +2020,13 @@ console.log(
       setMsg(mode === "continue" ? `Salvato. Puoi continuare. — righe: ${json.saved}` : `Salvataggio OK — righe: ${json.saved}`);
 
       // ✅ pulisco gli articoli eliminati dopo il salvataggio
-setDeletedItemIds([]);
+      setDeletedItemIds([]);
 
-if (mode === "close") {
-  resetAfterClose();
-} else {
-  persistDraft();
-}
+      if (mode === "close") {
+        resetAfterClose();
+      } else {
+        persistDraft();
+      }
     } catch (e: any) {
       setError(e?.message || "Errore salvataggio");
     } finally {
@@ -2044,14 +2061,12 @@ if (mode === "close") {
   }
 
   function InventoryModeToggle() {
-  return (
-    <div className="inline-flex rounded-xl border overflow-hidden w-full md:w-auto">
-      <div className="flex-1 px-3 py-2 text-sm bg-slate-900 text-white text-center">
-        Rapido
+    return (
+      <div className="inline-flex rounded-xl border overflow-hidden w-full md:w-auto">
+        <div className="flex-1 px-3 py-2 text-sm bg-slate-900 text-white text-center">Rapido</div>
       </div>
-    </div>
-  );
-}
+    );
+  }
 
   function focusSearchSoon() {
     requestAnimationFrame(() => {
@@ -2262,7 +2277,16 @@ if (mode === "close") {
         </div>
       </div>
 
-            {/* Operatore + Nota categoria */}
+      {reopenActionMode === "recount" && (
+        <div className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3">
+          <div className="text-sm font-semibold text-amber-900">Modalità: Riconta</div>
+          <div className="text-xs text-amber-800 mt-1">
+            Le modifiche salvate in questa sessione verranno registrate in <b>inventory_recount_events</b>.
+          </div>
+        </div>
+      )}
+
+      {/* Operatore + Nota categoria */}
       <div className="rounded-2xl border bg-white p-4 space-y-3">
         <div>
           <label className="block text-sm font-medium mb-2">Nome Operatore</label>
@@ -2276,9 +2300,7 @@ if (mode === "close") {
 
           <div className="mt-2 text-xs text-gray-600">
             Nome categoria (nota):{" "}
-            <b className={categoryNote.trim() ? "" : "text-gray-400"}>
-              {categoryNote.trim() ? categoryNote.trim() : "—"}
-            </b>
+            <b className={categoryNote.trim() ? "" : "text-gray-400"}>{categoryNote.trim() ? categoryNote.trim() : "—"}</b>
           </div>
         </div>
 
@@ -2307,421 +2329,459 @@ if (mode === "close") {
         </div>
 
         <div className="flex flex-col md:flex-row md:items-center gap-2 w-full md:w-auto">
-        
-
           <div className="grid grid-cols-3 gap-2 w-full md:w-auto">
-  <button
-    className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-60 w-full"
-    disabled={!canSave || saving}
-    onClick={() => save("continue")}
-    type="button"
-  >
-    {saving ? "Salvo..." : "Salva e continua"}
-  </button>
+            <button
+              className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-60 w-full"
+              disabled={!canSave || saving}
+              onClick={() => save("continue")}
+              type="button"
+            >
+              {saving ? "Salvo..." : "Salva e continua"}
+            </button>
 
-  <button
-    className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60 w-full"
-    disabled={!canSave || saving}
-    onClick={() => save("close")}
-    type="button"
-  >
-    {saving ? "Salvo..." : "Salva e chiudi"}
-  </button>
+            <button
+              className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60 w-full"
+              disabled={!canSave || saving}
+              onClick={() => save("close")}
+              type="button"
+            >
+              {saving ? "Salvo..." : "Salva e chiudi"}
+            </button>
 
-  <button
-    type="button"
-    className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 w-full"
-    disabled={saving}
-    onClick={() => {
-      const ok = window.confirm(
-        "Vuoi ripartire da zero?\n\nQuesto NON salva e cancella la bozza in memoria (scansionati/quantità)."
-      );
-      if (!ok) return;
+            <button
+              type="button"
+              className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 w-full"
+              disabled={saving}
+              onClick={() => {
+                const ok = window.confirm(
+                  "Vuoi ripartire da zero?\n\nQuesto NON salva e cancella la bozza in memoria (scansionati/quantità)."
+                );
+                if (!ok) return;
 
-      // reset totale (come dopo 'Salva e chiudi' ma senza salvare)
-      resetAfterClose();
+                // reset totale (come dopo 'Salva e chiudi' ma senza salvare)
+                resetAfterClose();
 
-      // importantissimo: evita che il prefill/draft “rientri” subito
-      lastPrefillKeyRef.current = "";
-      setRapidSessionId(newRapidSessionId());
-      setMsg("Bozza pulita. Riparti da zero.");
-      setError(null);
+                // importantissimo: evita che il prefill/draft “rientri” subito
+                lastPrefillKeyRef.current = "";
+                setRapidSessionId(newRapidSessionId());
+                setMsg("Bozza pulita. Riparti da zero.");
+                setError(null);
 
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          searchInputRef.current?.focus();
-          searchInputRef.current?.select?.();
-        });
-      });
-    }}
-    title="Pulisci tutto e riparti"
-  >
-    Nuovo / Pulisci
-  </button>
-</div>
+                requestAnimationFrame(() => {
+                  requestAnimationFrame(() => {
+                    searchInputRef.current?.focus();
+                    searchInputRef.current?.select?.();
+                  });
+                });
+              }}
+              title="Pulisci tutto e riparti"
+            >
+              Nuovo / Pulisci
+            </button>
+          </div>
         </div>
       </div>
 
       {/* ✅ SOLO RAPIDO (Standard disabilitato) */}
       <div className="space-y-4">
-          {/* ====== RAPIDO: SEARCH BAR POS (fixed bottom on mobile) ====== */}
-          <div
-            className={[
-              "border bg-white",
-              "md:rounded-2xl md:p-4",
-              isRapidMobileBar ? "fixed bottom-0 left-0 right-0 z-40 rounded-t-2xl p-3 shadow-[0_-10px_30px_rgba(0,0,0,0.12)] md:static md:shadow-none" : "rounded-2xl p-4",
-            ].join(" ")}
-          >
-            <div className="flex items-start md:items-start justify-between gap-3">
-              <div className="flex-1 relative">
-                <label className={`block text-sm font-medium ${isRapidMobileBar ? "mb-1" : "mb-2"}`}>Scansiona / Cerca</label>
+        {/* ====== RAPIDO: SEARCH BAR POS (fixed bottom on mobile) ====== */}
+        <div
+          className={[
+            "border bg-white",
+            "md:rounded-2xl md:p-4",
+            isRapidMobileBar ? "fixed bottom-0 left-0 right-0 z-40 rounded-t-2xl p-3 shadow-[0_-10px_30px_rgba(0,0,0,0.12)] md:static md:shadow-none" : "rounded-2xl p-4",
+          ].join(" ")}
+        >
+          <div className="flex items-start md:items-start justify-between gap-3">
+            <div className="flex-1 relative">
+              <label className={`block text-sm font-medium ${isRapidMobileBar ? "mb-1" : "mb-2"}`}>Scansiona / Cerca</label>
 
-                <div className="flex gap-2">
-                  <input
-  ref={searchInputRef}
-  className="w-full rounded-xl border p-3 text-base"
-  placeholder="Barcode / codice / descrizione"
-  value={search}
+              <div className="flex gap-2">
+                <input
+                  ref={searchInputRef}
+                  className="w-full rounded-xl border p-3 text-base"
+                  placeholder="Barcode / codice / descrizione"
+                  value={search}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setSearch(v);
+                    setMsg(null);
+                    setError(null);
+                    if (focusItemId) setFocusItemId(null);
+                    setRapidView("scan");
 
-  onChange={(e) => {
-    const v = e.target.value;
-    setSearch(v);
-    setMsg(null);
-    setError(null);
-    if (focusItemId) setFocusItemId(null);
-    setRapidView("scan");
+                    // ✅ mobile: apri modal risultati
+                    if (typeof window !== "undefined") {
+                      const isMobile = window.matchMedia?.("(max-width: 767px)")?.matches;
+                      if (isMobile) setSuggestionsOpen(true);
+                    }
+                  }}
+                  onFocus={() => {
+                    // ✅ se rientro nel campo e c’è già testo, riapro modal su mobile
+                    if (typeof window !== "undefined") {
+                      const isMobile = window.matchMedia?.("(max-width: 767px)")?.matches;
+                      if (isMobile && search.trim().length >= 2) {
+                        setSuggestionsOpen(true);
+                      }
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
 
-    // ✅ mobile: apri modal risultati
-    if (typeof window !== "undefined") {
-      const isMobile = window.matchMedia?.("(max-width: 767px)")?.matches;
-      if (isMobile) setSuggestionsOpen(true);
-    }
-  }}
+                      const v = (e.currentTarget as HTMLInputElement).value; // ✅ valore reale input
+                      handleScanEnter(v, false);
 
-  onFocus={() => {
-    // ✅ se rientro nel campo e c’è già testo, riapro modal su mobile
-    if (typeof window !== "undefined") {
-      const isMobile = window.matchMedia?.("(max-width: 767px)")?.matches;
-      if (isMobile && search.trim().length >= 2) {
-        setSuggestionsOpen(true);
-      }
-    }
-  }}
+                      setRapidView("scan");
+                      setSuggestionsOpen(false); // chiude modal se aperto
+                    }
+                  }}
+                />
 
-  onKeyDown={(e) => {
-  if (e.key === "Enter") {
-    e.preventDefault();
-
-    const v = (e.currentTarget as HTMLInputElement).value; // ✅ valore reale input
-    handleScanEnter(v, false);
-
-    setRapidView("scan");
-    setSuggestionsOpen(false); // chiude modal se aperto
-  }
-}}
-/>
-
-                  <button
-                    type="button"
-                    className="shrink-0 rounded-xl border px-4 py-3 text-sm hover:bg-gray-50"
-                    onClick={() => {
-                      setMsg(null);
-                      setError(null);
-                      setScannerOpen(true);
-                    }}
-                    title="Scanner camera"
-                  >
-                    📷
-                  </button>
-                </div>
-
-                {/* risultati live (desktop) */}
-{search.trim().length >= 2 && filteredItems.length > 0 && (
-  <div className="hidden md:block absolute z-20 mt-1 w-full rounded-xl border bg-white shadow-sm overflow-hidden">
-    {filteredItems.slice(0, 12).map((it) => (
-      <button
-        key={it.id}
-        type="button"
-        className="w-full text-left px-3 py-2 hover:bg-gray-50"
-        onClick={() => openItemInRapid(it)}
-      >
-        <div className="text-sm font-medium">{it.code}</div>
-        <div className="text-xs text-gray-600 line-clamp-1">{it.description}</div>
-      </button>
-    ))}
-  </div>
-)}
-
-                {!isRapidMobileBar && (
-                  <div className="mt-2 text-xs text-gray-500">
-                    Tip: in Rapido conviene lo scanner, ma ora puoi anche cercare per descrizione con suggestions live.
-                  </div>
-                )}
-              </div>
-
-              {/* CTA a destra: su mobile le rendiamo più grandi e “a pollice” */}
-              <div className="shrink-0 flex flex-col gap-2">
                 <button
                   type="button"
-                  className="rounded-xl border px-4 py-3 text-sm hover:bg-gray-50"
-                  onClick={() => setRapidView("list")}
-                  title="Apri lista scansionati"
+                  className="shrink-0 rounded-xl border px-4 py-3 text-sm hover:bg-gray-50"
+                  onClick={() => {
+                    setMsg(null);
+                    setError(null);
+                    setScannerOpen(true);
+                  }}
+                  title="Scanner camera"
                 >
-                  Scansionati ({totScannedDistinct})
+                  📷
                 </button>
               </div>
-            </div>
-          </div>
 
-          {/* ✅ Mobile suggestions modal */}
-{inventoryMode === "rapid" && suggestionsOpen && (
-  <div className="fixed inset-0 z-[120] bg-black/60 md:hidden">
-    <div className="absolute inset-x-0 bottom-0 max-h-[85vh] rounded-t-3xl bg-white shadow-xl">
-      <div className="p-4 border-b flex items-center justify-between gap-3">
-        <div>
-          <div className="text-sm font-medium">Risultati</div>
-          <div className="text-xs text-gray-500">
-            {search.trim() ? `Ricerca: "${search.trim()}"` : "Digita per cercare"}
+              {/* risultati live (desktop) */}
+              {search.trim().length >= 2 && filteredItems.length > 0 && (
+                <div className="hidden md:block absolute z-20 mt-1 w-full rounded-xl border bg-white shadow-sm overflow-hidden">
+                  {filteredItems.slice(0, 12).map((it) => (
+                    <button
+                      key={it.id}
+                      type="button"
+                      className="w-full text-left px-3 py-2 hover:bg-gray-50"
+                      onClick={() => openItemInRapid(it)}
+                    >
+                      <div className="text-sm font-medium">{it.code}</div>
+                      <div className="text-xs text-gray-600 line-clamp-1">{it.description}</div>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {!isRapidMobileBar && (
+                <div className="mt-2 text-xs text-gray-500">
+                  Tip: in Rapido conviene lo scanner, ma ora puoi anche cercare per descrizione con suggestions live.
+                </div>
+              )}
+            </div>
+
+            {/* CTA a destra: su mobile le rendiamo più grandi e “a pollice” */}
+            <div className="shrink-0 flex flex-col gap-2">
+              <button
+                type="button"
+                className="rounded-xl border px-4 py-3 text-sm hover:bg-gray-50"
+                onClick={() => setRapidView("list")}
+                title="Apri lista scansionati"
+              >
+                Scansionati ({totScannedDistinct})
+              </button>
+            </div>
           </div>
         </div>
 
-        <button
-          type="button"
-          className="rounded-xl border px-3 py-2 text-sm"
-          onClick={() => setSuggestionsOpen(false)}
-        >
-          Chiudi
-        </button>
-      </div>
+        {/* ✅ Mobile suggestions modal */}
+        {inventoryMode === "rapid" && suggestionsOpen && (
+          <div className="fixed inset-0 z-[120] bg-black/60 md:hidden">
+            <div className="absolute inset-x-0 bottom-0 max-h-[85vh] rounded-t-3xl bg-white shadow-xl">
+              <div className="p-4 border-b flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium">Risultati</div>
+                  <div className="text-xs text-gray-500">{search.trim() ? `Ricerca: "${search.trim()}"` : "Digita per cercare"}</div>
+                </div>
 
-      <div className="p-2 overflow-auto max-h-[70vh]">
-    {filteredItems.length === 0 ? (
-  <div className="p-4 text-sm text-gray-500">Nessun risultato.</div>
-) : (
-  <div className="divide-y">
-    {filteredItems.slice(0, 30).map((it) => (
-      <button
-        key={it.id}
-        type="button"
-        className="w-full text-left p-3 hover:bg-gray-50"
-        onClick={() => {
-          setSuggestionsOpen(false);
-          openItemInRapid(it);
-        }}
-      >
-        <div className="text-sm font-semibold">{it.code}</div>
-        <div className="text-xs text-gray-600 line-clamp-2">{it.description}</div>
-      </button>
-    ))}
-  </div>
-)}
-      </div>
-    </div>
-  </div>
-)}
+                <button type="button" className="rounded-xl border px-3 py-2 text-sm" onClick={() => setSuggestionsOpen(false)}>
+                  Chiudi
+                </button>
+              </div>
 
-          {rapidView === "scan" && (
-            <div className="rounded-2xl border bg-white p-4">
-              {!focusItem ? (
-                <div className="text-sm text-gray-500">Scansiona un articolo (o cerca e premi INVIO / clicca una suggestion). Qui comparirà un solo articolo con i pulsanti rapidi.</div>
-              ) : (() => {
-                  const it = focusItem;
-                  const ml = isMlItem(it);
-                  const kg = isKgItem(it) && !ml;
-                  const mode = ml ? (mlModeRef.current[it.id] || "fixed") : null;
+              <div className="p-2 overflow-auto max-h-[70vh]">
+                {filteredItems.length === 0 ? (
+                  <div className="p-4 text-sm text-gray-500">Nessun risultato.</div>
+                ) : (
+                  <div className="divide-y">
+                    {filteredItems.slice(0, 30).map((it) => (
+                      <button
+                        key={it.id}
+                        type="button"
+                        className="w-full text-left p-3 hover:bg-gray-50"
+                        onClick={() => {
+                          setSuggestionsOpen(false);
+                          openItemInRapid(it);
+                        }}
+                      >
+                        <div className="text-sm font-semibold">{it.code}</div>
+                        <div className="text-xs text-gray-600 line-clamp-2">{it.description}</div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
-                  const perUnit = Number(it.volume_ml_per_unit) || 0;
-                  const totalMl = ml ? calcTotalMl(it) : 0;
+        {rapidView === "scan" && (
+          <div className="rounded-2xl border bg-white p-4">
+            {!focusItem ? (
+              <div className="text-sm text-gray-500">Scansiona un articolo (o cerca e premi INVIO / clicca una suggestion). Qui comparirà un solo articolo con i pulsanti rapidi.</div>
+            ) : (
+              (() => {
+                const it = focusItem;
+                const ml = isMlItem(it);
+                const kg = isKgItem(it) && !ml;
+                const mode = ml ? mlModeRef.current[it.id] || "fixed" : null;
 
-                  const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
-                  const gr = safeGrFromStr(qtyGrMap[it.id] ?? "");
-                  const totalKg = kg ? calcTotalKg(it) : 0;
+                const perUnit = Number(it.volume_ml_per_unit) || 0;
+                const totalMl = ml ? calcTotalMl(it) : 0;
 
-                  const pesoKg = Number(it.peso_kg ?? 0) || 0;
-                  const totalGr = kg && pesoKg > 0 ? pz * Math.round(pesoKg * 1000) + gr : null;
+                const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
+                const gr = safeGrFromStr(qtyGrMap[it.id] ?? "");
+                const totalKg = kg ? calcTotalKg(it) : 0;
 
-                  const quickPz = [1, 5, 10];
-                  const quickSmall = [25, 50, 100, 250, 500];
+                const pesoKg = Number(it.peso_kg ?? 0) || 0;
+                const totalGr = kg && pesoKg > 0 ? pz * Math.round(pesoKg * 1000) + gr : null;
 
-                  return (
-                    <div className="space-y-3">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <div className="text-sm font-medium">
-                            {it.code} <span className="text-gray-400">—</span> {it.description}
-                          </div>
-                          <div className="text-xs text-gray-500 mt-1">
-                            {ml ? (
-                              <>
-                                ML item — per unit: <b>{perUnit || "—"}</b> ml — totale attuale: <b>{totalMl}</b> ({mlToLitriLabel(totalMl)})
-                              </>
-                            ) : kg ? (
-                              <>
-                                <div>
-                                  <b>{pz}</b> pz + <b>{gr}</b> gr
-                                </div>
-                                <div className="text-xs text-gray-600">
-                                  {totalGr != null ? (
-                                    <>
-                                      Tot: <b>{totalGr}</b> gr — <b>{totalKg.toFixed(3)}</b> kg
-                                    </>
-                                  ) : (
-                                    <>
-                                      Tot kg: <b>{totalKg.toFixed(3)}</b> — <span className="text-red-600">peso_kg mancante</span>
-                                    </>
-                                  )}
-                                </div>
-                              </>
-                            ) : (
-                              <>
-                                PZ item — totale attuale: <b>{safeIntFromStr(qtyPzMap[it.id] ?? "")}</b> pz
-                              </>
-                            )}
-                          </div>
+                const quickPz = [1, 5, 10];
+                const quickSmall = [25, 50, 100, 250, 500];
+
+                return (
+                  <div className="space-y-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-medium">
+                          {it.code} <span className="text-gray-400">—</span> {it.description}
                         </div>
-
-                        <button type="button" className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" onClick={() => afterRapidAction()} title="Chiudi articolo e torna alla ricerca">
-                          Chiudi
-                        </button>
+                        <div className="text-xs text-gray-500 mt-1">
+                          {ml ? (
+                            <>
+                              ML item — per unit: <b>{perUnit || "—"}</b> ml — totale attuale: <b>{totalMl}</b> ({mlToLitriLabel(totalMl)})
+                            </>
+                          ) : kg ? (
+                            <>
+                              <div>
+                                <b>{pz}</b> pz + <b>{gr}</b> gr
+                              </div>
+                              <div className="text-xs text-gray-600">
+                                {totalGr != null ? (
+                                  <>
+                                    Tot: <b>{totalGr}</b> gr — <b>{totalKg.toFixed(3)}</b> kg
+                                  </>
+                                ) : (
+                                  <>
+                                    Tot kg: <b>{totalKg.toFixed(3)}</b> — <span className="text-red-600">peso_kg mancante</span>
+                                  </>
+                                )}
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              PZ item — totale attuale: <b>{safeIntFromStr(qtyPzMap[it.id] ?? "")}</b> pz
+                            </>
+                          )}
+                        </div>
                       </div>
 
-                      {ml && (
-                        <div className="flex items-center gap-2">
-                          <MlModeToggle itemId={it.id} />
-                          <span className="text-xs text-gray-500">(in Rapido: userai soprattutto i pulsanti +ML)</span>
-                        </div>
-                      )}
+                      <button type="button" className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" onClick={() => afterRapidAction()} title="Chiudi articolo e torna alla ricerca">
+                        Chiudi
+                      </button>
+                    </div>
 
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                        <div className="rounded-xl border p-3">
-                          <div className="flex items-center justify-between gap-2 mb-2">
-                            <div className="text-sm font-medium">PZ rapidi</div>
-                            <div className="text-xs text-gray-600 rounded-full border px-2 py-1 bg-gray-50">
-                              Tot: <b>{rapidPzPreview ?? safeIntFromStr(qtyPzMap[it.id] ?? "")}</b>
-                            </div>
+                    {ml && (
+                      <div className="flex items-center gap-2">
+                        <MlModeToggle itemId={it.id} />
+                        <span className="text-xs text-gray-500">(in Rapido: userai soprattutto i pulsanti +ML)</span>
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <div className="rounded-xl border p-3">
+                        <div className="flex items-center justify-between gap-2 mb-2">
+                          <div className="text-sm font-medium">PZ rapidi</div>
+                          <div className="text-xs text-gray-600 rounded-full border px-2 py-1 bg-gray-50">
+                            Tot: <b>{rapidPzPreview ?? safeIntFromStr(qtyPzMap[it.id] ?? "")}</b>
                           </div>
-                          <div className="flex flex-wrap gap-2">
-                            {quickPz.map((n) => (
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {quickPz.map((n) => (
+                            <button
+                              key={n}
+                              type="button"
+                              className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
+                              onClick={() => {
+                                const base = rapidPzPreview ?? safeIntFromStr(qtyPzMap[it.id] ?? "");
+                                const next = Math.max(0, base + n);
+                                setRapidPzPreview(next);
+                                bumpPz(it.id, n);
+                                scheduleRapidAutoClose();
+                              }}
+                            >
+                              +{n}
+                            </button>
+                          ))}
+                        </div>
+                        <div className="mt-3 space-y-2">
+                          {/* ✅ AGGIUNGI (delta) */}
+                          <div className="flex gap-2">
+                            <input
+                              className="w-full rounded-xl border p-2"
+                              inputMode="numeric"
+                              placeholder="+ pz (aggiungi)"
+                              value={addPzMap[it.id] ?? ""}
+                              onChange={(e) => setAddPzMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  addQty(it.id); // ✅ somma
+                                  afterRapidAction();
+                                }
+                              }}
+                            />
+                            <button
+                              type="button"
+                              className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60"
+                              disabled={safeIntFromStr(addPzMap[it.id] ?? "") <= 0}
+                              onClick={() => {
+                                addQty(it.id); // ✅ somma
+                                afterRapidAction();
+                              }}
+                            >
+                              Aggiungi
+                            </button>
+                          </div>
+
+                          {/* ✅ IMPOSTA (override) */}
+                          <div className="flex gap-2">
+                            <input
+                              ref={rapidPzInputRef}
+                              className="w-full rounded-xl border p-2"
+                              inputMode="numeric"
+                              placeholder="Imposta totale PZ (correzione)"
+                              value={qtyPzMap[it.id] ?? ""}
+                              onChange={(e) => setPz(it.id, e.target.value)} // ✅ sovrascrive (correzione)
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  afterRapidAction();
+                                }
+                              }}
+                            />
+                            <button
+                              type="button"
+                              className="rounded-xl border px-4 py-2"
+                              onClick={() => afterRapidAction()}
+                              title="Conferma correzione"
+                            >
+                              OK
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="rounded-xl border p-3">
+                        <div className="text-sm font-medium mb-2">{kg ? "GR rapidi" : ml ? "ML rapidi" : "—"}</div>
+
+                        {kg ? (
+                          <>
+                            <div className="mt-3">
+                              <label className="block text-xs text-gray-500 mb-1">Totale GR (correzione)</label>
+                              <input
+                                ref={rapidGrInputRef}
+                                className="w-full rounded-xl border p-2"
+                                inputMode="numeric"
+                                placeholder="Es. 470"
+                                value={qtyGrMap[it.id] ?? ""}
+                                onChange={(e) => setGr(it.id, e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    afterRapidAction();
+                                  }
+                                }}
+                              />
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              {quickSmall.map((n) => (
+                                <button
+                                  key={n}
+                                  type="button"
+                                  className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
+                                  onClick={() => {
+                                    bumpGr(it.id, n);
+                                    scheduleRapidAutoClose();
+                                  }}
+                                >
+                                  +{n} gr
+                                </button>
+                              ))}
+                            </div>
+                            <div className="mt-3 flex gap-2">
+                              <input
+                                ref={rapidGrInputRef}
+                                className="w-full rounded-xl border p-2"
+                                inputMode="numeric"
+                                placeholder="+ gr (manuale)"
+                                value={addGrMap[it.id] ?? ""}
+                                onChange={(e) => setAddGrMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    addQty(it.id);
+                                    afterRapidAction();
+                                  }
+                                }}
+                              />
                               <button
-                                key={n}
                                 type="button"
-                                className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
+                                className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60"
+                                disabled={safeGrFromStr(addGrMap[it.id] ?? "") <= 0}
                                 onClick={() => {
-                                  const base = rapidPzPreview ?? safeIntFromStr(qtyPzMap[it.id] ?? "");
-                                  const next = Math.max(0, base + n);
-                                  setRapidPzPreview(next);
-                                  bumpPz(it.id, n);
-                                  scheduleRapidAutoClose();
+                                  addQty(it.id);
+                                  afterRapidAction();
                                 }}
                               >
-                                +{n}
+                                Aggiungi
                               </button>
-                            ))}
-                          </div>
-                     <div className="mt-3 space-y-2">
-  {/* ✅ AGGIUNGI (delta) */}
-  <div className="flex gap-2">
-    <input
-      className="w-full rounded-xl border p-2"
-      inputMode="numeric"
-      placeholder="+ pz (aggiungi)"
-      value={addPzMap[it.id] ?? ""}
-      onChange={(e) => setAddPzMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          addQty(it.id);        // ✅ somma
-          afterRapidAction();
-        }
-      }}
-    />
-    <button
-      type="button"
-      className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60"
-      disabled={safeIntFromStr(addPzMap[it.id] ?? "") <= 0}
-      onClick={() => {
-        addQty(it.id);          // ✅ somma
-        afterRapidAction();
-      }}
-    >
-      Aggiungi
-    </button>
-  </div>
+                            </div>
+                          </>
+                        ) : ml ? (
+                          <>
+                            <div className="flex flex-wrap gap-2">
+                              {quickSmall.map((n) => (
+                                <button
+                                  key={n}
+                                  type="button"
+                                  className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
+                                  onClick={() => {
+                                    if (mode === "mixed") bumpTotalMl(it.id, n);
+                                    else bumpOpenMl(it.id, n);
+                                    scheduleRapidAutoClose();
+                                  }}
+                                >
+                                  +{n} ml
+                                </button>
+                              ))}
+                            </div>
 
-  {/* ✅ IMPOSTA (override) */}
-  <div className="flex gap-2">
-    <input
-      ref={rapidPzInputRef}
-      className="w-full rounded-xl border p-2"
-      inputMode="numeric"
-      placeholder="Imposta totale PZ (correzione)"
-      value={qtyPzMap[it.id] ?? ""}
-      onChange={(e) => setPz(it.id, e.target.value)} // ✅ sovrascrive (correzione)
-      onKeyDown={(e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          afterRapidAction();
-        }
-      }}
-    />
-    <button
-      type="button"
-      className="rounded-xl border px-4 py-2"
-      onClick={() => afterRapidAction()}
-      title="Conferma correzione"
-    >
-      OK
-    </button>
-  </div>
-</div>
-                        </div>
-
-                        <div className="rounded-xl border p-3">
-                          <div className="text-sm font-medium mb-2">{kg ? "GR rapidi" : ml ? "ML rapidi" : "—"}</div>
-
-                          {kg ? (
-                            <>
-                            
-                            <div className="mt-3">
-  <label className="block text-xs text-gray-500 mb-1">Totale GR (correzione)</label>
-  <input
-    ref={rapidGrInputRef}
-    className="w-full rounded-xl border p-2"
-    inputMode="numeric"
-    placeholder="Es. 470"
-    value={qtyGrMap[it.id] ?? ""}
-    onChange={(e) => setGr(it.id, e.target.value)}
-    onKeyDown={(e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        afterRapidAction();
-      }
-    }}
-  />
-</div>
-                              <div className="flex flex-wrap gap-2">
-                                {quickSmall.map((n) => (
-                                  <button
-                                    key={n}
-                                    type="button"
-                                    className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
-                                    onClick={() => {
-                                      bumpGr(it.id, n);
-                                      scheduleRapidAutoClose();
-                                    }}
-                                  >
-                                    +{n} gr
-                                  </button>
-                                ))}
-                              </div>
-                              <div className="mt-3 flex gap-2">
+                            <div className="mt-3 flex gap-2">
+                              {mode === "mixed" ? (
                                 <input
-                                  ref={rapidGrInputRef}
+                                  ref={rapidMlInputRef}
                                   className="w-full rounded-xl border p-2"
                                   inputMode="numeric"
-                                  placeholder="+ gr (manuale)"
-                                  value={addGrMap[it.id] ?? ""}
-                                  onChange={(e) => setAddGrMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
+                                  placeholder="+ ml (manuale)"
+                                  value={addTotalMlMap[it.id] ?? ""}
+                                  onChange={(e) => setAddTotalMlMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
                                   onKeyDown={(e) => {
                                     if (e.key === "Enter") {
                                       e.preventDefault();
@@ -2730,295 +2790,239 @@ if (mode === "close") {
                                     }
                                   }}
                                 />
-                                <button
-                                  type="button"
-                                  className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60"
-                                  disabled={safeGrFromStr(addGrMap[it.id] ?? "") <= 0}
-                                  onClick={() => {
-                                    addQty(it.id);
-                                    afterRapidAction();
+                              ) : (
+                                <input
+                                  ref={rapidMlInputRef}
+                                  className="w-full rounded-xl border p-2"
+                                  inputMode="numeric"
+                                  placeholder="+ ml aperti (manuale)"
+                                  value={addOpenMlMap[it.id] ?? ""}
+                                  onChange={(e) => setAddOpenMlMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") {
+                                      e.preventDefault();
+                                      addQty(it.id);
+                                      afterRapidAction();
+                                    }
                                   }}
-                                >
-                                  Aggiungi
-                                </button>
-                              </div>
-                            </>
-                          ) : ml ? (
-                            <>
-                              <div className="flex flex-wrap gap-2">
-                                {quickSmall.map((n) => (
-                                  <button
-                                    key={n}
-                                    type="button"
-                                    className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
-                                    onClick={() => {
-                                      if (mode === "mixed") bumpTotalMl(it.id, n);
-                                      else bumpOpenMl(it.id, n);
-                                      scheduleRapidAutoClose();
-                                    }}
-                                  >
-                                    +{n} ml
-                                  </button>
-                                ))}
-                              </div>
+                                />
+                              )}
 
-                              <div className="mt-3 flex gap-2">
-                                {mode === "mixed" ? (
-                                  <input
-                                    ref={rapidMlInputRef}
-                                    className="w-full rounded-xl border p-2"
-                                    inputMode="numeric"
-                                    placeholder="+ ml (manuale)"
-                                    value={addTotalMlMap[it.id] ?? ""}
-                                    onChange={(e) => setAddTotalMlMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
-                                    onKeyDown={(e) => {
-                                      if (e.key === "Enter") {
-                                        e.preventDefault();
-                                        addQty(it.id);
-                                        afterRapidAction();
-                                      }
-                                    }}
-                                  />
-                                ) : (
-                                  <input
-                                    ref={rapidMlInputRef}
-                                    className="w-full rounded-xl border p-2"
-                                    inputMode="numeric"
-                                    placeholder="+ ml aperti (manuale)"
-                                    value={addOpenMlMap[it.id] ?? ""}
-                                    onChange={(e) => setAddOpenMlMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
-                                    onKeyDown={(e) => {
-                                      if (e.key === "Enter") {
-                                        e.preventDefault();
-                                        addQty(it.id);
-                                        afterRapidAction();
-                                      }
-                                    }}
-                                  />
-                                )}
+                              <button
+                                type="button"
+                                className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60"
+                                disabled={mode === "mixed" ? safeIntFromStr(addTotalMlMap[it.id] ?? "") <= 0 : safeIntFromStr(addOpenMlMap[it.id] ?? "") <= 0}
+                                onClick={() => {
+                                  addQty(it.id);
+                                  afterRapidAction();
+                                }}
+                              >
+                                Aggiungi
+                              </button>
+                            </div>
+                          </>
+                        ) : (
+                          <div className="text-sm text-gray-400">N/A</div>
+                        )}
+                      </div>
 
-                                <button
-                                  type="button"
-                                  className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60"
-                                  disabled={mode === "mixed" ? safeIntFromStr(addTotalMlMap[it.id] ?? "") <= 0 : safeIntFromStr(addOpenMlMap[it.id] ?? "") <= 0}
-                                  onClick={() => {
-                                    addQty(it.id);
-                                    afterRapidAction();
-                                  }}
-                                >
-                                  Aggiungi
-                                </button>
-                              </div>
-                            </>
-                          ) : (
-                            <div className="text-sm text-gray-400">N/A</div>
-                          )}
+                      <div className="rounded-xl border p-3 bg-gray-50">
+                        <div className="text-sm font-medium mb-2">Riepilogo</div>
+                        <div className="text-sm text-gray-700">
+                          Scansionati: <b>{totScannedDistinct}</b>
                         </div>
-
-                        <div className="rounded-xl border p-3 bg-gray-50">
-                          <div className="text-sm font-medium mb-2">Riepilogo</div>
-                          <div className="text-sm text-gray-700">
-                            Scansionati: <b>{totScannedDistinct}</b>
-                          </div>
-                          <div className="text-sm text-gray-700">
-                            Valore: <b>{formatEUR(totScannedValueEur)}</b>
-                          </div>
-                          <div className="text-xs text-gray-500 mt-2">Tip: qui aggiungiamo solo quanto serve. La lista completa la apri con “Scansionati”.</div>
+                        <div className="text-sm text-gray-700">
+                          Valore: <b>{formatEUR(totScannedValueEur)}</b>
                         </div>
+                        <div className="text-xs text-gray-500 mt-2">Tip: qui aggiungiamo solo quanto serve. La lista completa la apri con “Scansionati”.</div>
                       </div>
                     </div>
-                  );
-                })()}
-            </div>
-          )}
-
-          {rapidView === "list" && (
-            <div className="rounded-2xl border bg-white p-4 space-y-3">
-              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-                <div>
-                  <div className="text-sm font-medium">Scansionati</div>
-                  <div className="text-sm text-gray-600">
-                    Articoli: <b>{totScannedDistinct}</b> — PZ (no-ML): <b>{totScannedPiecesNoMl}</b> — KG tot: <b>{totScannedKg.toFixed(3)}</b> — Tot ML: <b>{totScannedTotalMl}</b> (
-                    {mlToLitriLabel(totScannedTotalMl)}) — Valore: <b>{formatEUR(totScannedValueEur)}</b>
                   </div>
-                </div>
+                );
+              })()
+            )}
+          </div>
+        )}
 
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50"
-                    onClick={() => {
-                      setRapidView("scan");
-                      focusSearchSoon();
-                    }}
-                  >
-                    Torna a scan
-                  </button>
-
-                  <button className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-60" disabled={scannedIds.length === 0} onClick={clearScannedList} type="button">
-                    Svuota lista
-                  </button>
+        {rapidView === "list" && (
+          <div className="rounded-2xl border bg-white p-4 space-y-3">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+              <div>
+                <div className="text-sm font-medium">Scansionati</div>
+                <div className="text-sm text-gray-600">
+                  Articoli: <b>{totScannedDistinct}</b> — PZ (no-ML): <b>{totScannedPiecesNoMl}</b> — KG tot: <b>{totScannedKg.toFixed(3)}</b> — Tot ML: <b>{totScannedTotalMl}</b> (
+                  {mlToLitriLabel(totScannedTotalMl)}) — Valore: <b>{formatEUR(totScannedValueEur)}</b>
                 </div>
               </div>
 
-              {scannedItems.length === 0 ? (
-                <div className="text-sm text-gray-500">Nessun articolo scansionato.</div>
-              ) : (
-                <>
-                  {/* MOBILE: cards */}
-                  <div className="md:hidden space-y-2">
-                    {scannedItems.map((it) => {
-                      const ml = isMlItem(it);
-                      const kg = isKgItem(it) && !ml;
-                      const totalMl = ml ? calcTotalMl(it) : 0;
-                      const totalKg = kg ? calcTotalKg(it) : 0;
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50"
+                  onClick={() => {
+                    setRapidView("scan");
+                    focusSearchSoon();
+                  }}
+                >
+                  Torna a scan
+                </button>
 
-                      const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
-                      const gr = safeGrFromStr(qtyGrMap[it.id] ?? "");
-
-                      const price = Number(it.prezzo_vendita_eur) || 0;
-                      let rowValue = 0;
-                      if (ml) {
-                        const perUnit = Number(it.volume_ml_per_unit) || 0;
-                        rowValue = perUnit > 0 ? (totalMl / perUnit) * price : 0;
-                      } else if (kg) {
-                        rowValue = totalKg * price;
-                      } else {
-                        rowValue = pz * price;
-                      }
-
-                      return (
-                        <div key={it.id} className="rounded-xl border p-3 bg-white">
-                          <div className="flex items-start justify-between gap-2">
-                            <div>
-                              <div className="text-sm font-semibold">{it.code}</div>
-                              <div className="text-xs text-gray-600">{it.description}</div>
-                            </div>
-                            <button
-                              type="button"
-                              className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
-                              onClick={() => {
-                              flushSync(() => {
-                             setSuggestionsOpen(false);
-                             openItemInRapid(it);
-                             });
-
-                            setTimeout(() => focusRapidQtyNow(it), 0);
-                            }}
-                            >
-                              Apri
-                            </button>
-                            <button
-                            type="button"
-                             className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
-                             onClick={() => removeFromScanned(it.id)}
-                            >
-                            Rimuovi
-                            </button>
-                          </div>
-
-                          <div className="mt-2 text-sm">
-                            {ml ? (
-                              <>
-                                Tot: <b>{totalMl}</b> ml <span className="text-gray-500">({mlToLitriLabel(totalMl)})</span>
-                              </>
-                            ) : kg ? (
-                              <>
-                                <b>{pz}</b> pz + <b>{gr}</b> gr — <b>{totalKg.toFixed(3)}</b> kg
-                              </>
-                            ) : (
-                              <>
-                                Tot: <b>{pz}</b> pz
-                              </>
-                            )}
-                          </div>
-
-                          <div className="mt-1 text-sm">
-                            Valore: <b>{formatEUR(rowValue)}</b>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  {/* DESKTOP: table */}
-                  <div className="hidden md:block overflow-auto rounded-xl border">
-                    <table className="w-full text-sm">
-                      <thead className="bg-gray-50">
-                        <tr>
-                          <th className="text-left p-3 w-40">Codice</th>
-                          <th className="text-left p-3">Descrizione</th>
-                          <th className="text-left p-3 w-44">Totali</th>
-                          <th className="text-right p-3 w-40">Valore</th>
-                          <th className="text-right p-3 w-40">Azioni</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {scannedItems.map((it) => {
-                          const ml = isMlItem(it);
-                          const kg = isKgItem(it) && !ml;
-                          const totalMl = ml ? calcTotalMl(it) : 0;
-                          const totalKg = kg ? calcTotalKg(it) : 0;
-
-                          const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
-                          const gr = safeGrFromStr(qtyGrMap[it.id] ?? "");
-
-                          const price = Number(it.prezzo_vendita_eur) || 0;
-                          let rowValue = 0;
-
-                          if (ml) {
-                            const perUnit = Number(it.volume_ml_per_unit) || 0;
-                            rowValue = perUnit > 0 ? (totalMl / perUnit) * price : 0;
-                          } else if (kg) {
-                            rowValue = totalKg * price;
-                          } else {
-                            rowValue = pz * price;
-                          }
-
-                          return (
-                            <tr id={`inv-scanned-row-${it.id}`} key={it.id} className="border-t">
-                              <td className="p-3 font-medium">{it.code}</td>
-                              <td className="p-3">{it.description}</td>
-                              <td className="p-3">
-                                {ml ? (
-                                  <>
-                                    <b>{totalMl}</b> ml
-                                  </>
-                                ) : kg ? (
-                                  <>
-                                    <b>{pz}</b> pz + <b>{gr}</b> gr — <b>{totalKg.toFixed(3)}</b> kg
-                                  </>
-                                ) : (
-                                  <>
-                                    <b>{pz}</b> pz
-                                  </>
-                                )}
-                              </td>
-                              <td className="p-3 text-right font-medium">{formatEUR(rowValue)}</td>
-
-                              <td className="p-3 text-right">
-                                <button type="button" className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" onClick={() => openItemInRapid(it)}>
-                                  Apri
-                                </button>
-                                  <button
-                                  type="button"
-                                  className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
-                                  onClick={() => removeFromScanned(it.id)}
-                                 >
-                                   Rimuovi
-                                 </button>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </>
-              )}
+                <button className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-60" disabled={scannedIds.length === 0} onClick={clearScannedList} type="button">
+                  Svuota lista
+                </button>
+              </div>
             </div>
-          )}
-        </div>
+
+            {scannedItems.length === 0 ? (
+              <div className="text-sm text-gray-500">Nessun articolo scansionato.</div>
+            ) : (
+              <>
+                {/* MOBILE: cards */}
+                <div className="md:hidden space-y-2">
+                  {scannedItems.map((it) => {
+                    const ml = isMlItem(it);
+                    const kg = isKgItem(it) && !ml;
+                    const totalMl = ml ? calcTotalMl(it) : 0;
+                    const totalKg = kg ? calcTotalKg(it) : 0;
+
+                    const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
+                    const gr = safeGrFromStr(qtyGrMap[it.id] ?? "");
+
+                    const price = Number(it.prezzo_vendita_eur) || 0;
+                    let rowValue = 0;
+                    if (ml) {
+                      const perUnit = Number(it.volume_ml_per_unit) || 0;
+                      rowValue = perUnit > 0 ? (totalMl / perUnit) * price : 0;
+                    } else if (kg) {
+                      rowValue = totalKg * price;
+                    } else {
+                      rowValue = pz * price;
+                    }
+
+                    return (
+                      <div key={it.id} className="rounded-xl border p-3 bg-white">
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="text-sm font-semibold">{it.code}</div>
+                            <div className="text-xs text-gray-600">{it.description}</div>
+                          </div>
+                          <button
+                            type="button"
+                            className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
+                            onClick={() => {
+                              flushSync(() => {
+                                setSuggestionsOpen(false);
+                                openItemInRapid(it);
+                              });
+
+                              setTimeout(() => focusRapidQtyNow(it), 0);
+                            }}
+                          >
+                            Apri
+                          </button>
+                          <button type="button" className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" onClick={() => removeFromScanned(it.id)}>
+                            Rimuovi
+                          </button>
+                        </div>
+
+                        <div className="mt-2 text-sm">
+                          {ml ? (
+                            <>
+                              Tot: <b>{totalMl}</b> ml <span className="text-gray-500">({mlToLitriLabel(totalMl)})</span>
+                            </>
+                          ) : kg ? (
+                            <>
+                              <b>{pz}</b> pz + <b>{gr}</b> gr — <b>{totalKg.toFixed(3)}</b> kg
+                            </>
+                          ) : (
+                            <>
+                              Tot: <b>{pz}</b> pz
+                            </>
+                          )}
+                        </div>
+
+                        <div className="mt-1 text-sm">
+                          Valore: <b>{formatEUR(rowValue)}</b>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* DESKTOP: table */}
+                <div className="hidden md:block overflow-auto rounded-xl border">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="text-left p-3 w-40">Codice</th>
+                        <th className="text-left p-3">Descrizione</th>
+                        <th className="text-left p-3 w-44">Totali</th>
+                        <th className="text-right p-3 w-40">Valore</th>
+                        <th className="text-right p-3 w-40">Azioni</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {scannedItems.map((it) => {
+                        const ml = isMlItem(it);
+                        const kg = isKgItem(it) && !ml;
+                        const totalMl = ml ? calcTotalMl(it) : 0;
+                        const totalKg = kg ? calcTotalKg(it) : 0;
+
+                        const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
+                        const gr = safeGrFromStr(qtyGrMap[it.id] ?? "");
+
+                        const price = Number(it.prezzo_vendita_eur) || 0;
+                        let rowValue = 0;
+
+                        if (ml) {
+                          const perUnit = Number(it.volume_ml_per_unit) || 0;
+                          rowValue = perUnit > 0 ? (totalMl / perUnit) * price : 0;
+                        } else if (kg) {
+                          rowValue = totalKg * price;
+                        } else {
+                          rowValue = pz * price;
+                        }
+
+                        return (
+                          <tr id={`inv-scanned-row-${it.id}`} key={it.id} className="border-t">
+                            <td className="p-3 font-medium">{it.code}</td>
+                            <td className="p-3">{it.description}</td>
+                            <td className="p-3">
+                              {ml ? (
+                                <>
+                                  <b>{totalMl}</b> ml
+                                </>
+                              ) : kg ? (
+                                <>
+                                  <b>{pz}</b> pz + <b>{gr}</b> gr — <b>{totalKg.toFixed(3)}</b> kg
+                                </>
+                              ) : (
+                                <>
+                                  <b>{pz}</b> pz
+                                </>
+                              )}
+                            </td>
+                            <td className="p-3 text-right font-medium">{formatEUR(rowValue)}</td>
+
+                            <td className="p-3 text-right">
+                              <button type="button" className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" onClick={() => openItemInRapid(it)}>
+                                Apri
+                              </button>
+                              <button type="button" className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" onClick={() => removeFromScanned(it.id)}>
+                                Rimuovi
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
 
       {msg && <p className="text-sm text-green-700">{msg}</p>}
       {error && <p className="text-sm text-red-600">{error}</p>}

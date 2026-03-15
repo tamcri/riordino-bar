@@ -28,6 +28,7 @@ type Body = {
   rows?: Row[];
   force_overwrite?: boolean;
   mode?: "close" | "continue";
+  recount_mode?: boolean;
 };
 
 type NormalizedInventoryRow = {
@@ -184,6 +185,8 @@ export async function POST(req: Request) {
 
   const body = (await req.json().catch(() => null)) as Body | null;
   if (!body) return NextResponse.json({ ok: false, error: "Body non valido" }, { status: 400 });
+
+  const recountMode = body.recount_mode === true;
 
   const { isRapid, category_id } = normalizeCategoryForServer(body.category_id);
   const subcategory_id = normalizeSubcategoryForServer(body.subcategory_id, isRapid);
@@ -482,7 +485,7 @@ export async function POST(req: Request) {
     codeByItemId.set(item.id, item.code || item.id);
   }
 
-    const metaByItemId = new Map<
+  const metaByItemId = new Map<
     string,
     {
       um: string | null;
@@ -499,7 +502,7 @@ export async function POST(req: Request) {
     });
   }
 
-    let existingRowsForPreserveByItemId = new Map<
+  let existingRowsForPreserveByItemId = new Map<
     string,
     { qty: number; qty_ml: number; qty_gr: number }
   >();
@@ -580,7 +583,7 @@ export async function POST(req: Request) {
           inventory_date: dateOrNull,
           created_by_username: session.username,
         };
-            } else if (qtyMlIn !== null) {
+      } else if (qtyMlIn !== null) {
         const qty_ml = qtyMlIn;
         const qty = clampInt(qtyIn);
         rowToSave = {
@@ -655,8 +658,8 @@ export async function POST(req: Request) {
       (Number(r.qty_gr) || 0) > 0
   );
 
-    let recountEventsPayload: any[] = [];
-    let recountEventsUpsertPayload: any[] = [];
+  let recountEventsPayload: any[] = [];
+  let recountEventsUpsertPayload: any[] = [];
 
   if (alreadyExists) {
     let existingRowsQ = supabaseAdmin
@@ -681,7 +684,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: existingRowsErr.message }, { status: 500 });
     }
 
-        const existingRowsNormalized: NormalizedInventoryRow[] = (existingRowsData || []).map((r: any) => {
+    const existingRowsNormalized: NormalizedInventoryRow[] = (existingRowsData || []).map((r: any) => {
       const itemId = String(r?.item_id ?? "").trim();
       const meta = metaByItemId.get(itemId);
 
@@ -702,100 +705,102 @@ export async function POST(req: Request) {
       existingByItemId.set(row.item_id, row);
     }
 
-        recountEventsPayload = incomingPreparedRows
-      .map((r: any) => {
-                const itemId = String(r?.item_id ?? "").trim();
-        const meta = metaByItemId.get(itemId);
+    if (recountMode) {
+      recountEventsPayload = incomingPreparedRows
+        .map((r: any) => {
+          const itemId = String(r?.item_id ?? "").trim();
+          const meta = metaByItemId.get(itemId);
 
-        const normalizedIncoming: NormalizedInventoryRow = {
-          item_id: itemId,
-          qty: Number(r?.qty ?? 0),
-          qty_gr: Number(r?.qty_gr ?? 0),
-          qty_ml: Number(r?.qty_ml ?? 0),
-          um: meta?.um ?? null,
-          peso_kg: meta?.peso_kg ?? null,
-          volume_ml_per_unit: meta?.volume_ml_per_unit ?? null,
-        };
-        const oldRow = existingByItemId.get(normalizedIncoming.item_id) ?? null;
-        if (!rowChanged(oldRow, normalizedIncoming)) return null;
+          const normalizedIncoming: NormalizedInventoryRow = {
+            item_id: itemId,
+            qty: Number(r?.qty ?? 0),
+            qty_gr: Number(r?.qty_gr ?? 0),
+            qty_ml: Number(r?.qty_ml ?? 0),
+            um: meta?.um ?? null,
+            peso_kg: meta?.peso_kg ?? null,
+            volume_ml_per_unit: meta?.volume_ml_per_unit ?? null,
+          };
+          const oldRow = existingByItemId.get(normalizedIncoming.item_id) ?? null;
+          if (!rowChanged(oldRow, normalizedIncoming)) return null;
 
-        const itemCode =
-          codeByItemId.get(normalizedIncoming.item_id) || normalizedIncoming.item_id;
+          const itemCode =
+            codeByItemId.get(normalizedIncoming.item_id) || normalizedIncoming.item_id;
 
-        return {
-          inventory_header_id: existingId,
-          pv_id,
-          inventory_date: dateOrNull,
-          category_id,
-          subcategory_id,
-          rapid_session_id: isRapid ? rapid_session_id : null,
-          label: label_norm,
-          item_id: normalizedIncoming.item_id,
-          item_code: itemCode,
+          return {
+            inventory_header_id: existingId,
+            pv_id,
+            inventory_date: dateOrNull,
+            category_id,
+            subcategory_id,
+            rapid_session_id: isRapid ? rapid_session_id : null,
+            label: label_norm,
+            item_id: normalizedIncoming.item_id,
+            item_code: itemCode,
 
-          // base iniziale: per ora parto dal valore precedente all’attuale modifica
-          // poi sotto, se esiste già una riga recount, manterrò il suo old_* originale
-          old_qty: Number(oldRow?.qty ?? 0),
-          old_qty_gr: Number(oldRow?.qty_gr ?? 0),
-          old_qty_ml: Number(oldRow?.qty_ml ?? 0),
+            // base iniziale: per ora parto dal valore precedente all’attuale modifica
+            // poi sotto, se esiste già una riga recount, manterrò il suo old_* originale
+            old_qty: Number(oldRow?.qty ?? 0),
+            old_qty_gr: Number(oldRow?.qty_gr ?? 0),
+            old_qty_ml: Number(oldRow?.qty_ml ?? 0),
 
-          new_qty: Number(normalizedIncoming.qty ?? 0),
-          new_qty_gr: Number(normalizedIncoming.qty_gr ?? 0),
-          new_qty_ml: Number(normalizedIncoming.qty_ml ?? 0),
+            new_qty: Number(normalizedIncoming.qty ?? 0),
+            new_qty_gr: Number(normalizedIncoming.qty_gr ?? 0),
+            new_qty_ml: Number(normalizedIncoming.qty_ml ?? 0),
 
-          created_by_username: session.username,
-        };
-      })
-      .filter(Boolean) as any[];
+            created_by_username: session.username,
+          };
+        })
+        .filter(Boolean) as any[];
 
-    if (recountEventsPayload.length > 0) {
-      const recountItemIds = Array.from(
-        new Set(
-          recountEventsPayload
-            .map((r: any) => String(r?.item_id ?? "").trim())
-            .filter((id: string) => !!id)
-        )
-      );
+      if (recountEventsPayload.length > 0) {
+        const recountItemIds = Array.from(
+          new Set(
+            recountEventsPayload
+              .map((r: any) => String(r?.item_id ?? "").trim())
+              .filter((id: string) => !!id)
+          )
+        );
 
-      const { data: existingRecountRows, error: existingRecountErr } = await supabaseAdmin
-        .from("inventory_recount_events")
-        .select("inventory_header_id, item_id, old_qty, old_qty_gr, old_qty_ml")
-        .eq("inventory_header_id", existingId)
-        .in("item_id", recountItemIds);
+        const { data: existingRecountRows, error: existingRecountErr } = await supabaseAdmin
+          .from("inventory_recount_events")
+          .select("inventory_header_id, item_id, old_qty, old_qty_gr, old_qty_ml")
+          .eq("inventory_header_id", existingId)
+          .in("item_id", recountItemIds);
 
-      if (existingRecountErr) {
-        console.error("[inventories/save] existing recount rows read error:", existingRecountErr);
-        return NextResponse.json({ ok: false, error: existingRecountErr.message }, { status: 500 });
-      }
-
-      const existingRecountByItemId = new Map<string, any>();
-      for (const row of existingRecountRows || []) {
-        const itemId = String((row as any)?.item_id ?? "").trim();
-        if (!itemId) continue;
-        existingRecountByItemId.set(itemId, row);
-      }
-
-      recountEventsUpsertPayload = recountEventsPayload.map((eventRow: any) => {
-        const existingRecount = existingRecountByItemId.get(String(eventRow.item_id).trim());
-
-        if (!existingRecount) {
-          return eventRow;
+        if (existingRecountErr) {
+          console.error("[inventories/save] existing recount rows read error:", existingRecountErr);
+          return NextResponse.json({ ok: false, error: existingRecountErr.message }, { status: 500 });
         }
 
-        return {
-          ...eventRow,
-          // ✅ OPZIONE B:
-          // mantengo sempre il vecchio valore originale del primo recount
-          old_qty: Number((existingRecount as any)?.old_qty ?? eventRow.old_qty ?? 0),
-          old_qty_gr: Number((existingRecount as any)?.old_qty_gr ?? eventRow.old_qty_gr ?? 0),
-          old_qty_ml: Number((existingRecount as any)?.old_qty_ml ?? eventRow.old_qty_ml ?? 0),
-        };
-      });
+        const existingRecountByItemId = new Map<string, any>();
+        for (const row of existingRecountRows || []) {
+          const itemId = String((row as any)?.item_id ?? "").trim();
+          if (!itemId) continue;
+          existingRecountByItemId.set(itemId, row);
+        }
+
+        recountEventsUpsertPayload = recountEventsPayload.map((eventRow: any) => {
+          const existingRecount = existingRecountByItemId.get(String(eventRow.item_id).trim());
+
+          if (!existingRecount) {
+            return eventRow;
+          }
+
+          return {
+            ...eventRow,
+            // ✅ OPZIONE B:
+            // mantengo sempre il vecchio valore originale del primo recount
+            old_qty: Number((existingRecount as any)?.old_qty ?? eventRow.old_qty ?? 0),
+            old_qty_gr: Number((existingRecount as any)?.old_qty_gr ?? eventRow.old_qty_gr ?? 0),
+            old_qty_ml: Number((existingRecount as any)?.old_qty_ml ?? eventRow.old_qty_ml ?? 0),
+          };
+        });
+      }
     }
 
     const mergedRows = mergePartialRecount({
       existingRows: existingRowsNormalized,
-        incomingRows: incomingPreparedRows.map((r: any) => ({
+      incomingRows: incomingPreparedRows.map((r: any) => ({
         item_id: String(r?.item_id ?? "").trim(),
         qty: Number(r?.qty ?? 0),
         qty_gr: Number(r?.qty_gr ?? 0),
@@ -842,7 +847,7 @@ export async function POST(req: Request) {
   }
 
   if (payload.length === 0) {
-        if (alreadyExists && recountEventsUpsertPayload.length > 0) {
+    if (alreadyExists && recountMode && recountEventsUpsertPayload.length > 0) {
       const { error: recountErr } = await supabaseAdmin
         .from("inventory_recount_events")
         .upsert(recountEventsUpsertPayload, {
@@ -870,7 +875,8 @@ export async function POST(req: Request) {
       enforced_pv: session.role === "punto_vendita",
       overwritten: alreadyExists,
       partial_merge: true,
-      recount_events_saved: recountEventsUpsertPayload.length,
+      recount_mode: recountMode,
+      recount_events_saved: recountMode ? recountEventsUpsertPayload.length : 0,
       label: label_norm,
     });
   }
@@ -884,7 +890,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: insRowsErr.message }, { status: 500 });
   }
 
-    if (alreadyExists && recountEventsUpsertPayload.length > 0) {
+  if (alreadyExists && recountMode && recountEventsUpsertPayload.length > 0) {
     const { error: recountErr } = await supabaseAdmin
       .from("inventory_recount_events")
       .upsert(recountEventsUpsertPayload, {
@@ -926,7 +932,8 @@ export async function POST(req: Request) {
     enforced_pv: session.role === "punto_vendita",
     overwritten: alreadyExists,
     partial_merge: alreadyExists || undefined,
-    recount_events_saved: recountEventsUpsertPayload.length,
+    recount_mode: recountMode,
+    recount_events_saved: recountMode ? recountEventsUpsertPayload.length : 0,
     label: label_norm,
     ...(deposit_sync ? { deposit_sync } : {}),
     ...(warning ? { warning } : {}),
