@@ -35,9 +35,6 @@ function isTotalRowCode(v: any) {
   return s === "totale" || s.includes("totalegenerale");
 }
 
-/**
- * Parser numerico standard per carico/scarico.
- */
 function toNum(v: any): number | null {
   if (v === null || v === undefined || v === "") return null;
   if (typeof v === "number") return Number.isFinite(v) ? v : null;
@@ -60,7 +57,7 @@ function toNum(v: any): number | null {
 }
 
 /**
- * ✅ Per giacenza fiscale NON vogliamo arrotondamenti.
+ * Per giacenza fiscale NON vogliamo arrotondamenti.
  * Salviamo una stringa decimale normalizzata.
  */
 function toExactDecimalString(v: any): string | null {
@@ -89,7 +86,6 @@ function toExactDecimalString(v: any): string | null {
   return s;
 }
 
-// equivalenza PZ + frazione (ML o GR) se presenti
 function toEquivQty(row: any): number {
   const qty = Number(row?.qty ?? 0) || 0;
 
@@ -126,7 +122,9 @@ async function getExcludedCategoryIds() {
     const name = String((c as any)?.name ?? "").toLowerCase();
     const slug = String((c as any)?.slug ?? "").toLowerCase();
     if (name.includes("tabacc") || slug.includes("tabacc")) ids.add((c as any).id);
-    if (name.includes("gratta") || name.includes("vinci") || slug.includes("gratta")) ids.add((c as any).id);
+    if (name.includes("gratta") || name.includes("vinci") || slug.includes("gratta")) {
+      ids.add((c as any).id);
+    }
   }
   return ids;
 }
@@ -165,9 +163,6 @@ function buildHeaders(aoa: any[][], headerRowIdx: number) {
   return headers;
 }
 
-/**
- * ✅ La riconta vale per quella data inventario/progressivo.
- */
 async function loadRecountedItemCodesForExactDate(pv_id: string, inventory_date: string) {
   const { data, error } = await supabaseAdmin
     .from("inventory_recount_events")
@@ -195,6 +190,87 @@ async function loadCurrentDateProgressiviRows(pv_id: string, inventory_date: str
 
   if (error) throw error;
   return data ?? [];
+}
+
+async function invalidateProgressiviSnapshotsForDate(pv_id: string, inventory_date: string) {
+  const { data: inventoryHeaders, error: inventoryHeadersErr } = await supabaseAdmin
+    .from("inventories_headers")
+    .select("id")
+    .eq("pv_id", pv_id)
+    .eq("inventory_date", inventory_date);
+
+  if (inventoryHeadersErr) {
+    throw new Error(
+      `Errore lettura inventories_headers per invalidazione snapshot: ${inventoryHeadersErr.message}`
+    );
+  }
+
+  const inventoryHeaderIds = Array.from(
+    new Set(
+      (inventoryHeaders ?? [])
+        .map((row: any) => String(row?.id ?? "").trim())
+        .filter(Boolean)
+    )
+  );
+
+  if (inventoryHeaderIds.length === 0) return 0;
+
+  const { data: snapshotHeadersCurrent, error: snapshotHeadersCurrentErr } = await supabaseAdmin
+    .from("progressivi_report_headers")
+    .select("id")
+    .in("current_header_id", inventoryHeaderIds);
+
+  if (snapshotHeadersCurrentErr) {
+    throw new Error(
+      `Errore lettura snapshot report current: ${snapshotHeadersCurrentErr.message}`
+    );
+  }
+
+  const { data: snapshotHeadersPrevious, error: snapshotHeadersPreviousErr } = await supabaseAdmin
+    .from("progressivi_report_headers")
+    .select("id")
+    .in("previous_header_id", inventoryHeaderIds);
+
+  if (snapshotHeadersPreviousErr) {
+    throw new Error(
+      `Errore lettura snapshot report previous: ${snapshotHeadersPreviousErr.message}`
+    );
+  }
+
+  const reportHeaderIds = Array.from(
+    new Set(
+      [
+        ...(snapshotHeadersCurrent ?? []).map((row: any) => String(row?.id ?? "").trim()),
+        ...(snapshotHeadersPrevious ?? []).map((row: any) => String(row?.id ?? "").trim()),
+      ].filter(Boolean)
+    )
+  );
+
+  if (reportHeaderIds.length === 0) return 0;
+
+  const { error: deleteRowsErr } = await supabaseAdmin
+    .from("progressivi_report_rows")
+    .delete()
+    .in("report_header_id", reportHeaderIds);
+
+  if (deleteRowsErr) {
+    throw new Error(
+      `Errore cancellazione progressivi_report_rows: ${deleteRowsErr.message}`
+    );
+  }
+
+  const { error: deleteHeadersErr } = await supabaseAdmin
+    .from("progressivi_report_headers")
+    .delete()
+    .in("id", reportHeaderIds);
+
+  if (deleteHeadersErr) {
+    throw new Error(
+      `Errore cancellazione progressivi_report_headers: ${deleteHeadersErr.message}`
+    );
+  }
+
+  return reportHeaderIds.length;
 }
 
 export async function POST(req: Request) {
@@ -309,15 +385,13 @@ export async function POST(req: Request) {
     }
 
     const recountedCodes = await loadRecountedItemCodesForExactDate(pv_id, inventory_date);
-
-    // ✅ BASE CORRETTA:
-    // se esiste già un progressivo per QUESTA STESSA DATA, uso lui come base.
-    // Questo è il primo progressivo del 10/03 che va mantenuto per i non ricontati.
     const existingCurrentDateRows = await loadCurrentDateProgressiviRows(pv_id, inventory_date);
 
     let finalRowsToWrite = uploadedRows;
     let merge_base: "uploaded_file" | "same_date_existing_rows" = "uploaded_file";
 
+    // Se esiste già un primo progressivo per questa stessa data
+    // e ci sono articoli ricontati, uso quella base e aggiorno solo i ricontati.
     if (recountedCodes.size > 0 && existingCurrentDateRows.length > 0) {
       const mergedMap = new Map<string, any>();
 
@@ -344,7 +418,6 @@ export async function POST(req: Request) {
         });
       }
 
-      // ✅ aggiorno SOLO gli articoli ricontati con il nuovo file
       for (const code of recountedCodes) {
         const uploaded = uploadedMap.get(code);
         if (!uploaded) continue;
@@ -359,7 +432,6 @@ export async function POST(req: Request) {
             created_by: session.username,
           });
         } else {
-          // se un ricontato non esisteva nella base della stessa data, lo aggiungo dal file nuovo
           mergedMap.set(code, { ...uploaded });
         }
       }
@@ -368,7 +440,6 @@ export async function POST(req: Request) {
       merge_base = "same_date_existing_rows";
     }
 
-    // ✅ riscrittura pulita della data corrente
     const { error: deleteCurrentErr } = await supabaseAdmin
       .from("inventory_progressivi_rows")
       .delete()
@@ -385,6 +456,23 @@ export async function POST(req: Request) {
 
     if (insertErr) {
       return NextResponse.json({ ok: false, error: insertErr.message }, { status: 500 });
+    }
+
+    let invalidated_report_snapshots = 0;
+    try {
+      invalidated_report_snapshots = await invalidateProgressiviSnapshotsForDate(
+        pv_id,
+        inventory_date
+      );
+    } catch (e: any) {
+      console.error("[progressivi/upload] snapshot invalidate error", e);
+      return NextResponse.json(
+        {
+          ok: false,
+          error: e?.message || "Progressivo salvato, ma invalidazione snapshot report fallita",
+        },
+        { status: 500 }
+      );
     }
 
     // Parte legacy invariata
@@ -419,6 +507,7 @@ export async function POST(req: Request) {
       recount_mode_applied: recountedCodes.size > 0 && existingCurrentDateRows.length > 0,
       recounted_items_count: recountedCodes.size,
       merge_base,
+      invalidated_report_snapshots,
     });
   } catch (e: any) {
     console.error("[progressivi/upload] error", e);
