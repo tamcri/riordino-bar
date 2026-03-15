@@ -125,7 +125,7 @@ type InventoryRowRaw = {
 
 type ProgressivoRowRaw = {
   item_code: string | null;
-  giacenza_qta1_fiscale: number | null;
+  giacenza_qta1_fiscale: string | number | null;
 };
 
 type ProgressivoNormalizedRow = {
@@ -215,6 +215,28 @@ function toNum(v: unknown) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function toExactDecimal(v: unknown) {
+  if (v === null || v === undefined || v === "") return 0;
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+
+  let s = String(v).trim();
+  if (!s) return 0;
+
+  s = s.replace(/\s+/g, "");
+
+  const hasDot = s.includes(".");
+  const hasComma = s.includes(",");
+
+  if (hasDot && hasComma) {
+    s = s.replace(/\./g, "").replace(",", ".");
+  } else if (hasComma && !hasDot) {
+    s = s.replace(",", ".");
+  }
+
+  const n = Number(s);
+  return Number.isFinite(n) ? n : 0;
+}
+
 function round2(n: number) {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
@@ -228,9 +250,9 @@ function calcInventario(row: InventoryRowRaw | null | undefined) {
   const qtyGr = toNum(row.qty_gr);
   const pesoKg = toNum(row.items?.peso_kg);
 
-  if (um === "LT") return round2(qtyMl / 1000);
-  if (um === "KG") return round2(qty * pesoKg + qtyGr / 1000);
-  return round2(qty);
+  if (um === "LT") return qtyMl / 1000;
+  if (um === "KG") return qty * pesoKg + qtyGr / 1000;
+  return qty;
 }
 
 function sameNormalizedCodeSet(left: string[], right: string[]): boolean {
@@ -472,7 +494,7 @@ async function loadProgressiviRows(
       raw_code: String(row.item_code ?? "").trim(),
       normalized_code_legacy: normCode(row.item_code),
       normalized_code_compact: normCodeCompact(row.item_code),
-      giacenza_qta1_fiscale: toNum(row.giacenza_qta1_fiscale),
+      giacenza_qta1_fiscale: toExactDecimal(row.giacenza_qta1_fiscale),
     }))
     .filter((row) => row.normalized_code_legacy || row.normalized_code_compact);
 }
@@ -542,7 +564,9 @@ async function resolvePreviousHeader(
   return null;
 }
 
-async function loadRecountedItemCodesForHeaders(headerIds: Array<string | null | undefined>): Promise<Set<string>> {
+async function loadRecountedItemCodesForHeaders(
+  headerIds: Array<string | null | undefined>
+): Promise<Set<string>> {
   const validHeaderIds = Array.from(
     new Set(
       headerIds
@@ -603,31 +627,23 @@ function resolveUniqueProgressivoValue(
 function computeTotals(rows: ProgressiviBlockRow[]) {
   return rows.reduce(
     (acc, row) => {
-      acc.previous.inventario = round2(acc.previous.inventario + row.previous.inventario);
-      acc.previous.giacenza_da_gestionale = round2(
-        acc.previous.giacenza_da_gestionale + row.previous.giacenza_da_gestionale
-      );
-      acc.previous.carico_non_registrato = round2(
-        acc.previous.carico_non_registrato + row.previous.carico_non_registrato
-      );
-      acc.previous.giacenza = round2(acc.previous.giacenza + row.previous.giacenza);
+      acc.previous.inventario += row.previous.inventario;
+      acc.previous.giacenza_da_gestionale += row.previous.giacenza_da_gestionale;
+      acc.previous.carico_non_registrato += row.previous.carico_non_registrato;
+      acc.previous.giacenza += row.previous.giacenza;
       acc.previous.valore_giacenza = round2(
         acc.previous.valore_giacenza + row.previous.valore_giacenza
       );
 
-      acc.current.inventario = round2(acc.current.inventario + row.current.inventario);
-      acc.current.giacenza_da_gestionale = round2(
-        acc.current.giacenza_da_gestionale + row.current.giacenza_da_gestionale
-      );
-      acc.current.carico_non_registrato = round2(
-        acc.current.carico_non_registrato + row.current.carico_non_registrato
-      );
-      acc.current.giacenza = round2(acc.current.giacenza + row.current.giacenza);
+      acc.current.inventario += row.current.inventario;
+      acc.current.giacenza_da_gestionale += row.current.giacenza_da_gestionale;
+      acc.current.carico_non_registrato += row.current.carico_non_registrato;
+      acc.current.giacenza += row.current.giacenza;
       acc.current.valore_giacenza = round2(
         acc.current.valore_giacenza + row.current.valore_giacenza
       );
 
-      acc.riscontro.differenza = round2(acc.riscontro.differenza + row.riscontro.differenza);
+      acc.riscontro.differenza += row.riscontro.differenza;
       acc.riscontro.valore_differenza = round2(
         acc.riscontro.valore_differenza + row.riscontro.valore_differenza
       );
@@ -698,21 +714,21 @@ function snapshotRowToBlockRow(row: ProgressiviSnapshotRow): ProgressiviBlockRow
     um: row.um,
     prezzo_vendita_eur: round2(toNum(row.prezzo_vendita_eur)),
     previous: {
-      inventario: round2(toNum(row.previous_inventario)),
-      giacenza_da_gestionale: round2(toNum(row.previous_gestionale)),
-      carico_non_registrato: round2(toNum(row.previous_carico_non_registrato)),
-      giacenza: round2(toNum(row.previous_giacenza)),
+      inventario: toNum(row.previous_inventario),
+      giacenza_da_gestionale: toExactDecimal(row.previous_gestionale),
+      carico_non_registrato: toNum(row.previous_carico_non_registrato),
+      giacenza: toNum(row.previous_giacenza),
       valore_giacenza: round2(toNum(row.previous_valore)),
     },
     current: {
-      inventario: round2(toNum(row.current_inventario)),
-      giacenza_da_gestionale: round2(toNum(row.current_gestionale)),
-      carico_non_registrato: round2(toNum(row.current_carico_non_registrato)),
-      giacenza: round2(toNum(row.current_giacenza)),
+      inventario: toNum(row.current_inventario),
+      giacenza_da_gestionale: toExactDecimal(row.current_gestionale),
+      carico_non_registrato: toNum(row.current_carico_non_registrato),
+      giacenza: toNum(row.current_giacenza),
       valore_giacenza: round2(toNum(row.current_valore)),
     },
     riscontro: {
-      differenza: round2(toNum(row.differenza)),
+      differenza: toNum(row.differenza),
       valore_differenza: round2(toNum(row.valore_differenza)),
     },
   };
@@ -862,13 +878,13 @@ async function computeLiveProgressiviData(
     const prevCaricoNonReg = 0;
     const currCaricoNonReg = 0;
 
-    const prevGiacenza = round2((prevInventario - prevGest) - prevCaricoNonReg);
-    const currGiacenza = round2((currInventario - currGest) - currCaricoNonReg);
+    const prevGiacenza = (prevInventario - prevGest) - prevCaricoNonReg;
+    const currGiacenza = (currInventario - currGest) - currCaricoNonReg;
 
     const prevValore = round2(prevInventario * price);
     const currValore = round2(currInventario * price);
 
-    const differenza = round2(currGiacenza - prevGiacenza);
+    const differenza = currGiacenza - prevGiacenza;
     const valoreDifferenza = round2(differenza * price);
 
     return {
