@@ -176,6 +176,53 @@ function normalizeRapidSessionIdForServer(raw: any, isRapid: boolean): string | 
   return isUuid(s) ? s : null;
 }
 
+async function invalidateProgressiviSnapshots(currentHeaderId: string) {
+  const { data: snapshotHeaders, error: snapshotHeadersErr } = await supabaseAdmin
+    .from("progressivi_report_headers")
+    .select("id")
+    .eq("current_header_id", currentHeaderId);
+
+  if (snapshotHeadersErr) {
+    throw new Error(
+      `Errore lettura snapshot report progressivi: ${snapshotHeadersErr.message}`
+    );
+  }
+
+  const reportHeaderIds = Array.from(
+    new Set(
+      (snapshotHeaders ?? [])
+        .map((row: any) => String(row?.id ?? "").trim())
+        .filter(Boolean)
+    )
+  );
+
+  if (reportHeaderIds.length === 0) return 0;
+
+  const { error: deleteRowsErr } = await supabaseAdmin
+    .from("progressivi_report_rows")
+    .delete()
+    .in("report_header_id", reportHeaderIds);
+
+  if (deleteRowsErr) {
+    throw new Error(
+      `Errore cancellazione righe snapshot report progressivi: ${deleteRowsErr.message}`
+    );
+  }
+
+  const { error: deleteHeadersErr } = await supabaseAdmin
+    .from("progressivi_report_headers")
+    .delete()
+    .in("id", reportHeaderIds);
+
+  if (deleteHeadersErr) {
+    throw new Error(
+      `Errore cancellazione header snapshot report progressivi: ${deleteHeadersErr.message}`
+    );
+  }
+
+  return reportHeaderIds.length;
+}
+
 export async function POST(req: Request) {
   const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
 
@@ -737,8 +784,6 @@ export async function POST(req: Request) {
             item_id: normalizedIncoming.item_id,
             item_code: itemCode,
 
-            // base iniziale: per ora parto dal valore precedente all’attuale modifica
-            // poi sotto, se esiste già una riga recount, manterrò il suo old_* originale
             old_qty: Number(oldRow?.qty ?? 0),
             old_qty_gr: Number(oldRow?.qty_gr ?? 0),
             old_qty_ml: Number(oldRow?.qty_ml ?? 0),
@@ -788,8 +833,6 @@ export async function POST(req: Request) {
 
           return {
             ...eventRow,
-            // ✅ OPZIONE B:
-            // mantengo sempre il vecchio valore originale del primo recount
             old_qty: Number((existingRecount as any)?.old_qty ?? eventRow.old_qty ?? 0),
             old_qty_gr: Number((existingRecount as any)?.old_qty_gr ?? eventRow.old_qty_gr ?? 0),
             old_qty_ml: Number((existingRecount as any)?.old_qty_ml ?? eventRow.old_qty_ml ?? 0),
@@ -846,6 +889,8 @@ export async function POST(req: Request) {
     }
   }
 
+  let invalidatedProgressiviSnapshots = 0;
+
   if (payload.length === 0) {
     if (alreadyExists && recountMode && recountEventsUpsertPayload.length > 0) {
       const { error: recountErr } = await supabaseAdmin
@@ -857,6 +902,16 @@ export async function POST(req: Request) {
       if (recountErr) {
         console.error("[inventories/save] recount events upsert error:", recountErr);
         return NextResponse.json({ ok: false, error: recountErr.message }, { status: 500 });
+      }
+
+      try {
+        invalidatedProgressiviSnapshots = await invalidateProgressiviSnapshots(existingId);
+      } catch (e: any) {
+        console.error("[inventories/save] progressivi snapshot invalidate error:", e);
+        return NextResponse.json(
+          { ok: false, error: e?.message || "Errore invalidazione snapshot report progressivi" },
+          { status: 500 }
+        );
       }
     }
 
@@ -877,6 +932,7 @@ export async function POST(req: Request) {
       partial_merge: true,
       recount_mode: recountMode,
       recount_events_saved: recountMode ? recountEventsUpsertPayload.length : 0,
+      invalidated_progressivi_snapshots: invalidatedProgressiviSnapshots,
       label: label_norm,
     });
   }
@@ -900,6 +956,16 @@ export async function POST(req: Request) {
     if (recountErr) {
       console.error("[inventories/save] recount events upsert error:", recountErr);
       return NextResponse.json({ ok: false, error: recountErr.message }, { status: 500 });
+    }
+
+    try {
+      invalidatedProgressiviSnapshots = await invalidateProgressiviSnapshots(existingId);
+    } catch (e: any) {
+      console.error("[inventories/save] progressivi snapshot invalidate error:", e);
+      return NextResponse.json(
+        { ok: false, error: e?.message || "Errore invalidazione snapshot report progressivi" },
+        { status: 500 }
+      );
     }
   }
 
@@ -934,12 +1000,12 @@ export async function POST(req: Request) {
     partial_merge: alreadyExists || undefined,
     recount_mode: recountMode,
     recount_events_saved: recountMode ? recountEventsUpsertPayload.length : 0,
+    invalidated_progressivi_snapshots: invalidatedProgressiviSnapshots,
     label: label_norm,
     ...(deposit_sync ? { deposit_sync } : {}),
     ...(warning ? { warning } : {}),
   });
 }
-
 
 
 
