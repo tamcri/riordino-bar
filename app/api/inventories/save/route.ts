@@ -176,11 +176,11 @@ function normalizeRapidSessionIdForServer(raw: any, isRapid: boolean): string | 
   return isUuid(s) ? s : null;
 }
 
-async function invalidateProgressiviSnapshots(currentHeaderId: string) {
+async function invalidateProgressiviSnapshots(headerId: string) {
   const { data: snapshotHeaders, error: snapshotHeadersErr } = await supabaseAdmin
     .from("progressivi_report_headers")
     .select("id")
-    .eq("current_header_id", currentHeaderId);
+    .or(`current_header_id.eq.${headerId},previous_header_id.eq.${headerId}`);
 
   if (snapshotHeadersErr) {
     throw new Error(
