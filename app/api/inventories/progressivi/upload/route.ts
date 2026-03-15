@@ -24,6 +24,10 @@ function normCell(v: any) {
     .replace(/\s+/g, " ");
 }
 
+function normCodeCompact(v: any) {
+  return String(v ?? "").trim().toUpperCase().replace(/\s+/g, "");
+}
+
 /**
  * ✅ Parser numerico robusto:
  * - "1.234,56" => 1234.56
@@ -43,20 +47,15 @@ function toNum(v: any): number | null {
   const raw = String(v).trim();
   if (!raw) return null;
 
-  // rimuovi spazi interni
   let s = raw.replace(/\s+/g, "");
 
   const hasDot = s.includes(".");
   const hasComma = s.includes(",");
 
   if (hasDot && hasComma) {
-    // formato IT: 1.234,56
     s = s.replace(/\./g, "").replace(",", ".");
   } else if (hasComma && !hasDot) {
-    // 123,45
     s = s.replace(",", ".");
-  } else {
-    // solo dot (13.375) oppure solo numeri: lascio così
   }
 
   const x = Number(s);
@@ -88,7 +87,11 @@ function toEquivQty(row: any): number {
 }
 
 async function getExcludedCategoryIds() {
-  const { data, error } = await supabaseAdmin.from("categories").select("id,name,slug").eq("is_active", true);
+  const { data, error } = await supabaseAdmin
+    .from("categories")
+    .select("id,name,slug")
+    .eq("is_active", true);
+
   if (error) throw error;
 
   const ids = new Set<string>();
@@ -133,6 +136,24 @@ function buildHeaders(aoa: any[][], headerRowIdx: number) {
   }
 
   return headers;
+}
+
+async function loadRecountedItemCodesForDate(pv_id: string, inventory_date: string) {
+  const { data, error } = await supabaseAdmin
+    .from("inventory_recount_events")
+    .select("item_code")
+    .eq("pv_id", pv_id)
+    .eq("inventory_date", inventory_date);
+
+  if (error) throw error;
+
+  const out = new Set<string>();
+  for (const row of data || []) {
+    const code = normCodeCompact((row as any)?.item_code);
+    if (!code) continue;
+    out.add(code);
+  }
+  return out;
 }
 
 export async function POST(req: Request) {
@@ -189,7 +210,9 @@ export async function POST(req: Request) {
       );
     }
 
-    const toInsert: any[] = [];
+    const uploadedRows: any[] = [];
+    const uploadedMap = new Map<string, any>();
+
     for (let r = headerRowIdx + 1; r < aoa.length; r++) {
       const row = aoa[r] || [];
 
@@ -200,10 +223,12 @@ export async function POST(req: Request) {
       const tot_scarico_qta1 = toNum(row[idxSca]);
       const giacenza_qta1_fiscale = toNum(row[idxFis]);
 
-      // se è riga descrizione (nessun numero), skip
       if (tot_carico_qta1 === null && tot_scarico_qta1 === null && giacenza_qta1_fiscale === null) continue;
 
-      toInsert.push({
+      const normalized = normCodeCompact(code);
+      if (!normalized) continue;
+
+      const payloadRow = {
         pv_id,
         inventory_date,
         item_code: code,
@@ -211,23 +236,18 @@ export async function POST(req: Request) {
         tot_scarico_qta1,
         giacenza_qta1_fiscale,
         created_by: session.username,
-      });
+      };
+
+      uploadedRows.push(payloadRow);
+      uploadedMap.set(normalized, payloadRow);
     }
 
-    if (!toInsert.length) {
+    if (!uploadedRows.length) {
       return NextResponse.json({ ok: false, error: "Nessuna riga valida trovata nel file" }, { status: 400 });
     }
 
-    const { error: upErr } = await supabaseAdmin
-      .from("inventory_progressivi_rows")
-      .upsert(toInsert, { onConflict: "pv_id,inventory_date,item_code" });
+    const recountedCodes = await loadRecountedItemCodesForDate(pv_id, inventory_date);
 
-    if (upErr) {
-      return NextResponse.json({ ok: false, error: upErr.message }, { status: 500 });
-    }
-
-    // La parte sotto resta invariata (serve a logiche interne legacy)
-    // -------------------------------------------------------------
     const { data: prevHeader, error: prevErr } = await supabaseAdmin
       .from("inventory_progressivi_rows")
       .select("inventory_date")
@@ -237,8 +257,86 @@ export async function POST(req: Request) {
       .limit(1);
 
     if (prevErr) throw prevErr;
-    const prev_date = (prevHeader?.[0] as any)?.inventory_date ? String((prevHeader?.[0] as any).inventory_date) : null;
+    const prev_date = (prevHeader?.[0] as any)?.inventory_date
+      ? String((prevHeader?.[0] as any).inventory_date)
+      : null;
 
+    let finalRowsToWrite = uploadedRows;
+
+    // ✅ Regola riconta:
+    // se ci sono articoli ricontati e ho un progressivo precedente,
+    // parto dal progressivo precedente e aggiorno SOLO la giacenza fiscale degli articoli ricontati.
+    if (recountedCodes.size > 0 && prev_date) {
+      const { data: prevRows, error: prevRowsErr } = await supabaseAdmin
+        .from("inventory_progressivi_rows")
+        .select("item_code, tot_carico_qta1, tot_scarico_qta1, giacenza_qta1_fiscale")
+        .eq("pv_id", pv_id)
+        .eq("inventory_date", prev_date);
+
+      if (prevRowsErr) throw prevRowsErr;
+
+      const mergedMap = new Map<string, any>();
+
+      for (const pr of prevRows || []) {
+        const prevCode = String((pr as any)?.item_code ?? "").trim();
+        const normalizedPrevCode = normCodeCompact(prevCode);
+        if (!normalizedPrevCode) continue;
+
+        mergedMap.set(normalizedPrevCode, {
+          pv_id,
+          inventory_date,
+          item_code: prevCode,
+          tot_carico_qta1: (pr as any)?.tot_carico_qta1 ?? null,
+          tot_scarico_qta1: (pr as any)?.tot_scarico_qta1 ?? null,
+          giacenza_qta1_fiscale: (pr as any)?.giacenza_qta1_fiscale ?? null,
+          created_by: session.username,
+        });
+      }
+
+      for (const code of recountedCodes) {
+        const uploaded = uploadedMap.get(code);
+        if (!uploaded) continue;
+
+        const base = mergedMap.get(code);
+
+        if (base) {
+          mergedMap.set(code, {
+            ...base,
+            item_code: uploaded.item_code || base.item_code,
+            giacenza_qta1_fiscale: uploaded.giacenza_qta1_fiscale,
+            created_by: session.username,
+          });
+        } else {
+          // se un articolo ricontato non esisteva nel progressivo precedente,
+          // lo inserisco usando la riga del file nuovo
+          mergedMap.set(code, { ...uploaded });
+        }
+      }
+
+      finalRowsToWrite = Array.from(mergedMap.values());
+    }
+
+    // ✅ riscrittura pulita della data corrente per evitare righe stale
+    const { error: deleteCurrentErr } = await supabaseAdmin
+      .from("inventory_progressivi_rows")
+      .delete()
+      .eq("pv_id", pv_id)
+      .eq("inventory_date", inventory_date);
+
+    if (deleteCurrentErr) {
+      return NextResponse.json({ ok: false, error: deleteCurrentErr.message }, { status: 500 });
+    }
+
+    const { error: upErr } = await supabaseAdmin
+      .from("inventory_progressivi_rows")
+      .insert(finalRowsToWrite);
+
+    if (upErr) {
+      return NextResponse.json({ ok: false, error: upErr.message }, { status: 500 });
+    }
+
+    // La parte sotto resta invariata (serve a logiche interne legacy)
+    // -------------------------------------------------------------
     const { data: curRows, error: curErr } = await supabaseAdmin
       .from("inventory_progressivi_rows")
       .select("item_code, tot_carico_qta1, tot_scarico_qta1, giacenza_qta1_fiscale")
@@ -248,13 +346,13 @@ export async function POST(req: Request) {
 
     const prevMap = new Map<string, any>();
     if (prev_date) {
-      const { data: prevRows, error: prevRowsErr } = await supabaseAdmin
+      const { data: prevRows2, error: prevRowsErr2 } = await supabaseAdmin
         .from("inventory_progressivi_rows")
         .select("item_code, tot_carico_qta1, tot_scarico_qta1, giacenza_qta1_fiscale")
         .eq("pv_id", pv_id)
         .eq("inventory_date", prev_date);
-      if (prevRowsErr) throw prevRowsErr;
-      for (const pr of prevRows || []) prevMap.set(String((pr as any).item_code), pr);
+      if (prevRowsErr2) throw prevRowsErr2;
+      for (const pr of prevRows2 || []) prevMap.set(String((pr as any).item_code), pr);
     }
 
     const excluded = await getExcludedCategoryIds();
@@ -293,8 +391,13 @@ export async function POST(req: Request) {
       }
     }
 
-    // risposta ok
-    return NextResponse.json({ ok: true, rows: toInsert.length, prev_date });
+    return NextResponse.json({
+      ok: true,
+      rows: finalRowsToWrite.length,
+      prev_date,
+      recount_mode_applied: recountedCodes.size > 0 && !!prev_date,
+      recounted_items_count: recountedCodes.size,
+    });
   } catch (e: any) {
     console.error("[progressivi/upload] error", e);
     return NextResponse.json({ ok: false, error: e?.message || "Errore upload progressivi" }, { status: 500 });
