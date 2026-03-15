@@ -11,6 +11,7 @@ function isUuid(v: string | null) {
   if (!v) return false;
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v.trim());
 }
+
 function isIsoDate(v: string | null) {
   if (!v) return false;
   return /^\d{4}-\d{2}-\d{2}$/.test(v.trim());
@@ -31,11 +32,11 @@ function normCodeCompact(v: any) {
 function isTotalRowCode(v: any) {
   const s = String(v ?? "").trim().toLowerCase().replace(/\s+/g, "");
   if (!s) return false;
-  return s.includes("totalegenerale") || s === "totale";
+  return s === "totale" || s.includes("totalegenerale");
 }
 
 /**
- * Parser numerico "normale" per carico/scarico.
+ * Parser numerico standard per carico/scarico.
  * Qui va bene un number JS.
  */
 function toNum(v: any): number | null {
@@ -62,13 +63,11 @@ function toNum(v: any): number | null {
 
 /**
  * ✅ Per giacenza fiscale NON vogliamo arrotondamenti.
- * Ritorno il valore come stringa numerica normalizzata:
- * - "12,245" -> "12.245"
- * - "12.245" -> "12.245"
- * - 12.245   -> "12.245"
+ * Ritorna una stringa decimale normalizzata:
+ * - "12,245"   -> "12.245"
+ * - "12.245"   -> "12.245"
+ * - 12.245     -> "12.245"
  * - "1.234,56" -> "1234.56"
- *
- * Senza Number(), così non perdiamo precisione/formattazione decimale.
  */
 function toExactDecimalString(v: any): string | null {
   if (v === null || v === undefined || v === "") return null;
@@ -87,17 +86,12 @@ function toExactDecimalString(v: any): string | null {
   const hasComma = s.includes(",");
 
   if (hasDot && hasComma) {
-    // formato tipo 1.234,56
     s = s.replace(/\./g, "").replace(",", ".");
   } else if (hasComma && !hasDot) {
-    // formato tipo 12,245
     s = s.replace(",", ".");
   }
-  // se ha solo il punto, lo lasciamo così
 
-  // validazione minima
   if (!/^-?\d+(\.\d+)?$/.test(s)) return null;
-
   return s;
 }
 
@@ -178,8 +172,8 @@ function buildHeaders(aoa: any[][], headerRowIdx: number) {
 }
 
 /**
- * ✅ Riconta valida SOLO per quella data progressivo che stai caricando.
- * Non si porta avanti sugli inventari successivi.
+ * ✅ Riconta valida SOLO per questa data progressivo.
+ * Non si trascina in avanti.
  */
 async function loadRecountedItemCodesForExactDate(pv_id: string, inventory_date: string) {
   const { data, error } = await supabaseAdmin
@@ -199,6 +193,71 @@ async function loadRecountedItemCodesForExactDate(pv_id: string, inventory_date:
   return out;
 }
 
+async function invalidateProgressiviReportSnapshotsForDate(pv_id: string, inventory_date: string) {
+  const { data: headers, error: headersErr } = await supabaseAdmin
+    .from("inventories_headers")
+    .select("id")
+    .eq("pv_id", pv_id)
+    .eq("inventory_date", inventory_date);
+
+  if (headersErr) {
+    throw new Error(`Errore lettura inventari header per invalidazione report: ${headersErr.message}`);
+  }
+
+  const inventoryHeaderIds = Array.from(
+    new Set((headers ?? []).map((row: any) => String(row?.id ?? "").trim()).filter(Boolean))
+  );
+
+  if (inventoryHeaderIds.length === 0) return 0;
+
+  const { data: currentSnapshots, error: currentSnapshotsErr } = await supabaseAdmin
+    .from("progressivi_report_headers")
+    .select("id")
+    .in("current_header_id", inventoryHeaderIds);
+
+  if (currentSnapshotsErr) {
+    throw new Error(`Errore lettura snapshot current report: ${currentSnapshotsErr.message}`);
+  }
+
+  const { data: previousSnapshots, error: previousSnapshotsErr } = await supabaseAdmin
+    .from("progressivi_report_headers")
+    .select("id")
+    .in("previous_header_id", inventoryHeaderIds);
+
+  if (previousSnapshotsErr) {
+    throw new Error(`Errore lettura snapshot previous report: ${previousSnapshotsErr.message}`);
+  }
+
+  const reportHeaderIds = Array.from(
+    new Set([
+      ...(currentSnapshots ?? []).map((row: any) => String(row?.id ?? "").trim()),
+      ...(previousSnapshots ?? []).map((row: any) => String(row?.id ?? "").trim()),
+    ].filter(Boolean))
+  );
+
+  if (reportHeaderIds.length === 0) return 0;
+
+  const { error: deleteRowsErr } = await supabaseAdmin
+    .from("progressivi_report_rows")
+    .delete()
+    .in("report_header_id", reportHeaderIds);
+
+  if (deleteRowsErr) {
+    throw new Error(`Errore cancellazione progressivi_report_rows: ${deleteRowsErr.message}`);
+  }
+
+  const { error: deleteHeadersErr } = await supabaseAdmin
+    .from("progressivi_report_headers")
+    .delete()
+    .in("id", reportHeaderIds);
+
+  if (deleteHeadersErr) {
+    throw new Error(`Errore cancellazione progressivi_report_headers: ${deleteHeadersErr.message}`);
+  }
+
+  return reportHeaderIds.length;
+}
+
 export async function POST(req: Request) {
   const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
   if (!session || !["admin", "amministrativo"].includes(session.role)) {
@@ -212,7 +271,9 @@ export async function POST(req: Request) {
 
   if (!file) return NextResponse.json({ ok: false, error: "File mancante" }, { status: 400 });
   if (!isUuid(pv_id)) return NextResponse.json({ ok: false, error: "pv_id non valido" }, { status: 400 });
-  if (!isIsoDate(inventory_date)) return NextResponse.json({ ok: false, error: "inventory_date non valida" }, { status: 400 });
+  if (!isIsoDate(inventory_date)) {
+    return NextResponse.json({ ok: false, error: "inventory_date non valida" }, { status: 400 });
+  }
 
   try {
     const ab = await file.arrayBuffer();
@@ -225,7 +286,10 @@ export async function POST(req: Request) {
     const headerRowIdx = findHeaderRow(aoa);
     if (headerRowIdx < 0) {
       return NextResponse.json(
-        { ok: false, error: "Non trovo la riga intestazioni nel file. Controlla che sia il report 'Progressivi'." },
+        {
+          ok: false,
+          error: "Non trovo la riga intestazioni nel file. Controlla che sia il report 'Progressivi'.",
+        },
         { status: 400 }
       );
     }
@@ -237,10 +301,17 @@ export async function POST(req: Request) {
       if (k) keyToIdx.set(k, i);
     });
 
-    const idxCod = keyToIdx.get("cod articolo") ?? keyToIdx.get("codice articolo") ?? keyToIdx.get("cod") ?? null;
+    const idxCod =
+      keyToIdx.get("cod articolo") ??
+      keyToIdx.get("codice articolo") ??
+      keyToIdx.get("cod") ??
+      null;
     const idxCar = keyToIdx.get("tot carico qta1") ?? null;
     const idxSca = keyToIdx.get("tot scarico qta1") ?? null;
-    const idxFis = keyToIdx.get("giacenza qta1 fiscale") ?? keyToIdx.get("giacenza qta1") ?? null;
+    const idxFis =
+      keyToIdx.get("giacenza qta1 fiscale") ??
+      keyToIdx.get("giacenza qta1") ??
+      null;
 
     if (idxCod === null || idxCar === null || idxSca === null || idxFis === null) {
       return NextResponse.json(
@@ -261,14 +332,10 @@ export async function POST(req: Request) {
 
       const code = String(row[idxCod] ?? "").trim();
       if (!code) continue;
-
-      // ✅ escludi righe totale / totale generale
       if (isTotalRowCode(code)) continue;
 
       const tot_carico_qta1 = toNum(row[idxCar]);
       const tot_scarico_qta1 = toNum(row[idxSca]);
-
-      // ✅ nessun arrotondamento sulla giacenza fiscale
       const giacenza_qta1_fiscale = toExactDecimalString(row[idxFis]);
 
       if (
@@ -311,15 +378,17 @@ export async function POST(req: Request) {
       .limit(1);
 
     if (prevErr) throw prevErr;
-    const prev_date = (prevHeader?.[0] as any)?.inventory_date
-      ? String((prevHeader?.[0] as any).inventory_date)
-      : null;
+
+    const prev_date =
+      (prevHeader?.[0] as any)?.inventory_date
+        ? String((prevHeader?.[0] as any).inventory_date)
+        : null;
 
     let finalRowsToWrite = uploadedRows;
 
-    // ✅ Regola riconta:
-    // se ci sono articoli ricontati e ho un progressivo precedente,
-    // parto dal progressivo precedente e aggiorno SOLO la giacenza fiscale degli articoli ricontati.
+    // ✅ Se ci sono riconta per QUESTA data e ho un progressivo precedente,
+    // parto dal progressivo precedente e aggiorno SOLO la giacenza fiscale
+    // degli articoli ricontati.
     if (recountedCodes.size > 0 && prev_date) {
       const { data: prevRows, error: prevRowsErr } = await supabaseAdmin
         .from("inventory_progressivi_rows")
@@ -364,13 +433,10 @@ export async function POST(req: Request) {
           mergedMap.set(code, {
             ...base,
             item_code: uploaded.item_code || base.item_code,
-            // ✅ aggiorno SOLO la giacenza fiscale
             giacenza_qta1_fiscale: uploaded.giacenza_qta1_fiscale,
             created_by: session.username,
           });
         } else {
-          // se un articolo ricontato non esisteva nel progressivo precedente,
-          // lo inserisco usando la riga del file nuovo
           mergedMap.set(code, { ...uploaded });
         }
       }
@@ -378,7 +444,7 @@ export async function POST(req: Request) {
       finalRowsToWrite = Array.from(mergedMap.values());
     }
 
-    // ✅ riscrittura pulita della data corrente per evitare righe stale
+    // ✅ Riscrittura pulita del progressivo per questa data
     const { error: deleteCurrentErr } = await supabaseAdmin
       .from("inventory_progressivi_rows")
       .delete()
@@ -397,8 +463,28 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: upErr.message }, { status: 500 });
     }
 
-    // La parte sotto resta invariata (serve a logiche interne legacy)
-    // -------------------------------------------------------------
+    // ✅ IMPORTANTISSIMO:
+    // dopo l'upload del progressivo invalido gli snapshot report
+    // dove questa data è current_header o previous_header.
+    let invalidated_report_snapshots = 0;
+    try {
+      invalidated_report_snapshots = await invalidateProgressiviReportSnapshotsForDate(
+        pv_id,
+        inventory_date
+      );
+    } catch (e: any) {
+      console.error("[progressivi/upload] snapshot invalidate error", e);
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            e?.message || "Progressivo caricato, ma invalidazione snapshot report fallita",
+        },
+        { status: 500 }
+      );
+    }
+
+    // La parte sotto resta invariata
     const { data: curRows, error: curErr } = await supabaseAdmin
       .from("inventory_progressivi_rows")
       .select("item_code, tot_carico_qta1, tot_scarico_qta1, giacenza_qta1_fiscale")
@@ -459,6 +545,7 @@ export async function POST(req: Request) {
       prev_date,
       recount_mode_applied: recountedCodes.size > 0 && !!prev_date,
       recounted_items_count: recountedCodes.size,
+      invalidated_report_snapshots,
     });
   } catch (e: any) {
     console.error("[progressivi/upload] error", e);
