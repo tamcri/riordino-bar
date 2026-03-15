@@ -542,11 +542,21 @@ async function resolvePreviousHeader(
   return null;
 }
 
-async function loadRecountedItemCodes(currentHeaderId: string): Promise<Set<string>> {
+async function loadRecountedItemCodesForHeaders(headerIds: Array<string | null | undefined>): Promise<Set<string>> {
+  const validHeaderIds = Array.from(
+    new Set(
+      headerIds
+        .map((id) => String(id ?? "").trim())
+        .filter((id) => isUuid(id))
+    )
+  );
+
+  if (validHeaderIds.length === 0) return new Set<string>();
+
   const { data, error } = await supabaseAdmin
     .from("inventory_recount_events")
     .select("item_code")
-    .eq("inventory_header_id", currentHeaderId);
+    .in("inventory_header_id", validHeaderIds);
 
   if (error) throw error;
 
@@ -695,12 +705,12 @@ function snapshotRowToBlockRow(row: ProgressiviSnapshotRow): ProgressiviBlockRow
       valore_giacenza: round2(toNum(row.previous_valore)),
     },
     current: {
-  inventario: round2(toNum(row.current_inventario)),
-  giacenza_da_gestionale: round2(toNum(row.current_gestionale)),
-  carico_non_registrato: round2(toNum(row.current_carico_non_registrato)),
-  giacenza: round2(toNum(row.current_giacenza)),
-  valore_giacenza: round2(toNum(row.current_valore)),
-},
+      inventario: round2(toNum(row.current_inventario)),
+      giacenza_da_gestionale: round2(toNum(row.current_gestionale)),
+      carico_non_registrato: round2(toNum(row.current_carico_non_registrato)),
+      giacenza: round2(toNum(row.current_giacenza)),
+      valore_giacenza: round2(toNum(row.current_valore)),
+    },
     riscontro: {
       differenza: round2(toNum(row.differenza)),
       valore_differenza: round2(toNum(row.valore_differenza)),
@@ -997,7 +1007,11 @@ export async function getProgressiviReportData(
         .map((row) => normCodeCompact(row.item_code))
         .filter(Boolean);
 
-      const recountedCodes = await loadRecountedItemCodes(live.currentHeader.id);
+      const recountedCodes = await loadRecountedItemCodesForHeaders([
+        live.currentHeader.id,
+        live.previousHeader?.id ?? null,
+      ]);
+
       const liveByCode = new Map<string, ProgressiviBlockRow>();
 
       for (const row of live.rows) {
