@@ -240,10 +240,6 @@ function round2(n: number) {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
-/**
- * Normalizza i numeri quantità eliminando il rumore floating
- * senza trasformarli in importi a 2 decimali.
- */
 function normalizeQty(n: number) {
   if (!Number.isFinite(n)) return 0;
   return Number(n.toFixed(6));
@@ -737,6 +733,31 @@ function snapshotRowToBlockRow(row: ProgressiviSnapshotRow): ProgressiviBlockRow
   };
 }
 
+function rebuildRowWithCurrentGestionale(
+  row: ProgressiviBlockRow,
+  currentGestionale: number
+): ProgressiviBlockRow {
+  const normalizedCurrentGestionale = normalizeQty(currentGestionale);
+  const currentGiacenza = normalizeQty(
+    (row.current.inventario - normalizedCurrentGestionale) - row.current.carico_non_registrato
+  );
+  const differenza = normalizeQty(currentGiacenza - row.previous.giacenza);
+
+  return {
+    ...row,
+    current: {
+      ...row.current,
+      giacenza_da_gestionale: normalizedCurrentGestionale,
+      giacenza: currentGiacenza,
+      valore_giacenza: round2(row.current.inventario * row.prezzo_vendita_eur),
+    },
+    riscontro: {
+      differenza,
+      valore_differenza: round2(differenza * row.prezzo_vendita_eur),
+    },
+  };
+}
+
 async function computeLiveProgressiviData(
   params: ProgressiviReportParams
 ): Promise<LiveProgressiviComputed> {
@@ -1034,16 +1055,55 @@ export async function getProgressiviReportData(
           ? recreated.rows.map(snapshotRowToBlockRow)
           : live.rows;
     } else {
-      /**
-       * FIX IMPORTANTE:
-       * Se esiste già uno snapshot, NON congeliamo più i valori vecchi.
-       * Riallineiamo sempre tutte le righe ai dati live del database.
-       *
-       * La riconta resta solo come flag/audit nello snapshot.
-       */
+      const snapshotByCode = new Map<string, ProgressiviBlockRow>();
+      for (const snapRow of snapshot.rows) {
+        const normalizedCode = normCodeCompact(snapRow.item_code);
+        if (!normalizedCode) continue;
+        snapshotByCode.set(normalizedCode, snapshotRowToBlockRow(snapRow));
+      }
+
+      const mergedRowsMap = new Map<string, ProgressiviBlockRow>();
+
+      for (const liveRow of live.rows) {
+        const normalizedCode = normCodeCompact(liveRow.item_code);
+        const snapshotRow = snapshotByCode.get(normalizedCode);
+
+        if (!snapshotRow) {
+          mergedRowsMap.set(normalizedCode, liveRow);
+          continue;
+        }
+
+        if (recountedCodes.has(normalizedCode)) {
+          mergedRowsMap.set(normalizedCode, liveRow);
+          continue;
+        }
+
+        // ✅ Logica corretta:
+        // per i NON ricontati manteniamo la giacenza gestionale del primo progressivo
+        // già congelata nello snapshot, ma ricalcoliamo la riga sul live attuale.
+        mergedRowsMap.set(
+          normalizedCode,
+          rebuildRowWithCurrentGestionale(
+            liveRow,
+            snapshotRow.current.giacenza_da_gestionale
+          )
+        );
+      }
+
+      // Se nello snapshot esistevano righe che ora non arrivano dal live, le manteniamo.
+      for (const [normalizedCode, snapshotRow] of snapshotByCode.entries()) {
+        if (!mergedRowsMap.has(normalizedCode)) {
+          mergedRowsMap.set(normalizedCode, snapshotRow);
+        }
+      }
+
+      const mergedRows = Array.from(mergedRowsMap.values()).sort((a, b) =>
+        a.item_code.localeCompare(b.item_code, "it")
+      );
+
       const replacedRows = await replaceProgressiviSnapshotRows({
         report_header_id: existingSnapshot.id,
-        rows: live.rows.map((row) =>
+        rows: mergedRows.map((row) =>
           blockRowToSnapshotInput(
             row,
             recountedCodes.has(normCodeCompact(row.item_code)),
@@ -1055,7 +1115,7 @@ export async function getProgressiviReportData(
       finalRows =
         replacedRows.length > 0
           ? replacedRows.map(snapshotRowToBlockRow)
-          : live.rows;
+          : mergedRows;
     }
   }
 
