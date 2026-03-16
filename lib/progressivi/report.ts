@@ -555,23 +555,16 @@ async function resolvePreviousHeader(
   return null;
 }
 
-async function loadRecountedItemCodesForHeaders(
-  headerIds: Array<string | null | undefined>
+async function loadRecountedItemCodesForHeader(
+  headerId: string | null | undefined
 ): Promise<Set<string>> {
-  const validHeaderIds = Array.from(
-    new Set(
-      headerIds
-        .map((id) => String(id ?? "").trim())
-        .filter((id) => isUuid(id))
-    )
-  );
-
-  if (validHeaderIds.length === 0) return new Set<string>();
+  const validHeaderId = String(headerId ?? "").trim();
+  if (!isUuid(validHeaderId)) return new Set<string>();
 
   const { data, error } = await supabaseAdmin
     .from("inventory_recount_events")
     .select("item_code")
-    .in("inventory_header_id", validHeaderIds);
+    .eq("inventory_header_id", validHeaderId);
 
   if (error) throw error;
 
@@ -971,10 +964,12 @@ export async function getProgressiviReportData(
   });
 
   let finalRows: ProgressiviBlockRow[] = [];
-  const recountedCodes = await loadRecountedItemCodesForHeaders([
-    live.currentHeader.id,
-    live.previousHeader?.id ?? null,
-  ]);
+
+  // FIX: per decidere quali articoli del CURRENT devono prendere il secondo progressivo,
+  // usiamo SOLO le riconta del current header.
+  const recountedCurrentCodes = await loadRecountedItemCodesForHeader(
+    live.currentHeader.id
+  );
 
   if (!existingSnapshot) {
     const created = await createProgressiviSnapshot({
@@ -994,8 +989,10 @@ export async function getProgressiviReportData(
       rows: live.rows.map((row) =>
         blockRowToSnapshotInput(
           row,
-          recountedCodes.has(normCodeCompact(row.item_code)),
-          recountedCodes.has(normCodeCompact(row.item_code)) ? live.currentHeader.id : null
+          recountedCurrentCodes.has(normCodeCompact(row.item_code)),
+          recountedCurrentCodes.has(normCodeCompact(row.item_code))
+            ? live.currentHeader.id
+            : null
         )
       ),
     });
@@ -1044,8 +1041,10 @@ export async function getProgressiviReportData(
         rows: live.rows.map((row) =>
           blockRowToSnapshotInput(
             row,
-            recountedCodes.has(normCodeCompact(row.item_code)),
-            recountedCodes.has(normCodeCompact(row.item_code)) ? live.currentHeader.id : null
+            recountedCurrentCodes.has(normCodeCompact(row.item_code)),
+            recountedCurrentCodes.has(normCodeCompact(row.item_code))
+              ? live.currentHeader.id
+              : null
           )
         ),
       });
@@ -1073,14 +1072,11 @@ export async function getProgressiviReportData(
           continue;
         }
 
-        if (recountedCodes.has(normalizedCode)) {
+        if (recountedCurrentCodes.has(normalizedCode)) {
           mergedRowsMap.set(normalizedCode, liveRow);
           continue;
         }
 
-        // ✅ Logica corretta:
-        // per i NON ricontati manteniamo la giacenza gestionale del primo progressivo
-        // già congelata nello snapshot, ma ricalcoliamo la riga sul live attuale.
         mergedRowsMap.set(
           normalizedCode,
           rebuildRowWithCurrentGestionale(
@@ -1090,7 +1086,6 @@ export async function getProgressiviReportData(
         );
       }
 
-      // Se nello snapshot esistevano righe che ora non arrivano dal live, le manteniamo.
       for (const [normalizedCode, snapshotRow] of snapshotByCode.entries()) {
         if (!mergedRowsMap.has(normalizedCode)) {
           mergedRowsMap.set(normalizedCode, snapshotRow);
@@ -1106,8 +1101,10 @@ export async function getProgressiviReportData(
         rows: mergedRows.map((row) =>
           blockRowToSnapshotInput(
             row,
-            recountedCodes.has(normCodeCompact(row.item_code)),
-            recountedCodes.has(normCodeCompact(row.item_code)) ? live.currentHeader.id : null
+            recountedCurrentCodes.has(normCodeCompact(row.item_code)),
+            recountedCurrentCodes.has(normCodeCompact(row.item_code))
+              ? live.currentHeader.id
+              : null
           )
         ),
       });

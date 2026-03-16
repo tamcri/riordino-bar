@@ -137,6 +137,90 @@ function buildHeaders(aoa: any[][], headerRowIdx: number) {
   return headers;
 }
 
+async function invalidateProgressiviReportSnapshotsForDate(
+  pv_id: string,
+  inventory_date: string
+) {
+  const { data: inventoryHeaders, error: inventoryHeadersErr } = await supabaseAdmin
+    .from("inventories_headers")
+    .select("id")
+    .eq("pv_id", pv_id)
+    .eq("inventory_date", inventory_date);
+
+  if (inventoryHeadersErr) {
+    throw new Error(
+      `Errore lettura inventories_headers per invalidazione snapshot: ${inventoryHeadersErr.message}`
+    );
+  }
+
+  const inventoryHeaderIds = Array.from(
+    new Set(
+      (inventoryHeaders ?? [])
+        .map((row: any) => String(row?.id ?? "").trim())
+        .filter(Boolean)
+    )
+  );
+
+  if (inventoryHeaderIds.length === 0) return 0;
+
+  const { data: snapshotHeadersCurrent, error: snapshotHeadersCurrentErr } = await supabaseAdmin
+    .from("progressivi_report_headers")
+    .select("id")
+    .in("current_header_id", inventoryHeaderIds);
+
+  if (snapshotHeadersCurrentErr) {
+    throw new Error(
+      `Errore lettura snapshot report current: ${snapshotHeadersCurrentErr.message}`
+    );
+  }
+
+  const { data: snapshotHeadersPrevious, error: snapshotHeadersPreviousErr } = await supabaseAdmin
+    .from("progressivi_report_headers")
+    .select("id")
+    .in("previous_header_id", inventoryHeaderIds);
+
+  if (snapshotHeadersPreviousErr) {
+    throw new Error(
+      `Errore lettura snapshot report previous: ${snapshotHeadersPreviousErr.message}`
+    );
+  }
+
+  const reportHeaderIds = Array.from(
+    new Set(
+      [
+        ...(snapshotHeadersCurrent ?? []).map((row: any) => String(row?.id ?? "").trim()),
+        ...(snapshotHeadersPrevious ?? []).map((row: any) => String(row?.id ?? "").trim()),
+      ].filter(Boolean)
+    )
+  );
+
+  if (reportHeaderIds.length === 0) return 0;
+
+  const { error: deleteRowsErr } = await supabaseAdmin
+    .from("progressivi_report_rows")
+    .delete()
+    .in("report_header_id", reportHeaderIds);
+
+  if (deleteRowsErr) {
+    throw new Error(
+      `Errore cancellazione progressivi_report_rows: ${deleteRowsErr.message}`
+    );
+  }
+
+  const { error: deleteHeadersErr } = await supabaseAdmin
+    .from("progressivi_report_headers")
+    .delete()
+    .in("id", reportHeaderIds);
+
+  if (deleteHeadersErr) {
+    throw new Error(
+      `Errore cancellazione progressivi_report_headers: ${deleteHeadersErr.message}`
+    );
+  }
+
+  return reportHeaderIds.length;
+}
+
 export async function POST(req: Request) {
   const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
   if (!session || !["admin", "amministrativo"].includes(session.role)) {
@@ -209,7 +293,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const toInsert: any[] = [];
+    const rowsToWrite: any[] = [];
 
     for (let r = headerRowIdx + 1; r < aoa.length; r++) {
       const row = aoa[r] || [];
@@ -222,7 +306,6 @@ export async function POST(req: Request) {
       const tot_scarico_qta1 = toNum(row[idxSca]);
       const giacenza_qta1_fiscale = toNum(row[idxFis]);
 
-      // se è riga descrizione (nessun numero), skip
       if (
         tot_carico_qta1 === null &&
         tot_scarico_qta1 === null &&
@@ -231,7 +314,7 @@ export async function POST(req: Request) {
         continue;
       }
 
-      toInsert.push({
+      rowsToWrite.push({
         pv_id,
         inventory_date,
         item_code: code,
@@ -242,16 +325,49 @@ export async function POST(req: Request) {
       });
     }
 
-    if (!toInsert.length) {
-      return NextResponse.json({ ok: false, error: "Nessuna riga valida trovata nel file" }, { status: 400 });
+    if (!rowsToWrite.length) {
+      return NextResponse.json(
+        { ok: false, error: "Nessuna riga valida trovata nel file" },
+        { status: 400 }
+      );
     }
 
-    const { error: upErr } = await supabaseAdmin
+    // Regola definitiva:
+    // stessa data = sostituzione completa del progressivo
+    const { error: deleteErr } = await supabaseAdmin
       .from("inventory_progressivi_rows")
-      .upsert(toInsert, { onConflict: "pv_id,inventory_date,item_code" });
+      .delete()
+      .eq("pv_id", pv_id)
+      .eq("inventory_date", inventory_date);
 
-    if (upErr) {
-      return NextResponse.json({ ok: false, error: upErr.message }, { status: 500 });
+    if (deleteErr) {
+      return NextResponse.json({ ok: false, error: deleteErr.message }, { status: 500 });
+    }
+
+    const { error: insertErr } = await supabaseAdmin
+      .from("inventory_progressivi_rows")
+      .insert(rowsToWrite);
+
+    if (insertErr) {
+      return NextResponse.json({ ok: false, error: insertErr.message }, { status: 500 });
+    }
+
+    // Invalida automaticamente gli snapshot report collegati a questa data
+    let invalidated_report_snapshots = 0;
+    try {
+      invalidated_report_snapshots = await invalidateProgressiviReportSnapshotsForDate(
+        pv_id,
+        inventory_date
+      );
+    } catch (e: any) {
+      console.error("[progressivi/upload] snapshot invalidate error", e);
+      return NextResponse.json(
+        {
+          ok: false,
+          error: e?.message || "Progressivo salvato, ma invalidazione snapshot report fallita",
+        },
+        { status: 500 }
+      );
     }
 
     // Parte legacy invariata
@@ -331,8 +447,9 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       ok: true,
-      rows: toInsert.length,
+      rows: rowsToWrite.length,
       prev_date,
+      invalidated_report_snapshots,
     });
   } catch (e: any) {
     console.error("[progressivi/upload] error", e);
