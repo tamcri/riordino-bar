@@ -12,6 +12,12 @@ function isUuid(v: string | null | undefined) {
   );
 }
 
+type BalanceStartRow = {
+  pv_id?: string | null;
+  start_date?: string | null;
+  saldo_iniziale?: number | null;
+};
+
 export async function GET(req: Request) {
   try {
     const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
@@ -74,33 +80,89 @@ export async function GET(req: Request) {
     }
 
     let saldo_iniziale_by_pv: Record<string, number> = {};
+    let balance_start_date_by_pv: Record<string, string> = {};
+
+    const rows = Array.isArray(data) ? data : [];
 
     const pvIdsFromRows = Array.from(
-      new Set((data ?? []).map((row: any) => String(row?.pv_id ?? "").trim()).filter(Boolean))
+      new Set(rows.map((row: any) => String(row?.pv_id ?? "").trim()).filter(Boolean))
     );
 
     const pvIdsToLoad = pv_id ? [pv_id] : pvIdsFromRows;
 
+    const firstSummaryDateByPv = rows.reduce((acc: Record<string, string>, row: any) => {
+      const key = String(row?.pv_id ?? "").trim();
+      const rowDate = String(row?.data ?? "").trim();
+
+      if (!key || !rowDate) return acc;
+
+      if (!acc[key] || rowDate < acc[key]) {
+        acc[key] = rowDate;
+      }
+
+      return acc;
+    }, {});
+
     if (pvIdsToLoad.length > 0) {
       const { data: balanceRows, error: balanceErr } = await supabaseAdmin
         .from("pv_cash_balance_start")
-        .select("pv_id, saldo_iniziale")
-        .in("pv_id", pvIdsToLoad);
+        .select("pv_id, start_date, saldo_iniziale")
+        .in("pv_id", pvIdsToLoad)
+        .order("start_date", { ascending: true });
 
       if (balanceErr) {
         return NextResponse.json({ ok: false, error: balanceErr.message }, { status: 500 });
       }
 
-      saldo_iniziale_by_pv = (balanceRows ?? []).reduce((acc: Record<string, number>, row: any) => {
-        const key = String(row?.pv_id ?? "").trim();
-        if (!key) return acc;
-        acc[key] = Number(row?.saldo_iniziale ?? 0) || 0;
-        return acc;
-      }, {});
+      const groupedByPv = (balanceRows ?? []).reduce(
+        (acc: Record<string, BalanceStartRow[]>, row: BalanceStartRow) => {
+          const key = String(row?.pv_id ?? "").trim();
+          if (!key) return acc;
+
+          if (!acc[key]) {
+            acc[key] = [];
+          }
+
+          acc[key].push(row);
+          return acc;
+        },
+        {}
+      );
+
+      for (const currentPvId of pvIdsToLoad) {
+        const pvKey = String(currentPvId ?? "").trim();
+        if (!pvKey) continue;
+
+        const rowsForPv = groupedByPv[pvKey] ?? [];
+        if (rowsForPv.length === 0) continue;
+
+        const firstSummaryDate = firstSummaryDateByPv[pvKey] ?? "";
+        let selectedRow: BalanceStartRow | null = null;
+
+        if (firstSummaryDate) {
+          for (const row of rowsForPv) {
+            const startDate = String(row?.start_date ?? "").trim();
+            if (!startDate) continue;
+
+            if (startDate <= firstSummaryDate) {
+              selectedRow = row;
+            }
+          }
+        }
+
+        if (!selectedRow) {
+          selectedRow = rowsForPv[rowsForPv.length - 1] ?? null;
+        }
+
+        if (!selectedRow) continue;
+
+        saldo_iniziale_by_pv[pvKey] = Number(selectedRow?.saldo_iniziale ?? 0) || 0;
+        balance_start_date_by_pv[pvKey] = String(selectedRow?.start_date ?? "").trim();
+      }
     }
 
     const summaryIds = Array.from(
-      new Set((data ?? []).map((row: any) => String(row?.id ?? "").trim()).filter(Boolean))
+      new Set(rows.map((row: any) => String(row?.id ?? "").trim()).filter(Boolean))
     );
 
     let checks_by_summary: Record<string, Record<string, "ok" | "check">> = {};
@@ -138,8 +200,9 @@ export async function GET(req: Request) {
 
     return NextResponse.json({
       ok: true,
-      rows: data ?? [],
+      rows,
       saldo_iniziale_by_pv,
+      balance_start_date_by_pv,
       checks_by_summary,
     });
   } catch (e: any) {
