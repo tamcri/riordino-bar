@@ -210,7 +210,7 @@ type DraftAdmin = {
 
 export default function InventoryPvClient() {
   // ✅ tempo chiusura rapida dopo ultimo tap (multi tap: +10 +1 +1 +1…)
-  const RAPID_AUTO_CLOSE_MS = 1500;
+  const RAPID_AUTO_CLOSE_MS = 2000;
 
   const searchParams = useSearchParams();
 
@@ -1772,20 +1772,15 @@ return computed > 0 || total > 0;
       const rows = items
         .map((it) => {
           if (isMlItem(it)) {
-            const m = getMlMode(it.id);
-            if (m === "mixed") {
-              const totalMl = safeIntFromStr(totalMlMap[it.id] ?? "");
-              if (totalMl <= 0) return { item_id: it.id, qty: 0, qty_ml: 0, qty_gr: 0, ml_mode: "mixed" as const };
-              return { item_id: it.id, qty: 0, qty_ml: totalMl, qty_gr: 0, ml_mode: "mixed" as const };
+            const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
+            const qty_ml = calcTotalMl(it);
+            const ml_mode = getMlMode(it.id);
+
+            if (qty_ml <= 0) {
+              return { item_id: it.id, qty: 0, qty_ml: 0, qty_gr: 0, ml_mode };
             }
 
-            const perUnit = Number(it.volume_ml_per_unit) || 0;
-            const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
-            const open = safeIntFromStr(openMlMap[it.id] ?? "");
-            const qty_ml = perUnit > 0 ? pz * perUnit + open : open;
-
-            if (qty_ml <= 0) return { item_id: it.id, qty: 0, qty_ml: 0, qty_gr: 0, ml_mode: "fixed" as const };
-            return { item_id: it.id, qty: pz, qty_ml, qty_gr: 0, ml_mode: "fixed" as const };
+            return { item_id: it.id, qty: pz, qty_ml, qty_gr: 0, ml_mode };
           }
 
           const pz = safeIntFromStr(qtyPzMap[it.id] ?? "");
@@ -2390,6 +2385,7 @@ console.log(
 
                   const quickPz = [1, 5, 10];
                   const quickSmall = [25, 50, 100, 250, 500];
+                  const quickMlExtended = [700, 750, 1000, 1500];
 
                   return (
                     <div className="space-y-3">
@@ -2608,6 +2604,20 @@ console.log(
                                     +{n} ml
                                   </button>
                                 ))}
+                                {quickMlExtended.map((n) => (
+                                  <button
+                                    key={n}
+                                    type="button"
+                                    className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
+                                    onClick={() => {
+                                      if (mode === "mixed") bumpTotalMl(it.id, n);
+                                      else bumpOpenMl(it.id, n);
+                                      scheduleRapidAutoClose();
+                                    }}
+                                  >
+                                    +{n} ml
+                                  </button>
+                                ))}
                               </div>
 
                               <div className="mt-3 flex gap-2">
@@ -2616,7 +2626,7 @@ console.log(
                                     ref={rapidMlInputRef}
                                     className="w-full rounded-xl border p-2"
                                     inputMode="numeric"
-                                    placeholder="+ ml (manuale)"
+                                    placeholder="+ ml su totale (manuale)"
                                     value={addTotalMlMap[it.id] ?? ""}
                                     onChange={(e) => setAddTotalMlMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
                                     onKeyDown={(e) => {
@@ -2656,6 +2666,46 @@ console.log(
                                 >
                                   Aggiungi
                                 </button>
+                              </div>
+
+                              <div className="mt-3">
+                                <label className="block text-xs text-gray-500 mb-1">Imposta totale ML (correzione)</label>
+                                <div className="flex gap-2">
+                                  <input
+                                    className="w-full rounded-xl border p-2"
+                                    inputMode="numeric"
+                                    placeholder="Es. 1250"
+                                    value={mode === "mixed" ? totalMlMap[it.id] ?? "" : totalMl > 0 ? String(totalMl) : ""}
+                                    onFocus={() => {
+                                      if (mode !== "mixed") setMlMode(it.id, "mixed");
+                                    }}
+                                    onChange={(e) => {
+                                      if (mode !== "mixed") setMlMode(it.id, "mixed");
+                                      setTotalMl(it.id, e.target.value);
+                                    }}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter") {
+                                        e.preventDefault();
+                                        if (mode !== "mixed") setMlMode(it.id, "mixed");
+                                        afterRapidAction();
+                                      }
+                                    }}
+                                  />
+                                  <button
+                                    type="button"
+                                    className="rounded-xl border px-4 py-2"
+                                    onClick={() => {
+                                      if (mode !== "mixed") setMlMode(it.id, "mixed");
+                                      afterRapidAction();
+                                    }}
+                                    title="Conferma correzione totale ML"
+                                  >
+                                    OK
+                                  </button>
+                                </div>
+                                <div className="mt-1 text-xs text-gray-500">
+                                  In modalità correzione imposti direttamente il totale finale in ml da salvare ed esportare.
+                                </div>
                               </div>
                             </>
                           ) : (

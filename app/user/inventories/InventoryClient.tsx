@@ -37,7 +37,7 @@ type InventoryRowApi = {
   code?: string;
 };
 
-type MlInputMode = "fixed" | "mixed"; // fixed=PZ+ML aperti, mixed=solo Totale ML
+type MlInputMode = "fixed" | "mixed"; // fixed=PZ+ML aperti, mixed=correzione diretta Totale ML
 type InventoryMode = "standard" | "rapid";
 type ReopenActionMode = "edit" | "recount";
 
@@ -180,7 +180,7 @@ type DraftAdmin = {
 
 export default function InventoryClient() {
   // ✅ tempo chiusura rapida dopo ultimo tap (multi tap: +10 +1 +1 +1…)
-  const RAPID_AUTO_CLOSE_MS = 1500;
+  const RAPID_AUTO_CLOSE_MS = 2000;
 
   const searchParams = useSearchParams();
 
@@ -1926,14 +1926,15 @@ export default function InventoryClient() {
             };
           }
 
-          const totalMl = Number(totalMlMap[itemId] || 0);
-          const openMl = Number(openMlMap[itemId] || 0);
+          const qty = safeIntFromStr(qtyPzMap[itemId] ?? "");
+          const qtyGr = safeGrFromStr(qtyGrMap[itemId] ?? "");
+          const qtyMl = isMlItem(it) ? calcTotalMl(it) : 0;
 
           return {
             item_id: itemId,
-            qty: Number(qtyPzMap[itemId] || 0),
-            qty_ml: totalMl > 0 ? totalMl : openMl,
-            qty_gr: Number(qtyGrMap[itemId] || 0),
+            qty,
+            qty_ml: qtyMl,
+            qty_gr: qtyGr,
           };
         })
         .filter(
@@ -2052,9 +2053,9 @@ export default function InventoryClient() {
           type="button"
           className={`px-3 py-1 text-xs ${m === "mixed" ? "bg-slate-900 text-white" : "bg-white hover:bg-gray-50"}`}
           onClick={() => setMlMode(itemId, "mixed")}
-          title="Formati misti: inserisci solo Totale ML"
+          title="Correzione: imposta direttamente il Totale ML"
         >
-          Solo Tot ML
+          Correggi Tot ML
         </button>
       </div>
     );
@@ -2554,6 +2555,7 @@ export default function InventoryClient() {
 
                 const quickPz = [1, 5, 10];
                 const quickSmall = [25, 50, 100, 250, 500];
+                const quickMl = [25, 50, 100, 250, 500, 700, 750, 1000, 1500];
 
                 return (
                   <div className="space-y-3">
@@ -2757,7 +2759,7 @@ export default function InventoryClient() {
                         ) : ml ? (
                           <>
                             <div className="flex flex-wrap gap-2">
-                              {quickSmall.map((n) => (
+                              {quickMl.map((n) => (
                                 <button
                                   key={n}
                                   type="button"
@@ -2779,7 +2781,7 @@ export default function InventoryClient() {
                                   ref={rapidMlInputRef}
                                   className="w-full rounded-xl border p-2"
                                   inputMode="numeric"
-                                  placeholder="+ ml (manuale)"
+                                  placeholder="+ ml su totale (manuale)"
                                   value={addTotalMlMap[it.id] ?? ""}
                                   onChange={(e) => setAddTotalMlMap((prev) => ({ ...prev, [it.id]: onlyDigits(e.target.value) }))}
                                   onKeyDown={(e) => {
@@ -2819,6 +2821,46 @@ export default function InventoryClient() {
                               >
                                 Aggiungi
                               </button>
+                            </div>
+
+                            <div className="mt-3">
+                              <label className="block text-xs text-gray-500 mb-1">Imposta totale ML (correzione)</label>
+                              <div className="flex gap-2">
+                                <input
+                                  className="w-full rounded-xl border p-2"
+                                  inputMode="numeric"
+                                  placeholder="Es. 1250"
+                                  value={mode === "mixed" ? totalMlMap[it.id] ?? "" : totalMl > 0 ? String(totalMl) : ""}
+                                  onFocus={() => {
+                                    if (mode !== "mixed") setMlMode(it.id, "mixed");
+                                  }}
+                                  onChange={(e) => {
+                                    if (mode !== "mixed") setMlMode(it.id, "mixed");
+                                    setTotalMl(it.id, e.target.value);
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") {
+                                      e.preventDefault();
+                                      if (mode !== "mixed") setMlMode(it.id, "mixed");
+                                      afterRapidAction();
+                                    }
+                                  }}
+                                />
+                                <button
+                                  type="button"
+                                  className="rounded-xl border px-4 py-2"
+                                  onClick={() => {
+                                    if (mode !== "mixed") setMlMode(it.id, "mixed");
+                                    afterRapidAction();
+                                  }}
+                                  title="Conferma correzione totale ML"
+                                >
+                                  OK
+                                </button>
+                              </div>
+                              <div className="mt-1 text-xs text-gray-500">
+                                In modalità correzione imposti direttamente il totale finale in ml da salvare ed esportare.
+                              </div>
                             </div>
                           </>
                         ) : (
