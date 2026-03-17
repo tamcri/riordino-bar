@@ -56,38 +56,53 @@ async function requirePvIdForPuntoVendita(username: string): Promise<string> {
   throw new Error("Utente punto vendita senza PV assegnato (pv_id mancante).");
 }
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
     const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
 
-    if (!session || session.role !== "punto_vendita") {
+    if (!session) {
       return NextResponse.json(
         { ok: false, error: "Non autorizzato" },
         { status: 401 }
       );
     }
 
-    const pv_id = await requirePvIdForPuntoVendita(session.username);
+    const { searchParams } = new URL(req.url);
+
+    let pv_id: string | null = null;
+
+    if (["admin", "amministrativo"].includes(session.role)) {
+      const pvFromQuery = String(searchParams.get("pv_id") ?? "").trim();
+
+      if (!isUuid(pvFromQuery)) {
+        return NextResponse.json(
+          { ok: false, error: "PV non valido" },
+          { status: 400 }
+        );
+      }
+
+      pv_id = pvFromQuery;
+    } else if (session.role === "punto_vendita") {
+      try {
+        pv_id = await requirePvIdForPuntoVendita(session.username);
+      } catch (e: any) {
+        return NextResponse.json(
+          { ok: false, error: e?.message || "PV non assegnato" },
+          { status: 401 }
+        );
+      }
+    } else {
+      return NextResponse.json(
+        { ok: false, error: "Ruolo non autorizzato" },
+        { status: 403 }
+      );
+    }
 
     const { data, error } = await supabaseAdmin
-      .from("pv_cash_summaries")
-      .select(`
-        id,
-        data,
-        operatore,
-        totale,
-        pos,
-        spese_extra,
-        versamento,
-        da_versare,
-        tot_versato,
-        status,
-        is_closed,
-        created_at
-      `)
+      .from("pv_cash_fondo_iniziale")
+      .select("id, pv_id, fondo_cassa_iniziale, created_at, updated_at")
       .eq("pv_id", pv_id)
-      .order("data", { ascending: false })
-      .order("created_at", { ascending: false });
+      .maybeSingle();
 
     if (error) {
       return NextResponse.json(
@@ -98,11 +113,11 @@ export async function GET() {
 
     return NextResponse.json({
       ok: true,
-      rows: data ?? [],
+      row: data ?? null,
     });
   } catch (e: any) {
     return NextResponse.json(
-      { ok: false, error: e?.message || "Errore lettura riepiloghi PV" },
+      { ok: false, error: e?.message || "Errore lettura fondo cassa iniziale" },
       { status: 500 }
     );
   }

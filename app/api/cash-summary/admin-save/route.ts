@@ -25,7 +25,12 @@ type Body = {
   pos?: number | null;
   spese_extra?: number | null;
   tot_versato?: number | null;
+  fondo_cassa_iniziale?: number | null;
+  parziale_1?: number | null;
+  parziale_2?: number | null;
+  parziale_3?: number | null;
   fondo_cassa?: number | null;
+  status?: string | null;
   suppliers?: SupplierInput[];
   field_comments?: Record<string, string>;
 };
@@ -40,6 +45,10 @@ const ALLOWED_COMMENT_FIELDS = new Set([
   "pos",
   "spese_extra",
   "tot_versato",
+  "fondo_cassa_iniziale",
+  "parziale_1",
+  "parziale_2",
+  "parziale_3",
   "fondo_cassa",
 ]);
 
@@ -53,6 +62,10 @@ const TRACKED_NOTIFICATION_FIELDS = [
   "pos",
   "spese_extra",
   "tot_versato",
+  "fondo_cassa_iniziale",
+  "parziale_1",
+  "parziale_2",
+  "parziale_3",
   "fondo_cassa",
 ] as const;
 
@@ -68,6 +81,10 @@ const FIELD_LABELS: Record<TrackedFieldKey, string> = {
   pos: "POS",
   spese_extra: "Spese Extra",
   tot_versato: "Tot. Versato",
+  fondo_cassa_iniziale: "Fondo Cassa Iniziale",
+  parziale_1: "Parziale 1",
+  parziale_2: "Parziale 2",
+  parziale_3: "Parziale 3",
   fondo_cassa: "Fondo Cassa",
 };
 
@@ -115,6 +132,18 @@ function commentsRowsToMap(rows: any[]) {
 function numbersEqual(a: number | null, b: number | null) {
   if (a === null && b === null) return true;
   return Number(a ?? 0) === Number(b ?? 0);
+}
+
+function normalizeStatus(value: unknown, isClosed: boolean) {
+  if (isClosed) return "chiuso";
+
+  const raw = String(value ?? "").trim().toLowerCase();
+
+  if (raw === "bozza") return "bozza";
+  if (raw === "completato") return "completato";
+  if (raw === "chiuso") return "chiuso";
+
+  return "completato";
 }
 
 export async function POST(req: Request) {
@@ -177,7 +206,12 @@ export async function POST(req: Request) {
         pos,
         spese_extra,
         tot_versato,
-        fondo_cassa
+        fondo_cassa_iniziale,
+        parziale_1,
+        parziale_2,
+        parziale_3,
+        fondo_cassa,
+        status
       `)
       .eq("id", id)
       .maybeSingle();
@@ -219,6 +253,10 @@ export async function POST(req: Request) {
     const pos = toNumber(body.pos);
     const spese_extra = toNumber(body.spese_extra) ?? 0;
     const tot_versato = toNumber(body.tot_versato);
+    const fondo_cassa_iniziale = toNumber(body.fondo_cassa_iniziale);
+    const parziale_1 = toNumber(body.parziale_1);
+    const parziale_2 = toNumber(body.parziale_2);
+    const parziale_3 = toNumber(body.parziale_3);
     const fondo_cassa = toNumber(body.fondo_cassa);
 
     if (incasso_totale === null) {
@@ -306,6 +344,9 @@ export async function POST(req: Request) {
         ? versamento
         : versamento - tot_versato;
 
+    const is_closed = tot_versato !== null;
+    const status = normalizeStatus(body.status, is_closed);
+
     const normalizedFieldComments = normalizeFieldComments(body.field_comments);
     const normalizedFieldCommentsMap = normalizedFieldComments.reduce(
       (acc: Record<string, string>, row) => {
@@ -327,6 +368,10 @@ export async function POST(req: Request) {
       pos: toNumber(currentSummary.pos),
       spese_extra: toNumber(currentSummary.spese_extra) ?? 0,
       tot_versato: toNumber(currentSummary.tot_versato),
+      fondo_cassa_iniziale: toNumber(currentSummary.fondo_cassa_iniziale),
+      parziale_1: toNumber(currentSummary.parziale_1),
+      parziale_2: toNumber(currentSummary.parziale_2),
+      parziale_3: toNumber(currentSummary.parziale_3),
       fondo_cassa: toNumber(currentSummary.fondo_cassa),
     };
 
@@ -340,6 +385,10 @@ export async function POST(req: Request) {
       pos,
       spese_extra,
       tot_versato,
+      fondo_cassa_iniziale,
+      parziale_1,
+      parziale_2,
+      parziale_3,
       fondo_cassa,
     };
 
@@ -355,6 +404,11 @@ export async function POST(req: Request) {
       if (previousComment !== nextComment) {
         changedFields.push(fieldKey);
       }
+    }
+
+    const previousStatus = String(currentSummary.status ?? "").trim().toLowerCase();
+    if (previousStatus !== status) {
+      changedFields.push("status");
     }
 
     const updatePayload = {
@@ -374,8 +428,13 @@ export async function POST(req: Request) {
       versamento,
       da_versare,
       tot_versato,
+      fondo_cassa_iniziale,
+      parziale_1,
+      parziale_2,
+      parziale_3,
       fondo_cassa,
-      is_closed: tot_versato !== null,
+      status,
+      is_closed,
       updated_at: new Date().toISOString(),
     };
 
@@ -456,7 +515,9 @@ export async function POST(req: Request) {
 
     if (changedFields.length > 0) {
       const changedFieldLabels = changedFields.map(
-        (fieldKey) => FIELD_LABELS[fieldKey as TrackedFieldKey] ?? fieldKey
+        (fieldKey) =>
+          FIELD_LABELS[fieldKey as TrackedFieldKey] ??
+          (fieldKey === "status" ? "Stato" : fieldKey)
       );
 
       const changedCommentsOnly = changedFields.reduce((acc: Record<string, string>, fieldKey) => {
@@ -497,7 +558,8 @@ export async function POST(req: Request) {
       totale,
       versamento,
       da_versare,
-      is_closed: tot_versato !== null,
+      is_closed,
+      status,
       field_comments: normalizedFieldCommentsMap,
       changed_fields: changedFields,
     });

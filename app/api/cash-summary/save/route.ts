@@ -29,6 +29,11 @@ type Body = {
   da_versare?: number | null;
   tot_versato?: number | null;
   fondo_cassa?: number | null;
+  fondo_cassa_iniziale?: number | null;
+  parziale_1?: number | null;
+  parziale_2?: number | null;
+  parziale_3?: number | null;
+  status?: string | null;
   fornitori?: SupplierPayment[];
 };
 
@@ -45,6 +50,18 @@ function toNumber(v: unknown): number | null {
   if (v === null || v === undefined || v === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+function normalizeStatus(value: unknown, isClosingNow: boolean) {
+  if (isClosingNow) return "chiuso";
+
+  const raw = String(value ?? "").trim().toLowerCase();
+
+  if (raw === "bozza") return "bozza";
+  if (raw === "completato") return "completato";
+  if (raw === "chiuso") return "chiuso";
+
+  return "bozza";
 }
 
 async function lookupPvIdFromUserTables(username: string): Promise<string | null> {
@@ -90,6 +107,26 @@ async function requirePvIdForPuntoVendita(username: string): Promise<string> {
   throw new Error("Utente punto vendita senza PV assegnato (pv_id mancante).");
 }
 
+async function getFondoCassaInizialePv(pv_id: string): Promise<number> {
+  const { data, error } = await supabaseAdmin
+    .from("pv_cash_fondo_iniziale")
+    .select("fondo_cassa_iniziale")
+    .eq("pv_id", pv_id)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  const fondo = toNumber((data as any)?.fondo_cassa_iniziale);
+
+  if (fondo === null) {
+    throw new Error("Fondo Cassa Iniziale non configurato. Contatta l'amministrazione.");
+  }
+
+  return fondo;
+}
+
 export async function POST(req: Request) {
   try {
     const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
@@ -129,43 +166,9 @@ export async function POST(req: Request) {
     const da_versare = toNumber(body.da_versare);
     const tot_versato = toNumber(body.tot_versato);
     const fondo_cassa = toNumber(body.fondo_cassa);
-
-    if (incasso_totale === null) {
-      return NextResponse.json({ ok: false, error: "Incasso Totale obbligatorio" }, { status: 400 });
-    }
-    if (gv_pagati === null) {
-      return NextResponse.json({ ok: false, error: "G&V Pagati obbligatorio" }, { status: 400 });
-    }
-    if (lis_plus === null) {
-      return NextResponse.json({ ok: false, error: "LIS+ obbligatorio" }, { status: 400 });
-    }
-    if (mooney === null) {
-      return NextResponse.json({ ok: false, error: "MOONEY obbligatorio" }, { status: 400 });
-    }
-    if (totale_esistenza_cassa === null) {
-      return NextResponse.json({ ok: false, error: "Totale Esistenza Cassa obbligatorio" }, { status: 400 });
-    }
-    if (vendita_gv === null) {
-      return NextResponse.json({ ok: false, error: "Vendita G&V obbligatorio" }, { status: 400 });
-    }
-    if (vendita_tabacchi === null) {
-      return NextResponse.json({ ok: false, error: "Vendita Tabacchi obbligatorio" }, { status: 400 });
-    }
-    if (totale === null) {
-      return NextResponse.json({ ok: false, error: "Totale obbligatorio" }, { status: 400 });
-    }
-    if (pos === null) {
-      return NextResponse.json({ ok: false, error: "POS obbligatorio" }, { status: 400 });
-    }
-    if (versamento === null) {
-      return NextResponse.json({ ok: false, error: "Versamento obbligatorio" }, { status: 400 });
-    }
-    if (da_versare === null) {
-      return NextResponse.json({ ok: false, error: "Da Versare obbligatorio" }, { status: 400 });
-    }
-    if (fondo_cassa === null) {
-      return NextResponse.json({ ok: false, error: "Fondo Cassa obbligatorio" }, { status: 400 });
-    }
+    const parziale_1 = toNumber(body.parziale_1);
+    const parziale_2 = toNumber(body.parziale_2);
+    const parziale_3 = toNumber(body.parziale_3);
 
     let pv_id: string | null = null;
 
@@ -185,9 +188,19 @@ export async function POST(req: Request) {
       );
     }
 
+    let fondo_cassa_iniziale: number;
+    try {
+      fondo_cassa_iniziale = await getFondoCassaInizialePv(pv_id);
+    } catch (e: any) {
+      return NextResponse.json(
+        { ok: false, error: e?.message || "Errore lettura Fondo Cassa Iniziale" },
+        { status: 500 }
+      );
+    }
+
     const { data: existing, error: existingErr } = await supabaseAdmin
       .from("pv_cash_summaries")
-      .select("id, is_closed, tot_versato")
+      .select("id, is_closed, tot_versato, status")
       .eq("pv_id", pv_id)
       .eq("data", data)
       .maybeSingle();
@@ -197,15 +210,59 @@ export async function POST(req: Request) {
     }
 
     const isClosingNow = tot_versato !== null;
+    const status = normalizeStatus(body.status, isClosingNow);
+    const isBozza = status === "bozza";
 
-    if (existing && existing.tot_versato === null && tot_versato === null) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "Esiste già un riepilogo per questa data. Apri quello esistente.",
-        },
-        { status: 409 }
-      );
+    if (!isBozza) {
+      if (incasso_totale === null) {
+        return NextResponse.json({ ok: false, error: "Incasso Totale obbligatorio" }, { status: 400 });
+      }
+      if (gv_pagati === null) {
+        return NextResponse.json({ ok: false, error: "G&V Pagati obbligatorio" }, { status: 400 });
+      }
+      if (lis_plus === null) {
+        return NextResponse.json({ ok: false, error: "LIS+ obbligatorio" }, { status: 400 });
+      }
+      if (mooney === null) {
+        return NextResponse.json({ ok: false, error: "MOONEY obbligatorio" }, { status: 400 });
+      }
+      if (totale_esistenza_cassa === null) {
+        return NextResponse.json({ ok: false, error: "Totale Esistenza Cassa obbligatorio" }, { status: 400 });
+      }
+      if (vendita_gv === null) {
+        return NextResponse.json({ ok: false, error: "Vendita G&V obbligatorio" }, { status: 400 });
+      }
+      if (vendita_tabacchi === null) {
+        return NextResponse.json({ ok: false, error: "Vendita Tabacchi obbligatorio" }, { status: 400 });
+      }
+      if (totale === null) {
+        return NextResponse.json({ ok: false, error: "Totale obbligatorio" }, { status: 400 });
+      }
+      if (pos === null) {
+        return NextResponse.json({ ok: false, error: "POS obbligatorio" }, { status: 400 });
+      }
+      if (versamento === null) {
+        return NextResponse.json({ ok: false, error: "Versamento obbligatorio" }, { status: 400 });
+      }
+      if (da_versare === null) {
+        return NextResponse.json({ ok: false, error: "Da Versare obbligatorio" }, { status: 400 });
+      }
+      if (fondo_cassa === null) {
+        return NextResponse.json({ ok: false, error: "Fondo Cassa obbligatorio" }, { status: 400 });
+      }
+    }
+
+    if (existing && existing.tot_versato === null && tot_versato === null && status !== "bozza") {
+      const existingStatus = String(existing.status ?? "").trim().toLowerCase();
+      if (existingStatus !== "bozza") {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "Esiste già un riepilogo per questa data. Apri quello esistente.",
+          },
+          { status: 409 }
+        );
+      }
     }
 
     if (!existing) {
@@ -227,7 +284,12 @@ export async function POST(req: Request) {
         versamento,
         da_versare,
         tot_versato,
+        fondo_cassa_iniziale,
+        parziale_1,
+        parziale_2,
+        parziale_3,
         fondo_cassa,
+        status,
         is_closed: isClosingNow,
         updated_at: new Date().toISOString(),
       };
@@ -271,6 +333,7 @@ export async function POST(req: Request) {
         ok: true,
         id: summaryId,
         is_closed: isClosingNow,
+        status,
         mode: "insert",
       });
     }
@@ -303,7 +366,12 @@ export async function POST(req: Request) {
         versamento,
         da_versare,
         tot_versato,
+        fondo_cassa_iniziale,
+        parziale_1,
+        parziale_2,
+        parziale_3,
         fondo_cassa,
+        status,
         is_closed: isClosingNow,
         updated_at: new Date().toISOString(),
       };
@@ -350,6 +418,7 @@ export async function POST(req: Request) {
         ok: true,
         id: existing.id,
         is_closed: isClosingNow,
+        status,
         mode: "update",
       });
     }
@@ -359,6 +428,7 @@ export async function POST(req: Request) {
       .update({
         tot_versato,
         da_versare,
+        status: "chiuso",
         is_closed: true,
         updated_at: new Date().toISOString(),
       })
@@ -372,6 +442,7 @@ export async function POST(req: Request) {
       ok: true,
       id: existing.id,
       is_closed: true,
+      status: "chiuso",
       mode: "close",
     });
   } catch (e: any) {

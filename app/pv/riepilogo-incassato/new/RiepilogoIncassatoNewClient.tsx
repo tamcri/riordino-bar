@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 type SupplierPayment = {
@@ -52,6 +52,14 @@ function formatMoneyInput(value: number | null) {
   return roundMoney(value).toFixed(2).replace(".", ",");
 }
 
+function formatMoneyLabel(value: number | null) {
+  if (value === null || !Number.isFinite(value)) return "—";
+  return value.toLocaleString("it-IT", {
+    style: "currency",
+    currency: "EUR",
+  });
+}
+
 function sanitizeMoneyTyping(value: string) {
   let next = value.replace(/\./g, ",");
   next = next.replace(/[^\d,]/g, "");
@@ -68,6 +76,23 @@ function sanitizeMoneyTyping(value: string) {
   }
 
   return next;
+}
+
+function computeDeltaPercent(initial: number | null, current: number | null) {
+  if (initial === null || current === null) return null;
+  if (!Number.isFinite(initial) || !Number.isFinite(current)) return null;
+  if (initial === 0) return null;
+
+  return roundMoney(((current - initial) / initial) * 100);
+}
+
+function formatPercentLabel(value: number | null) {
+  if (value === null || !Number.isFinite(value)) return "—";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toLocaleString("it-IT", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  })}%`;
 }
 
 export default function RiepilogoIncassatoNewClient() {
@@ -88,6 +113,13 @@ export default function RiepilogoIncassatoNewClient() {
   const [speseExtra, setSpeseExtra] = useState<number | null>(null);
   const [totVersato, setTotVersato] = useState<number | null>(null);
   const [fondoCassa, setFondoCassa] = useState<number | null>(null);
+
+  const [fondoCassaIniziale, setFondoCassaIniziale] = useState<number | null>(null);
+  const [parziale1, setParziale1] = useState<number | null>(null);
+  const [parziale2, setParziale2] = useState<number | null>(null);
+  const [parziale3, setParziale3] = useState<number | null>(null);
+  const [loadingFondoIniziale, setLoadingFondoIniziale] = useState(true);
+  const [fondoInizialeMsg, setFondoInizialeMsg] = useState<string | null>(null);
 
   const [supplierPayments, setSupplierPayments] = useState<SupplierPayment[]>([]);
   const [showModal, setShowModal] = useState(false);
@@ -113,6 +145,9 @@ export default function RiepilogoIncassatoNewClient() {
   const [speseExtraInput, setSpeseExtraInput] = useState("");
   const [totVersatoInput, setTotVersatoInput] = useState("");
   const [fondoCassaInput, setFondoCassaInput] = useState("");
+  const [parziale1Input, setParziale1Input] = useState("");
+  const [parziale2Input, setParziale2Input] = useState("");
+  const [parziale3Input, setParziale3Input] = useState("");
   const [supplierAmountInput, setSupplierAmountInput] = useState("");
 
   const searchRequestIdRef = useRef(0);
@@ -134,6 +169,10 @@ export default function RiepilogoIncassatoNewClient() {
   const daVersare = roundMoney(
     totVersato === null || totVersato === 0 ? versamento : versamento - n(totVersato)
   );
+
+  const deltaFondoCassaPercent = useMemo(() => {
+    return computeDeltaPercent(fondoCassaIniziale, fondoCassa);
+  }, [fondoCassaIniziale, fondoCassa]);
 
   function syncMoneyState(
     rawValue: string,
@@ -285,17 +324,68 @@ export default function RiepilogoIncassatoNewClient() {
     };
   }, [supplierSearch, showModal]);
 
-  async function salvaMovimento() {
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadFondoCassaIniziale() {
+      setLoadingFondoIniziale(true);
+      setFondoInizialeMsg(null);
+
+      try {
+        const res = await fetch("/api/cash-summary/fondo-cassa-iniziale/get", {
+          cache: "no-store",
+        });
+
+        const json = await res.json().catch(() => null);
+
+        if (cancelled) return;
+
+        if (!res.ok || !json?.ok) {
+          setFondoCassaIniziale(null);
+          setFondoInizialeMsg(
+            json?.error || "Impossibile leggere il Fondo Cassa Iniziale."
+          );
+          return;
+        }
+
+        const fondo = Number(json?.row?.fondo_cassa_iniziale);
+        if (Number.isFinite(fondo)) {
+          setFondoCassaIniziale(roundMoney(fondo));
+        } else {
+          setFondoCassaIniziale(null);
+        }
+      } catch {
+        if (cancelled) return;
+        setFondoCassaIniziale(null);
+        setFondoInizialeMsg("Impossibile leggere il Fondo Cassa Iniziale.");
+      } finally {
+        if (!cancelled) {
+          setLoadingFondoIniziale(false);
+        }
+      }
+    }
+
+    loadFondoCassaIniziale();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function submitWithStatus(status: "bozza" | "completato") {
     if (!data) return alert("Data obbligatoria");
     if (!operatore.trim()) return alert("Operatore obbligatorio");
-    if (incassoTotale === null) return alert("Incasso Totale obbligatorio");
-    if (gvPagati === null) return alert("G&V Pagati obbligatorio");
-    if (lisPlus === null) return alert("LIS+ obbligatorio");
-    if (mooney === null) return alert("MOONEY obbligatorio");
-    if (venditaGV === null) return alert("Vendita G&V obbligatorio");
-    if (venditaTabacchi === null) return alert("Vendita Tabacchi obbligatorio");
-    if (pos === null) return alert("POS obbligatorio");
-    if (fondoCassa === null) return alert("Fondo Cassa obbligatorio");
+
+    if (status === "completato") {
+      if (incassoTotale === null) return alert("Incasso Totale obbligatorio");
+      if (gvPagati === null) return alert("G&V Pagati obbligatorio");
+      if (lisPlus === null) return alert("LIS+ obbligatorio");
+      if (mooney === null) return alert("MOONEY obbligatorio");
+      if (venditaGV === null) return alert("Vendita G&V obbligatorio");
+      if (venditaTabacchi === null) return alert("Vendita Tabacchi obbligatorio");
+      if (pos === null) return alert("POS obbligatorio");
+      if (fondoCassa === null) return alert("Fondo Cassa obbligatorio");
+    }
 
     setSaving(true);
 
@@ -322,7 +412,12 @@ export default function RiepilogoIncassatoNewClient() {
           versamento,
           da_versare: daVersare,
           tot_versato: totVersato,
+          fondo_cassa_iniziale: fondoCassaIniziale,
+          parziale_1: parziale1,
+          parziale_2: parziale2,
+          parziale_3: parziale3,
           fondo_cassa: fondoCassa,
+          status,
           fornitori: supplierPayments,
         }),
       });
@@ -334,7 +429,7 @@ export default function RiepilogoIncassatoNewClient() {
         return;
       }
 
-      alert("Movimento salvato");
+      alert(status === "bozza" ? "Riepilogo salvato in bozza" : "Riepilogo completato");
       router.push("/pv/riepilogo-incassato");
     } catch {
       alert("Errore di rete");
@@ -517,6 +612,75 @@ export default function RiepilogoIncassatoNewClient() {
       </div>
 
       <div className="rounded-2xl border bg-white p-6 shadow-sm">
+        <h2 className="mb-4 text-lg font-semibold">Fondo Cassa</h2>
+
+        {fondoInizialeMsg && (
+          <div className="mb-4 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            {fondoInizialeMsg}
+          </div>
+        )}
+
+        <div className="grid gap-4 md:grid-cols-3">
+          <ReadOnlyField
+            label="Fondo Cassa Iniziale"
+            value={loadingFondoIniziale ? "Caricamento..." : formatMoneyLabel(fondoCassaIniziale)}
+          />
+
+          <InputField
+            label="Parziale 1"
+            value={parziale1}
+            inputValue={parziale1Input}
+            setInputValue={setParziale1Input}
+            setValue={setParziale1}
+          />
+
+          <InputField
+            label="Parziale 2"
+            value={parziale2}
+            inputValue={parziale2Input}
+            setInputValue={setParziale2Input}
+            setValue={setParziale2}
+          />
+
+          <InputField
+            label="Parziale 3"
+            value={parziale3}
+            inputValue={parziale3Input}
+            setInputValue={setParziale3Input}
+            setValue={setParziale3}
+          />
+
+          <InputField
+            label="Fondo Cassa"
+            value={fondoCassa}
+            inputValue={fondoCassaInput}
+            setInputValue={setFondoCassaInput}
+            setValue={setFondoCassa}
+          />
+
+          <div className="rounded-xl border bg-slate-50 p-3">
+            <div className="text-xs text-gray-500">Differenza % Fondo Cassa</div>
+            <div
+              className={`mt-1 text-lg font-semibold ${
+                deltaFondoCassaPercent === null
+                  ? "text-slate-700"
+                  : deltaFondoCassaPercent < 0
+                    ? "text-red-700"
+                    : deltaFondoCassaPercent > 0
+                      ? "text-green-700"
+                      : "text-slate-900"
+              }`}
+            >
+              {formatPercentLabel(deltaFondoCassaPercent)}
+            </div>
+            <div className="mt-1 text-xs text-gray-500">
+              Confronto tra Fondo Cassa Iniziale e Fondo Cassa finale.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-2xl border bg-white p-6 shadow-sm">
         <h2 className="mb-4 text-lg font-semibold">Calcoli</h2>
 
         <div className="grid gap-4 md:grid-cols-3">
@@ -549,25 +713,26 @@ export default function RiepilogoIncassatoNewClient() {
             setInputValue={setTotVersatoInput}
             setValue={setTotVersato}
           />
-
-          <InputField
-            label="Fondo Cassa"
-            value={fondoCassa}
-            inputValue={fondoCassaInput}
-            setInputValue={setFondoCassaInput}
-            setValue={setFondoCassa}
-          />
         </div>
       </div>
 
-      <div className="flex justify-end">
+      <div className="flex justify-end gap-3">
         <button
-          onClick={salvaMovimento}
+          onClick={() => submitWithStatus("bozza")}
+          disabled={saving}
+          className="rounded-lg border px-6 py-3 font-semibold hover:bg-gray-50 disabled:opacity-50"
+          type="button"
+        >
+          {saving ? "Salvo..." : "Salva Bozza"}
+        </button>
+
+        <button
+          onClick={() => submitWithStatus("completato")}
           disabled={saving}
           className="rounded-lg bg-green-600 px-6 py-3 font-semibold text-white disabled:opacity-50"
           type="button"
         >
-          {saving ? "Salvo..." : "Salva Riepilogo"}
+          {saving ? "Salvo..." : "Completa"}
         </button>
       </div>
 
@@ -674,6 +839,21 @@ export default function RiepilogoIncassatoNewClient() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function ReadOnlyField({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="rounded-xl border bg-slate-50 p-3">
+      <div className="text-xs text-gray-500">{label}</div>
+      <div className="mt-1 text-base font-medium text-slate-900">{value}</div>
     </div>
   );
 }

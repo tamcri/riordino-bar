@@ -29,9 +29,7 @@ type MetricKey =
   | "vendita_tabacchi"
   | "vendita_gv"
   | "lis_plus"
-  | "mooney"
-  | "saldo_giorno"
-  | "fondo_cassa";
+  | "mooney";
 
 type MetricChecksMap = Partial<Record<MetricKey, CheckState>>;
 
@@ -85,8 +83,6 @@ const METRIC_OPTIONS: MetricOption[] = [
   { key: "vendita_gv", label: "Venduto G&V" },
   { key: "lis_plus", label: "LIS+" },
   { key: "mooney", label: "Mooney" },
-  { key: "saldo_giorno", label: "Saldo Giorno" },
-  { key: "fondo_cassa", label: "Fondo Cassa" },
 ];
 
 const METRIC_COLORS: Record<MetricKey, string> = {
@@ -96,8 +92,6 @@ const METRIC_COLORS: Record<MetricKey, string> = {
   vendita_gv: "#9333ea",
   lis_plus: "#ea580c",
   mooney: "#ca8a04",
-  saldo_giorno: "#db2777",
-  fondo_cassa: "#334155",
 };
 
 function todayISO() {
@@ -180,10 +174,6 @@ function metricLabel(metric: MetricKey) {
       return "LIS+";
     case "mooney":
       return "Mooney";
-    case "saldo_giorno":
-      return "Saldo Giorno";
-    case "fondo_cassa":
-      return "Fondo Cassa";
     default:
       return "Valore";
   }
@@ -203,10 +193,6 @@ function metricValue(row: ViewRow, metric: MetricKey) {
       return row.lis_plus;
     case "mooney":
       return row.mooney;
-    case "saldo_giorno":
-      return row.saldo_giorno;
-    case "fondo_cassa":
-      return row.fondo_cassa;
     default:
       return 0;
   }
@@ -227,6 +213,26 @@ function TooltipValue({ active, payload, label }: any) {
       </div>
     </div>
   );
+}
+
+function computePercentDifference(initialValue: number | null, finalValue: number | null) {
+  const initial = Number(initialValue);
+  const final = Number(finalValue);
+
+  if (!Number.isFinite(initial) || !Number.isFinite(final) || initial === 0) {
+    return null;
+  }
+
+  return ((final - initial) / initial) * 100;
+}
+
+function formatPercent(value: number | null) {
+  if (value === null || !Number.isFinite(value)) return "—";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toLocaleString("it-IT", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  })}%`;
 }
 
 export default function CashSummaryAdminClient() {
@@ -254,6 +260,14 @@ export default function CashSummaryAdminClient() {
   const [balanceLoading, setBalanceLoading] = useState(false);
   const [balanceMsg, setBalanceMsg] = useState<string | null>(null);
 
+  const [fondoPvId, setFondoPvId] = useState("");
+  const [fondoValue, setFondoValue] = useState<number | null>(null);
+  const [fondoLoading, setFondoLoading] = useState(false);
+  const [fondoMsg, setFondoMsg] = useState<string | null>(null);
+
+  const [chartFondoInitialValue, setChartFondoInitialValue] = useState<number | null>(null);
+  const [chartFondoLoading, setChartFondoLoading] = useState(false);
+
   async function loadPvs() {
     try {
       const res = await fetch("/api/pvs/list", { cache: "no-store" });
@@ -264,6 +278,10 @@ export default function CashSummaryAdminClient() {
 
       if (!balancePvId && normalized[0]?.id) {
         setBalancePvId(normalized[0].id);
+      }
+
+      if (!fondoPvId && normalized[0]?.id) {
+        setFondoPvId(normalized[0].id);
       }
     } catch {
       setPvs([]);
@@ -406,6 +424,121 @@ export default function CashSummaryAdminClient() {
     }
   }
 
+  async function loadFondoCassaIniziale(selectedPvId: string) {
+    if (!selectedPvId) {
+      setFondoValue(null);
+      setFondoMsg(null);
+      return;
+    }
+
+    setFondoLoading(true);
+    setFondoMsg(null);
+
+    try {
+      const res = await fetch(
+        `/api/cash-summary/fondo-cassa-iniziale/get?pv_id=${encodeURIComponent(selectedPvId)}`,
+        { cache: "no-store" }
+      );
+
+      const json = await res.json().catch(() => null);
+
+      if (!res.ok || !json?.ok) {
+        setFondoValue(null);
+        setFondoMsg(json?.error || "Errore lettura fondo cassa iniziale");
+        return;
+      }
+
+      if (json.row) {
+        setFondoValue(Number(json.row.fondo_cassa_iniziale ?? 0) || 0);
+      } else {
+        setFondoValue(null);
+      }
+    } catch {
+      setFondoMsg("Errore di rete");
+      setFondoValue(null);
+    } finally {
+      setFondoLoading(false);
+    }
+  }
+
+  async function saveFondoCassaIniziale(e: React.FormEvent) {
+    e.preventDefault();
+
+    if (!fondoPvId) {
+      setFondoMsg("Seleziona un PV.");
+      return;
+    }
+
+    if (fondoValue === null) {
+      setFondoMsg("Fondo cassa iniziale obbligatorio.");
+      return;
+    }
+
+    setFondoLoading(true);
+    setFondoMsg(null);
+
+    try {
+      const res = await fetch("/api/cash-summary/fondo-cassa-iniziale/save", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          pv_id: fondoPvId,
+          fondo_cassa_iniziale: fondoValue,
+        }),
+      });
+
+      const json = await res.json().catch(() => null);
+
+      if (!res.ok || !json?.ok) {
+        setFondoMsg(json?.error || "Errore salvataggio fondo cassa iniziale");
+        return;
+      }
+
+      setFondoMsg("Fondo cassa iniziale salvato.");
+      await loadFondoCassaIniziale(fondoPvId);
+    } catch {
+      setFondoMsg("Errore di rete");
+    } finally {
+      setFondoLoading(false);
+    }
+  }
+
+  async function loadChartFondoInitial(selectedPvId: string) {
+    if (!selectedPvId) {
+      setChartFondoInitialValue(null);
+      setChartFondoLoading(false);
+      return;
+    }
+
+    setChartFondoLoading(true);
+
+    try {
+      const res = await fetch(
+        `/api/cash-summary/fondo-cassa-iniziale/get?pv_id=${encodeURIComponent(selectedPvId)}`,
+        { cache: "no-store" }
+      );
+
+      const json = await res.json().catch(() => null);
+
+      if (!res.ok || !json?.ok) {
+        setChartFondoInitialValue(null);
+        return;
+      }
+
+      if (json.row) {
+        setChartFondoInitialValue(Number(json.row.fondo_cassa_iniziale ?? 0) || 0);
+      } else {
+        setChartFondoInitialValue(null);
+      }
+    } catch {
+      setChartFondoInitialValue(null);
+    } finally {
+      setChartFondoLoading(false);
+    }
+  }
+
   function toggleComparePv(pvIdToToggle: string) {
     setSelectedComparePvIds((prev) =>
       prev.includes(pvIdToToggle)
@@ -478,6 +611,21 @@ export default function CashSummaryAdminClient() {
     if (!balancePvId) return;
     loadBalanceStart(balancePvId);
   }, [balancePvId]);
+
+  useEffect(() => {
+    if (!fondoPvId) return;
+    loadFondoCassaIniziale(fondoPvId);
+  }, [fondoPvId]);
+
+  useEffect(() => {
+    if (!pvId) {
+      setChartFondoInitialValue(null);
+      setChartFondoLoading(false);
+      return;
+    }
+
+    loadChartFondoInitial(pvId);
+  }, [pvId]);
 
   const computedRows = useMemo<ViewRow[]>(() => {
     const sorted = [...rows].sort((a, b) => {
@@ -576,6 +724,26 @@ export default function CashSummaryAdminClient() {
     };
   }, [computedRows, metric]);
 
+  const latestFilteredPvRow = useMemo(() => {
+    if (!pvId) return null;
+
+    const filtered = computedRows.filter((row) => row.pv_id === pvId);
+    if (filtered.length === 0) return null;
+
+    const sorted = [...filtered].sort((a, b) => {
+      if (a.data !== b.data) return b.data.localeCompare(a.data);
+      return b.id.localeCompare(a.id);
+    });
+
+    return sorted[0];
+  }, [computedRows, pvId]);
+
+  const fondoCassaPercent = useMemo(() => {
+    if (!pvId) return null;
+    if (!latestFilteredPvRow) return null;
+    return computePercentDifference(chartFondoInitialValue, latestFilteredPvRow.fondo_cassa);
+  }, [pvId, chartFondoInitialValue, latestFilteredPvRow]);
+
   const compareByPv = useMemo(() => {
     const filteredRows =
       selectedComparePvIds.length > 0
@@ -651,8 +819,6 @@ export default function CashSummaryAdminClient() {
       vendita_gv: 0,
       lis_plus: 0,
       mooney: 0,
-      saldo_giorno: 0,
-      fondo_cassa: 0,
     };
 
     for (const row of computedRows) {
@@ -732,6 +898,57 @@ export default function CashSummaryAdminClient() {
         </form>
 
         {balanceMsg && <div className="mt-3 text-sm text-gray-700">{balanceMsg}</div>}
+      </section>
+
+      <section className="rounded-2xl border bg-white p-4">
+        <h2 className="text-lg font-semibold">Fondo Cassa Iniziale PV</h2>
+        <p className="mt-1 text-sm text-gray-600">
+          È un dato amministrativo fisso del PV, separato dal saldo iniziale e usato nei controlli del fondo cassa.
+        </p>
+
+        <form onSubmit={saveFondoCassaIniziale} className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+          <div>
+            <label className="mb-2 block text-sm font-medium">Punto Vendita</label>
+            <select
+              className="w-full rounded-xl border bg-white p-3"
+              value={fondoPvId}
+              onChange={(e) => setFondoPvId(e.target.value)}
+            >
+              <option value="">Seleziona</option>
+              {pvs.map((pv) => (
+                <option key={pv.id} value={pv.id}>
+                  {pv.code} — {pv.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="mb-2 block text-sm font-medium">Fondo Cassa Iniziale</label>
+            <input
+              type="number"
+              step="0.01"
+              className="w-full rounded-xl border bg-white p-3"
+              value={fondoValue ?? ""}
+              onChange={(e) => {
+                const raw = e.target.value;
+                setFondoValue(raw === "" ? null : Number(raw));
+              }}
+            />
+          </div>
+
+          <div className="flex items-end">
+            <button
+              type="submit"
+              className="w-full rounded-xl bg-slate-900 p-3 text-white disabled:opacity-60"
+              disabled={fondoLoading}
+            >
+              {fondoLoading ? "Salvo..." : "Salva fondo cassa iniziale"}
+            </button>
+          </div>
+        </form>
+
+        {fondoMsg && <div className="mt-3 text-sm text-gray-700">{fondoMsg}</div>}
       </section>
 
       <section className="rounded-2xl border bg-white p-4">
@@ -875,22 +1092,52 @@ export default function CashSummaryAdminClient() {
           )}
         </div>
 
-        <div className="mt-4 flex justify-end gap-3">
-          <div className="rounded-xl border bg-slate-50 px-4 py-3 text-right">
+        <div className="mt-4 flex flex-wrap items-stretch justify-between gap-3">
+          <div className="rounded-xl border bg-slate-50 px-4 py-3">
             <div className="text-xs uppercase tracking-wide text-gray-500">
-              Totale {metricLabel(metric)}
+              Differenza % Fondo Cassa
             </div>
-            <div className="text-lg font-semibold text-slate-900">
-              {formatEuro(chartData.total)}
+
+            <div
+              className={`mt-1 text-lg font-semibold ${
+                fondoCassaPercent === null
+                  ? "text-slate-900"
+                  : fondoCassaPercent < 0
+                    ? "text-red-600"
+                    : fondoCassaPercent > 0
+                      ? "text-green-600"
+                      : "text-slate-900"
+              }`}
+            >
+              {chartFondoLoading ? "Caricamento..." : formatPercent(fondoCassaPercent)}
+            </div>
+
+            <div className="mt-1 text-xs text-gray-500">
+              {pvId
+                ? latestFilteredPvRow
+                  ? "Calcolata su ultimo riepilogo del PV selezionato."
+                  : "Nessun riepilogo disponibile per il PV selezionato."
+                : "Seleziona un PV nei filtri per visualizzarla."}
             </div>
           </div>
 
-          <div className="rounded-xl border bg-slate-50 px-4 py-3 text-right">
-            <div className="text-xs uppercase tracking-wide text-gray-500">
-              Media giornaliera
+          <div className="flex flex-wrap justify-end gap-3">
+            <div className="rounded-xl border bg-slate-50 px-4 py-3 text-right">
+              <div className="text-xs uppercase tracking-wide text-gray-500">
+                Totale {metricLabel(metric)}
+              </div>
+              <div className="text-lg font-semibold text-slate-900">
+                {formatEuro(chartData.total)}
+              </div>
             </div>
-            <div className="text-lg font-semibold text-slate-900">
-              {formatEuro(chartData.average)}
+
+            <div className="rounded-xl border bg-slate-50 px-4 py-3 text-right">
+              <div className="text-xs uppercase tracking-wide text-gray-500">
+                Media giornaliera
+              </div>
+              <div className="text-lg font-semibold text-slate-900">
+                {formatEuro(chartData.average)}
+              </div>
             </div>
           </div>
         </div>

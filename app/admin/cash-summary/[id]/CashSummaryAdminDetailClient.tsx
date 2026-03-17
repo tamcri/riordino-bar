@@ -28,7 +28,12 @@ type SummaryRow = {
   versamento: number | null;
   da_versare: number | null;
   tot_versato: number | null;
+  fondo_cassa_iniziale: number | null;
+  parziale_1: number | null;
+  parziale_2: number | null;
+  parziale_3: number | null;
   fondo_cassa: number | null;
+  status?: string | null;
   is_closed: boolean;
   pvs?: PvJoin | PvJoin[] | null;
 };
@@ -57,6 +62,10 @@ type FieldCommentKey =
   | "pos"
   | "spese_extra"
   | "tot_versato"
+  | "fondo_cassa_iniziale"
+  | "parziale_1"
+  | "parziale_2"
+  | "parziale_3"
   | "fondo_cassa";
 
 type FieldCommentsMap = Partial<Record<FieldCommentKey, string>>;
@@ -85,6 +94,15 @@ function formatEuro(value: unknown) {
   });
 }
 
+function formatPercent(value: number | null) {
+  if (value === null || !Number.isFinite(value)) return "—";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toLocaleString("it-IT", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  })}%`;
+}
+
 function pvLabelFromJoin(pvs: SummaryRow["pvs"]) {
   const row = Array.isArray(pvs) ? pvs[0] : pvs;
   const code = String(row?.code ?? "").trim();
@@ -94,6 +112,14 @@ function pvLabelFromJoin(pvs: SummaryRow["pvs"]) {
   if (name) return name;
   if (code) return code;
   return "PV";
+}
+
+function computeFondoDeltaPercent(initial: number | null, current: number | null) {
+  const i = Number(initial);
+  const c = Number(current);
+
+  if (!Number.isFinite(i) || !Number.isFinite(c) || i === 0) return null;
+  return roundMoney(((c - i) / i) * 100);
 }
 
 export default function CashSummaryAdminDetailClient({ id }: { id: string }) {
@@ -326,6 +352,11 @@ export default function CashSummaryAdminDetailClient({ id }: { id: string }) {
     );
   }, [summary, versamento]);
 
+  const fondoDeltaPercent = useMemo(() => {
+    if (!summary) return null;
+    return computeFondoDeltaPercent(summary.fondo_cassa_iniziale, summary.fondo_cassa);
+  }, [summary]);
+
   if (loading) {
     return (
       <div className="rounded-2xl border bg-white p-6 text-sm text-gray-600">
@@ -556,6 +587,50 @@ export default function CashSummaryAdminDetailClient({ id }: { id: string }) {
             onCommentClear={() => clearFieldComment("tot_versato")}
           />
 
+          <Field label="Stato" value={summary.status?.trim() || (summary.is_closed ? "chiuso" : "aperto")} />
+        </div>
+      </section>
+
+      <section className="rounded-2xl border bg-white p-4">
+        <h2 className="text-lg font-semibold">Fondo Cassa</h2>
+
+        <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+          <EditableNumberField
+            label="Fondo Cassa Iniziale"
+            value={summary.fondo_cassa_iniziale}
+            onChange={(value) => setSummary({ ...summary, fondo_cassa_iniziale: value })}
+            comment={fieldComments.fondo_cassa_iniziale ?? ""}
+            onCommentChange={(value) => updateFieldComment("fondo_cassa_iniziale", value)}
+            onCommentClear={() => clearFieldComment("fondo_cassa_iniziale")}
+          />
+
+          <EditableNumberField
+            label="Parziale 1"
+            value={summary.parziale_1}
+            onChange={(value) => setSummary({ ...summary, parziale_1: value })}
+            comment={fieldComments.parziale_1 ?? ""}
+            onCommentChange={(value) => updateFieldComment("parziale_1", value)}
+            onCommentClear={() => clearFieldComment("parziale_1")}
+          />
+
+          <EditableNumberField
+            label="Parziale 2"
+            value={summary.parziale_2}
+            onChange={(value) => setSummary({ ...summary, parziale_2: value })}
+            comment={fieldComments.parziale_2 ?? ""}
+            onCommentChange={(value) => updateFieldComment("parziale_2", value)}
+            onCommentClear={() => clearFieldComment("parziale_2")}
+          />
+
+          <EditableNumberField
+            label="Parziale 3"
+            value={summary.parziale_3}
+            onChange={(value) => setSummary({ ...summary, parziale_3: value })}
+            comment={fieldComments.parziale_3 ?? ""}
+            onCommentChange={(value) => updateFieldComment("parziale_3", value)}
+            onCommentClear={() => clearFieldComment("parziale_3")}
+          />
+
           <EditableNumberField
             label="Fondo Cassa"
             value={summary.fondo_cassa}
@@ -565,7 +640,7 @@ export default function CashSummaryAdminDetailClient({ id }: { id: string }) {
             onCommentClear={() => clearFieldComment("fondo_cassa")}
           />
 
-          <Field label="Stato" value={summary.is_closed ? "Chiuso" : "Aperto"} />
+          <Field label="Differenza % Fondo Cassa" value={formatPercent(fondoDeltaPercent)} />
         </div>
       </section>
 

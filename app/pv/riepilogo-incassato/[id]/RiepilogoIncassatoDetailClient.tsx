@@ -30,7 +30,12 @@ type SummaryResponse = {
     versamento: number | null;
     da_versare: number | null;
     tot_versato: number | null;
+    fondo_cassa_iniziale?: number | null;
+    parziale_1?: number | null;
+    parziale_2?: number | null;
+    parziale_3?: number | null;
     fondo_cassa: number | null;
+    status?: string | null;
     is_closed: boolean;
   };
   suppliers?: Array<{
@@ -40,6 +45,8 @@ type SummaryResponse = {
   }>;
   error?: string;
 };
+
+type SummaryStatus = "bozza" | "completato" | "chiuso";
 
 function n(value: number | null | undefined) {
   return value ?? 0;
@@ -55,6 +62,52 @@ function parseMoney(value: string): number | null {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed)) return null;
   return roundMoney(parsed);
+}
+
+function formatEuro(value: number | null | undefined) {
+  return Number(value ?? 0).toLocaleString("it-IT", {
+    style: "currency",
+    currency: "EUR",
+  });
+}
+
+function normalizeStatus(status: string | null | undefined, isClosed: boolean): SummaryStatus {
+  const raw = String(status ?? "").trim().toLowerCase();
+
+  if (raw === "bozza") return "bozza";
+  if (raw === "completato") return "completato";
+  if (raw === "chiuso") return "chiuso";
+
+  return isClosed ? "chiuso" : "bozza";
+}
+
+function computeFondoDeltaPercent(initial: number | null | undefined, current: number | null | undefined) {
+  const i = Number(initial);
+  const c = Number(current);
+
+  if (!Number.isFinite(i) || !Number.isFinite(c) || i === 0) return null;
+  return roundMoney(((c - i) / i) * 100);
+}
+
+function formatPercent(value: number | null) {
+  if (value === null || !Number.isFinite(value)) return "—";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toLocaleString("it-IT", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  })}%`;
+}
+
+function statusLabel(status: SummaryStatus) {
+  switch (status) {
+    case "chiuso":
+      return "Chiuso";
+    case "completato":
+      return "Completato";
+    case "bozza":
+    default:
+      return "Bozza";
+  }
 }
 
 export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
@@ -77,10 +130,17 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
   const [pos, setPos] = useState<number | null>(null);
   const [speseExtra, setSpeseExtra] = useState<number | null>(null);
   const [totVersato, setTotVersato] = useState<number | null>(null);
+  const [fondoCassaIniziale, setFondoCassaIniziale] = useState<number | null>(null);
+  const [parziale1, setParziale1] = useState<number | null>(null);
+  const [parziale2, setParziale2] = useState<number | null>(null);
+  const [parziale3, setParziale3] = useState<number | null>(null);
   const [fondoCassa, setFondoCassa] = useState<number | null>(null);
   const [supplierPayments, setSupplierPayments] = useState<SupplierPayment[]>([]);
+  const [status, setStatus] = useState<SummaryStatus>("bozza");
   const [isClosed, setIsClosed] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  const isEditable = !viewMode && !isClosed;
 
   const pagamentoFornitori = useMemo(
     () => roundMoney(supplierPayments.reduce((sum, s) => sum + s.amount, 0)),
@@ -99,6 +159,10 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
       ? versamento
       : versamento - n(totVersato)
   );
+
+  const fondoDeltaPercent = useMemo(() => {
+    return computeFondoDeltaPercent(fondoCassaIniziale, fondoCassa);
+  }, [fondoCassaIniziale, fondoCassa]);
 
   async function loadDetail() {
     setLoading(true);
@@ -129,8 +193,13 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
       setPos(s.pos ?? null);
       setSpeseExtra(s.spese_extra ?? null);
       setTotVersato(s.tot_versato ?? null);
+      setFondoCassaIniziale(s.fondo_cassa_iniziale ?? null);
+      setParziale1(s.parziale_1 ?? null);
+      setParziale2(s.parziale_2 ?? null);
+      setParziale3(s.parziale_3 ?? null);
       setFondoCassa(s.fondo_cassa ?? null);
       setIsClosed(!!s.is_closed);
+      setStatus(normalizeStatus(s.status, !!s.is_closed));
 
       const mappedSuppliers: SupplierPayment[] = (json.suppliers ?? []).map((row, index) => ({
         id: index + 1,
@@ -150,6 +219,72 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
   useEffect(() => {
     loadDetail();
   }, [id]);
+
+  async function submitWithStatus(nextStatus: "bozza" | "completato") {
+    if (!data) return alert("Data obbligatoria");
+    if (!operatore.trim()) return alert("Operatore obbligatorio");
+
+    if (nextStatus === "completato") {
+      if (incassoTotale === null) return alert("Incasso Totale obbligatorio");
+      if (gvPagati === null) return alert("G&V Pagati obbligatorio");
+      if (lisPlus === null) return alert("LIS+ obbligatorio");
+      if (mooney === null) return alert("MOONEY obbligatorio");
+      if (venditaGV === null) return alert("Vendita G&V obbligatorio");
+      if (venditaTabacchi === null) return alert("Vendita Tabacchi obbligatorio");
+      if (pos === null) return alert("POS obbligatorio");
+      if (fondoCassa === null) return alert("Fondo Cassa obbligatorio");
+    }
+
+    setSaving(true);
+
+    try {
+      const res = await fetch("/api/cash-summary/save", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          data,
+          operatore,
+          incasso_totale: incassoTotale,
+          pagamento_fornitori: pagamentoFornitori,
+          gv_pagati: gvPagati,
+          lis_plus: lisPlus,
+          mooney,
+          totale_esistenza_cassa: totaleEsistenzaCassa,
+          vendita_gv: venditaGV,
+          vendita_tabacchi: venditaTabacchi,
+          totale,
+          pos,
+          spese_extra: speseExtra ?? 0,
+          versamento,
+          da_versare: daVersare,
+          tot_versato: totVersato,
+          fondo_cassa_iniziale: fondoCassaIniziale,
+          parziale_1: parziale1,
+          parziale_2: parziale2,
+          parziale_3: parziale3,
+          fondo_cassa: fondoCassa,
+          status: nextStatus,
+          fornitori: supplierPayments,
+        }),
+      });
+
+      const json = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        alert(json?.error || "Errore nel salvataggio");
+        return;
+      }
+
+      alert(nextStatus === "bozza" ? "Bozza salvata" : "Riepilogo completato");
+      router.push("/pv/riepilogo-incassato");
+    } catch {
+      alert("Errore di rete");
+    } finally {
+      setSaving(false);
+    }
+  }
 
   async function salvaTotVersato() {
     if (isClosed) return;
@@ -183,7 +318,12 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
           versamento,
           da_versare: daVersare,
           tot_versato: totVersato,
+          fondo_cassa_iniziale: fondoCassaIniziale,
+          parziale_1: parziale1,
+          parziale_2: parziale2,
+          parziale_3: parziale3,
           fondo_cassa: fondoCassa,
+          status,
           fornitori: supplierPayments,
         }),
       });
@@ -235,9 +375,10 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
           </button>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-2">
+        <div className="grid gap-4 md:grid-cols-3">
           <ReadOnlyField label="Data" value={data} />
           <ReadOnlyField label="Operatore" value={operatore} />
+          <ReadOnlyField label="Stato" value={statusLabel(status)} />
         </div>
       </div>
 
@@ -245,12 +386,12 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
         <h2 className="mb-4 text-lg font-semibold">Esistenza Cassa</h2>
 
         <div className="grid gap-4 md:grid-cols-3">
-          <ReadOnlyField label="Incasso Totale" value={String(incassoTotale ?? "")} />
-          <ReadOnlyField label="Pagamento Fornitori" value={String(pagamentoFornitori)} />
-          <ReadOnlyField label="G&V Pagati" value={String(gvPagati ?? "")} />
-          <ReadOnlyField label="LIS+" value={String(lisPlus ?? "")} />
-          <ReadOnlyField label="MOONEY" value={String(mooney ?? "")} />
-          <ReadOnlyField label="Totale Esistenza Cassa" value={String(totaleEsistenzaCassa)} />
+          <EditableField label="Incasso Totale" value={incassoTotale} setValue={setIncassoTotale} disabled={!isEditable} />
+          <ReadOnlyField label="Pagamento Fornitori" value={formatEuro(pagamentoFornitori)} />
+          <EditableField label="G&V Pagati" value={gvPagati} setValue={setGvPagati} disabled={!isEditable} />
+          <EditableField label="LIS+" value={lisPlus} setValue={setLisPlus} disabled={!isEditable} />
+          <EditableField label="MOONEY" value={mooney} setValue={setMooney} disabled={!isEditable} />
+          <ReadOnlyField label="Totale Esistenza Cassa" value={formatEuro(totaleEsistenzaCassa)} />
         </div>
       </div>
 
@@ -270,7 +411,7 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
               <tr key={s.id} className="border-t">
                 <td className="p-2">{s.code}</td>
                 <td className="p-2">{s.name}</td>
-                <td className="p-2 text-right">{s.amount.toFixed(2)}</td>
+                <td className="p-2 text-right">{formatEuro(s.amount)}</td>
               </tr>
             ))}
 
@@ -286,40 +427,71 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
       </div>
 
       <div className="rounded-2xl border bg-white p-6 shadow-sm">
+        <h2 className="mb-4 text-lg font-semibold">Fondo Cassa</h2>
+
+        <div className="grid gap-4 md:grid-cols-3">
+          <ReadOnlyField label="Fondo Cassa Iniziale" value={formatEuro(fondoCassaIniziale)} />
+          <EditableField label="Parziale 1" value={parziale1} setValue={setParziale1} disabled={!isEditable} />
+          <EditableField label="Parziale 2" value={parziale2} setValue={setParziale2} disabled={!isEditable} />
+          <EditableField label="Parziale 3" value={parziale3} setValue={setParziale3} disabled={!isEditable} />
+          <EditableField label="Fondo Cassa" value={fondoCassa} setValue={setFondoCassa} disabled={!isEditable} />
+          <ReadOnlyField label="Differenza % Fondo Cassa" value={formatPercent(fondoDeltaPercent)} />
+        </div>
+      </div>
+
+      <div className="rounded-2xl border bg-white p-6 shadow-sm">
         <h2 className="mb-4 text-lg font-semibold">Vendite e Calcoli</h2>
 
         <div className="grid gap-4 md:grid-cols-3">
-          <ReadOnlyField label="Vendita G&V" value={String(venditaGV ?? "")} />
-          <ReadOnlyField label="Vendita Tabacchi" value={String(venditaTabacchi ?? "")} />
-          <ReadOnlyField label="Totale" value={String(totale)} />
-          <ReadOnlyField label="POS" value={String(pos ?? "")} />
-          <ReadOnlyField label="Spese Extra" value={String(speseExtra ?? "")} />
-          <ReadOnlyField label="Versamento" value={String(versamento)} />
-          <ReadOnlyField label="Da Versare" value={String(daVersare)} />
-
+          <EditableField label="Vendita G&V" value={venditaGV} setValue={setVenditaGV} disabled={!isEditable} />
+          <EditableField label="Vendita Tabacchi" value={venditaTabacchi} setValue={setVenditaTabacchi} disabled={!isEditable} />
+          <ReadOnlyField label="Totale" value={formatEuro(totale)} />
+          <EditableField label="POS" value={pos} setValue={setPos} disabled={!isEditable} />
+          <EditableField label="Spese Extra" value={speseExtra} setValue={setSpeseExtra} disabled={!isEditable} />
+          <ReadOnlyField label="Versamento" value={formatEuro(versamento)} />
+          <ReadOnlyField label="Da Versare" value={formatEuro(daVersare)} />
           <EditableField
-          label="Tot. Versato"
-          value={totVersato}
-          setValue={setTotVersato}
-         disabled={isClosed || viewMode}
-        />
-
-          <ReadOnlyField label="Fondo Cassa" value={String(fondoCassa ?? "")} />
-          <ReadOnlyField label="Stato" value={isClosed ? "Chiuso" : "Aperto"} />
+            label="Tot. Versato"
+            value={totVersato}
+            setValue={setTotVersato}
+            disabled={isClosed || viewMode}
+          />
         </div>
       </div>
 
       {!viewMode && (
-       <div className="flex justify-end">
-       <button
-       onClick={salvaTotVersato}
-       disabled={saving || isClosed}
-       className="rounded-lg bg-green-600 px-6 py-3 font-semibold text-white disabled:opacity-50"
-       type="button"
-       >
-      {saving ? "Salvo..." : "Salva Tot. Versato"}
-      </button>
-      </div>
+        <div className="flex justify-end gap-3">
+          {!isClosed && (
+            <>
+              <button
+                onClick={() => submitWithStatus("bozza")}
+                disabled={saving}
+                className="rounded-lg border px-6 py-3 font-semibold hover:bg-gray-50 disabled:opacity-50"
+                type="button"
+              >
+                {saving ? "Salvo..." : "Salva Bozza"}
+              </button>
+
+              <button
+                onClick={() => submitWithStatus("completato")}
+                disabled={saving}
+                className="rounded-lg bg-blue-600 px-6 py-3 font-semibold text-white disabled:opacity-50"
+                type="button"
+              >
+                {saving ? "Salvo..." : "Completa"}
+              </button>
+
+              <button
+                onClick={salvaTotVersato}
+                disabled={saving}
+                className="rounded-lg bg-green-600 px-6 py-3 font-semibold text-white disabled:opacity-50"
+                type="button"
+              >
+                {saving ? "Salvo..." : "Salva Tot. Versato"}
+              </button>
+            </>
+          )}
+        </div>
       )}
     </div>
   );

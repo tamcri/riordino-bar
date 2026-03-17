@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
+type SummaryStatus = "bozza" | "completato" | "chiuso";
+
 type PvCashSummaryRow = {
   id: string;
   data: string;
@@ -10,6 +12,7 @@ type PvCashSummaryRow = {
   totale: number | null;
   da_versare: number | null;
   tot_versato: number | null;
+  status?: string | null;
   is_closed: boolean;
 };
 
@@ -36,6 +39,10 @@ const FIELD_LABELS: Record<string, string> = {
   pos: "POS",
   spese_extra: "Spese Extra",
   tot_versato: "Tot. Versato",
+  fondo_cassa_iniziale: "Fondo Cassa Iniziale",
+  parziale_1: "Parziale 1",
+  parziale_2: "Parziale 2",
+  parziale_3: "Parziale 3",
   fondo_cassa: "Fondo Cassa",
 };
 
@@ -68,6 +75,47 @@ function formatDateTime(value: string | null | undefined) {
 
 function getFieldLabel(fieldKey: string) {
   return FIELD_LABELS[fieldKey] ?? fieldKey;
+}
+
+function normalizeStatus(row: PvCashSummaryRow): SummaryStatus {
+  if (row.is_closed || Number(row.tot_versato ?? 0) > 0) {
+    return "chiuso";
+  }
+
+  const raw = String(row.status ?? "").trim().toLowerCase();
+
+  if (raw === "bozza") return "bozza";
+  if (raw === "completato") return "completato";
+  if (raw === "chiuso") return "chiuso";
+
+  return "bozza";
+}
+
+function statusBadge(status: SummaryStatus) {
+  switch (status) {
+    case "chiuso":
+      return (
+        <span className="inline-flex items-center gap-2 font-medium text-green-700">
+          <span className="h-2.5 w-2.5 rounded-full bg-green-600" />
+          Chiuso
+        </span>
+      );
+    case "completato":
+      return (
+        <span className="inline-flex items-center gap-2 font-medium text-blue-700">
+          <span className="h-2.5 w-2.5 rounded-full bg-blue-600" />
+          Completato
+        </span>
+      );
+    case "bozza":
+    default:
+      return (
+        <span className="inline-flex items-center gap-2 font-medium text-amber-700">
+          <span className="h-2.5 w-2.5 rounded-full bg-amber-500" />
+          Bozza
+        </span>
+      );
+  }
 }
 
 export default function RiepilogoIncassatoClient() {
@@ -192,8 +240,8 @@ export default function RiepilogoIncassatoClient() {
                       Riepilogo modificato dall’amministrazione
                     </h2>
                     <p className="mt-1 text-sm text-blue-800">
-                     Il riepilogo del <strong>{formatDate(notification.summary_date)}</strong> è stato modificato dall’amministrazione il{" "}
-                     <strong>{formatDateTime(notification.created_at)}</strong>.
+                      Il riepilogo del <strong>{formatDate(notification.summary_date)}</strong> è stato modificato dall’amministrazione il{" "}
+                      <strong>{formatDateTime(notification.created_at)}</strong>.
                     </p>
                   </div>
 
@@ -246,7 +294,7 @@ export default function RiepilogoIncassatoClient() {
               Riepilogo Incassato
             </h1>
             <p className="mt-1 text-sm text-slate-600">
-              Qui trovi tutti i riepiloghi inseriti. Quelli con pallino rosso richiedono il Tot. Versato.
+              Qui trovi tutti i riepiloghi inseriti.
             </p>
           </div>
 
@@ -259,9 +307,7 @@ export default function RiepilogoIncassatoClient() {
           </button>
         </div>
 
-        {loading && (
-          <div className="text-sm text-gray-500">Caricamento...</div>
-        )}
+        {loading && <div className="text-sm text-gray-500">Caricamento...</div>}
 
         {!loading && rows.length === 0 && (
           <div className="text-sm text-gray-500">
@@ -285,9 +331,8 @@ export default function RiepilogoIncassatoClient() {
 
               <tbody>
                 {rows.map((row) => {
-                  const needsVersato =
-                    !row.is_closed &&
-                    (row.tot_versato === null || Number(row.tot_versato) === 0);
+                  const status = normalizeStatus(row);
+                  const isClosed = status === "chiuso";
 
                   return (
                     <tr key={row.id} className="border-t">
@@ -296,47 +341,33 @@ export default function RiepilogoIncassatoClient() {
                       <td className="p-2 text-right">{formatEuro(row.totale)}</td>
                       <td className="p-2 text-right">{formatEuro(row.da_versare)}</td>
 
+                      <td className="p-2 text-center">{statusBadge(status)}</td>
+
                       <td className="p-2 text-center">
-                        {row.is_closed ? (
-                          <span className="inline-flex items-center gap-2 font-medium text-green-700">
-                            <span className="h-2.5 w-2.5 rounded-full bg-green-600" />
-                            Chiuso
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-2 font-medium text-red-700">
-                            <span className="h-2.5 w-2.5 rounded-full bg-red-600" />
-                            {needsVersato ? "Tot. Versato mancante" : "Aperto"}
-                          </span>
-                        )}
+                        <div className="flex items-center justify-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              router.push(`/pv/riepilogo-incassato/${row.id}?mode=view`)
+                            }
+                            className="rounded-lg border px-3 py-1.5 hover:bg-gray-50"
+                          >
+                            Dettaglio
+                          </button>
+
+                          {!isClosed && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                router.push(`/pv/riepilogo-incassato/${row.id}`)
+                              }
+                              className="rounded-lg bg-blue-600 px-3 py-1.5 text-white hover:bg-blue-700"
+                            >
+                              Apri
+                            </button>
+                          )}
+                        </div>
                       </td>
-
-                      <td className="p-2 text-center">
-  <div className="flex items-center justify-center gap-2">
-
-    <button
-      type="button"
-      onClick={() =>
-        router.push(`/pv/riepilogo-incassato/${row.id}?mode=view`)
-      }
-      className="rounded-lg border px-3 py-1.5 hover:bg-gray-50"
-    >
-      Dettaglio
-    </button>
-
-    {!row.is_closed && (
-      <button
-        type="button"
-        onClick={() =>
-          router.push(`/pv/riepilogo-incassato/${row.id}`)
-        }
-        className="rounded-lg bg-blue-600 px-3 py-1.5 text-white hover:bg-blue-700"
-      >
-        Apri
-      </button>
-    )}
-
-  </div>
-</td>
                     </tr>
                   );
                 })}
