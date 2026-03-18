@@ -137,6 +137,21 @@ function buildHeaders(aoa: any[][], headerRowIdx: number) {
   return headers;
 }
 
+async function hasRecountEventsForHeader(headerId: string | null): Promise<boolean> {
+  if (!headerId || !isUuid(headerId)) return false;
+
+  const { count, error } = await supabaseAdmin
+    .from("inventory_recount_events")
+    .select("item_id", { count: "exact", head: true })
+    .eq("inventory_header_id", headerId);
+
+  if (error) {
+    throw new Error(`Errore controllo riconta: ${error.message}`);
+  }
+
+  return (count ?? 0) > 0;
+}
+
 async function invalidateProgressiviReportSnapshotsForDate(
   pv_id: string,
   inventory_date: string
@@ -398,13 +413,19 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: insertErr.message }, { status: 500 });
     }
 
-    // Invalida automaticamente gli snapshot report collegati a questa data
+    // Se esistono eventi di riconta per questo inventario, NON invalidiamo lo snapshot:
+    // serve a mantenere le giacenze gestionali dei soli articoli non ricontati.
     let invalidated_report_snapshots = 0;
     try {
-      invalidated_report_snapshots = await invalidateProgressiviReportSnapshotsForDate(
-        pv_id,
-        inventory_date
-      );
+      const hasRecount =
+        inventory_header_id ? await hasRecountEventsForHeader(inventory_header_id) : false;
+
+      if (!hasRecount) {
+        invalidated_report_snapshots = await invalidateProgressiviReportSnapshotsForDate(
+          pv_id,
+          inventory_date
+        );
+      }
     } catch (e: any) {
       console.error("[progressivi/upload] snapshot invalidate error", e);
       return NextResponse.json(

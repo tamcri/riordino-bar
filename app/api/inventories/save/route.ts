@@ -905,7 +905,9 @@ export async function POST(req: Request) {
       }
 
       try {
-        invalidatedProgressiviSnapshots = await invalidateProgressiviSnapshots(existingId);
+        if (!recountMode) {
+  invalidatedProgressiviSnapshots = await invalidateProgressiviSnapshots(existingId);
+}
       } catch (e: any) {
         console.error("[inventories/save] progressivi snapshot invalidate error:", e);
         return NextResponse.json(
@@ -959,7 +961,9 @@ export async function POST(req: Request) {
     }
 
     try {
-      invalidatedProgressiviSnapshots = await invalidateProgressiviSnapshots(existingId);
+      if (!recountMode) {
+  invalidatedProgressiviSnapshots = await invalidateProgressiviSnapshots(existingId);
+}
     } catch (e: any) {
       console.error("[inventories/save] progressivi snapshot invalidate error:", e);
       return NextResponse.json(

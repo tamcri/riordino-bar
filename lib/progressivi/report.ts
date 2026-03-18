@@ -1092,13 +1092,8 @@ export async function getProgressiviReportData(
           continue;
         }
 
-        mergedRowsMap.set(
-          normalizedCode,
-          rebuildRowWithCurrentGestionale(
-            liveRow,
-            snapshotRow.current.giacenza_da_gestionale
-          )
-        );
+        // NON ricontato: mantieni lo snapshot completo, senza toccare la giacenza gestionale
+        mergedRowsMap.set(normalizedCode, snapshotRow);
       }
 
       for (const [normalizedCode, snapshotRow] of snapshotByCode.entries()) {

@@ -582,8 +582,7 @@ export default function InventoryHistoryClient() {
     (async () => {
       try {
         const qs = new URLSearchParams();
-        qs.set("pv_id", g.pv_id);
-        qs.set("inventory_date", g.inventory_date);
+        qs.set("inventory_header_id", g.header_id || g.id || "");
 
         const res = await fetch(`/api/inventories/progressivi/status?${qs.toString()}`, {
           cache: "no-store",
