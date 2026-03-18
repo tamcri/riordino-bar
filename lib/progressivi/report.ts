@@ -469,14 +469,23 @@ function resolveUniqueInventoryMatch<T extends { items?: { code?: string | null 
 }
 
 async function loadProgressiviRows(
-  pvId: string,
-  inventoryDate: string
+  input:
+    | { headerId: string; pvId: string; inventoryDate: string }
+    | { headerId?: string | null; pvId: string; inventoryDate: string }
 ): Promise<ProgressivoNormalizedRow[]> {
-  const { data, error } = await supabaseAdmin
+  const headerId = String(input.headerId ?? "").trim();
+
+  let q = supabaseAdmin
     .from("inventory_progressivi_rows")
-    .select("item_code, giacenza_qta1_fiscale")
-    .eq("pv_id", pvId)
-    .eq("inventory_date", inventoryDate);
+    .select("item_code, giacenza_qta1_fiscale");
+
+  if (isUuid(headerId)) {
+    q = q.eq("inventory_header_id", headerId);
+  } else {
+    q = q.eq("pv_id", input.pvId).eq("inventory_date", input.inventoryDate);
+  }
+
+  const { data, error } = await q;
 
   if (error) throw error;
 
@@ -828,9 +837,17 @@ async function computeLiveProgressiviData(
     .filter(Boolean) as string[];
 
   const [currentProgressiviRows, previousProgressiviRows] = await Promise.all([
-    loadProgressiviRows(currentHeader.pv_id, currentHeader.inventory_date),
+    loadProgressiviRows({
+      headerId: currentHeader.id,
+      pvId: currentHeader.pv_id,
+      inventoryDate: currentHeader.inventory_date,
+    }),
     prevHeader
-      ? loadProgressiviRows(currentHeader.pv_id, prevHeader.inventory_date)
+      ? loadProgressiviRows({
+          headerId: prevHeader.id,
+          pvId: currentHeader.pv_id,
+          inventoryDate: prevHeader.inventory_date,
+        })
       : Promise.resolve([]),
   ]);
 
@@ -965,8 +982,6 @@ export async function getProgressiviReportData(
 
   let finalRows: ProgressiviBlockRow[] = [];
 
-  // FIX: per decidere quali articoli del CURRENT devono prendere il secondo progressivo,
-  // usiamo SOLO le riconta del current header.
   const recountedCurrentCodes = await loadRecountedItemCodesForHeader(
     live.currentHeader.id
   );

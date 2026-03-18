@@ -231,6 +231,8 @@ export async function POST(req: Request) {
   const file = fd.get("file") as File | null;
   const pv_id = String(fd.get("pv_id") ?? "").trim();
   const inventory_date = String(fd.get("inventory_date") ?? "").trim();
+  const inventory_header_id_raw = String(fd.get("inventory_header_id") ?? "").trim();
+  const inventory_header_id = inventory_header_id_raw || null;
 
   if (!file) {
     return NextResponse.json({ ok: false, error: "File mancante" }, { status: 400 });
@@ -241,8 +243,46 @@ export async function POST(req: Request) {
   if (!isIsoDate(inventory_date)) {
     return NextResponse.json({ ok: false, error: "inventory_date non valida" }, { status: 400 });
   }
+  if (inventory_header_id && !isUuid(inventory_header_id)) {
+    return NextResponse.json(
+      { ok: false, error: "inventory_header_id non valido" },
+      { status: 400 }
+    );
+  }
 
   try {
+    if (inventory_header_id) {
+      const { data: headerRow, error: headerErr } = await supabaseAdmin
+        .from("inventories_headers")
+        .select("id,pv_id,inventory_date")
+        .eq("id", inventory_header_id)
+        .maybeSingle();
+
+      if (headerErr) {
+        return NextResponse.json({ ok: false, error: headerErr.message }, { status: 500 });
+      }
+
+      if (!headerRow?.id) {
+        return NextResponse.json(
+          { ok: false, error: "inventory_header_id non trovato" },
+          { status: 400 }
+        );
+      }
+
+      if (
+        String((headerRow as any).pv_id ?? "").trim() !== pv_id ||
+        String((headerRow as any).inventory_date ?? "").trim() !== inventory_date
+      ) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "inventory_header_id non coerente con pv_id e inventory_date",
+          },
+          { status: 400 }
+        );
+      }
+    }
+
     const ab = await file.arrayBuffer();
     const wb = XLSX.read(ab, { type: "array" });
     const ws = wb.Sheets[wb.SheetNames[0]];
@@ -315,6 +355,7 @@ export async function POST(req: Request) {
       }
 
       rowsToWrite.push({
+        inventory_header_id,
         pv_id,
         inventory_date,
         item_code: code,
@@ -332,13 +373,18 @@ export async function POST(req: Request) {
       );
     }
 
-    // Regola definitiva:
-    // stessa data = sostituzione completa del progressivo
-    const { error: deleteErr } = await supabaseAdmin
-      .from("inventory_progressivi_rows")
-      .delete()
-      .eq("pv_id", pv_id)
-      .eq("inventory_date", inventory_date);
+    // Nuova logica:
+    // se abbiamo inventory_header_id cancelliamo solo il progressivo di quell'inventario.
+    // Se manca, fallback legacy su pv_id + inventory_date.
+    let deleteQuery = supabaseAdmin.from("inventory_progressivi_rows").delete();
+
+    if (inventory_header_id) {
+      deleteQuery = deleteQuery.eq("inventory_header_id", inventory_header_id);
+    } else {
+      deleteQuery = deleteQuery.eq("pv_id", pv_id).eq("inventory_date", inventory_date);
+    }
+
+    const { error: deleteErr } = await deleteQuery;
 
     if (deleteErr) {
       return NextResponse.json({ ok: false, error: deleteErr.message }, { status: 500 });

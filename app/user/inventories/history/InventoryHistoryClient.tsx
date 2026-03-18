@@ -626,58 +626,64 @@ export default function InventoryHistoryClient() {
   }
 
   async function startProgressiviUpload() {
-    if (!progressiviTarget) return;
+  if (!progressiviTarget) return;
 
-    if (!progressiviFile) {
-      setProgressiviError("Carica prima il file progressivi (.xls/.xlsx).");
-      return;
-    }
-
-    // ✅ Se è il primo inserimento, chiedi conferma
-    if (progressiviIsFirst) {
-      const ok = window.confirm(
-        "Questo è il PRIMO caricamento Progressivi per questo PV.\n\n" +
-          "Non ti chiederò dati manuali: userò questo file come BASE.\n" +
-          "Dal prossimo inventario in poi calcolerò venduto periodo e ammanco.\n\n" +
-          "Vuoi procedere?"
-      );
-      if (!ok) return;
-    }
-
-    setProgressiviLoading(true);
-    setProgressiviError(null);
-    setProgressiviMsg(null);
-
-    try {
-      const fd = new FormData();
-      fd.append("file", progressiviFile);
-      fd.append("pv_id", progressiviTarget.pv_id);
-      fd.append("inventory_date", progressiviTarget.inventory_date);
-
-      const res = await fetch("/api/inventories/progressivi/upload", {
-        method: "POST",
-        body: fd,
-      });
-
-      const text = await res.text().catch(() => "");
-      let json: any = null;
-      try {
-        json = text ? JSON.parse(text) : null;
-      } catch {
-        json = null;
-      }
-
-      if (!res.ok || !json?.ok) {
-        throw new Error(json?.error || text || `Errore upload (HTTP ${res.status})`);
-      }
-
-      setProgressiviMsg(`Progressivi caricati. Righe importate: ${json.rows ?? "?"}`);
-    } catch (e: any) {
-      setProgressiviError(e?.message || "Errore upload progressivi");
-    } finally {
-      setProgressiviLoading(false);
-    }
+  if (!progressiviFile) {
+    setProgressiviError("Carica prima il file progressivi (.xls/.xlsx).");
+    return;
   }
+
+  // ✅ Se è il primo inserimento, chiedi conferma
+  if (progressiviIsFirst) {
+    const ok = window.confirm(
+      "Questo è il PRIMO caricamento Progressivi per questo PV.\n\n" +
+        "Non ti chiederò dati manuali: userò questo file come BASE.\n" +
+        "Dal prossimo inventario in poi calcolerò venduto periodo e ammanco.\n\n" +
+        "Vuoi procedere?"
+    );
+    if (!ok) return;
+  }
+
+  setProgressiviLoading(true);
+  setProgressiviError(null);
+  setProgressiviMsg(null);
+
+  try {
+    const fd = new FormData();
+    fd.append("file", progressiviFile);
+    fd.append("pv_id", progressiviTarget.pv_id);
+    fd.append("inventory_date", progressiviTarget.inventory_date);
+
+    // ✅ NUOVO: header_id (PRIMA COSA IMPORTANTE)
+    fd.append(
+      "inventory_header_id",
+      progressiviTarget.header_id || progressiviTarget.id || ""
+    );
+
+    const res = await fetch("/api/inventories/progressivi/upload", {
+      method: "POST",
+      body: fd,
+    });
+
+    const text = await res.text().catch(() => "");
+    let json: any = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = null;
+    }
+
+    if (!res.ok || !json?.ok) {
+      throw new Error(json?.error || text || `Errore upload (HTTP ${res.status})`);
+    }
+
+    setProgressiviMsg(`Progressivi caricati. Righe importate: ${json.rows ?? "?"}`);
+  } catch (e: any) {
+    setProgressiviError(e?.message || "Errore upload progressivi");
+  } finally {
+    setProgressiviLoading(false);
+  }
+}
 
   const [actionsOpenKey, setActionsOpenKey] = useState<string | null>(null);
   const [menuPos, setMenuPos] = useState<MenuPos | null>(null);
