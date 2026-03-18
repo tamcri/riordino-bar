@@ -151,21 +151,21 @@ export async function POST(req: Request) {
     const requestedData = String(body.data ?? "").trim();
     const requestedOperatore = String(body.operatore ?? "").trim();
     const rawTotVersato = toNumber(body.tot_versato);
-    const isClosingNow = rawTotVersato !== null;
-    const status = normalizeStatus(body.status, isClosingNow);
-    const isBozza = status === "bozza";
+    const isClosingNow = rawTotVersato !== null && rawTotVersato > 0;
 
-    const data = requestedData || (isBozza ? todayISO() : "");
+    let status = normalizeStatus(body.status, isClosingNow);
+
+    const data = requestedData || (status === "bozza" ? todayISO() : "");
     const operatore = requestedOperatore;
 
-    if (!isBozza && !/^\d{4}-\d{2}-\d{2}$/.test(data)) {
+    if (status !== "bozza" && !/^\d{4}-\d{2}-\d{2}$/.test(data)) {
       return NextResponse.json(
         { ok: false, error: "Data non valida (YYYY-MM-DD)" },
         { status: 400 }
       );
     }
 
-    if (!isBozza && !operatore) {
+    if (status !== "bozza" && !operatore) {
       return NextResponse.json(
         { ok: false, error: "Operatore obbligatorio" },
         { status: 400 }
@@ -190,27 +190,6 @@ export async function POST(req: Request) {
     let parziale_1 = toNumber(body.parziale_1);
     let parziale_2 = toNumber(body.parziale_2);
     let parziale_3 = toNumber(body.parziale_3);
-
-    if (isBozza) {
-      incasso_totale = incasso_totale ?? 0;
-      pagamento_fornitori = pagamento_fornitori ?? 0;
-      gv_pagati = gv_pagati ?? 0;
-      lis_plus = lis_plus ?? 0;
-      mooney = mooney ?? 0;
-      totale_esistenza_cassa = totale_esistenza_cassa ?? 0;
-      vendita_gv = vendita_gv ?? 0;
-      vendita_tabacchi = vendita_tabacchi ?? 0;
-      totale = totale ?? 0;
-      pos = pos ?? 0;
-      spese_extra = spese_extra ?? 0;
-      versamento = versamento ?? 0;
-      da_versare = da_versare ?? 0;
-      tot_versato = tot_versato ?? 0;
-      fondo_cassa = fondo_cassa ?? 0;
-      parziale_1 = parziale_1 ?? 0;
-      parziale_2 = parziale_2 ?? 0;
-      parziale_3 = parziale_3 ?? 0;
-    }
 
     let pv_id: string | null = null;
 
@@ -249,6 +228,33 @@ export async function POST(req: Request) {
 
     if (existingErr) {
       return NextResponse.json({ ok: false, error: existingErr.message }, { status: 500 });
+    }
+
+    if (existing && String(existing.status ?? "").trim().toLowerCase() === "bozza" && !isClosingNow) {
+      status = "bozza";
+    }
+
+    const isBozza = status === "bozza";
+
+    if (isBozza) {
+      incasso_totale = incasso_totale ?? 0;
+      pagamento_fornitori = pagamento_fornitori ?? 0;
+      gv_pagati = gv_pagati ?? 0;
+      lis_plus = lis_plus ?? 0;
+      mooney = mooney ?? 0;
+      totale_esistenza_cassa = totale_esistenza_cassa ?? 0;
+      vendita_gv = vendita_gv ?? 0;
+      vendita_tabacchi = vendita_tabacchi ?? 0;
+      totale = totale ?? 0;
+      pos = pos ?? 0;
+      spese_extra = spese_extra ?? 0;
+      versamento = versamento ?? 0;
+      da_versare = da_versare ?? 0;
+      tot_versato = null;
+      fondo_cassa = fondo_cassa ?? 0;
+      parziale_1 = parziale_1 ?? 0;
+      parziale_2 = parziale_2 ?? 0;
+      parziale_3 = parziale_3 ?? 0;
     }
 
     if (!isBozza) {
@@ -310,7 +316,7 @@ export async function POST(req: Request) {
       const payload = {
         pv_id,
         data,
-        operatore: isBozza ? operatore : operatore || "",
+        operatore: operatore || "",
         incasso_totale,
         pagamento_fornitori,
         gv_pagati,
@@ -392,7 +398,7 @@ export async function POST(req: Request) {
 
     if (!isVersatoOnlyUpdate) {
       const payload = {
-        operatore: isBozza ? operatore : operatore || "",
+        operatore: operatore || "",
         incasso_totale,
         pagamento_fornitori,
         gv_pagati,
