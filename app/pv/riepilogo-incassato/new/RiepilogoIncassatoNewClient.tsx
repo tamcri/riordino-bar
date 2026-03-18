@@ -612,6 +612,42 @@ export default function RiepilogoIncassatoNewClient() {
       </div>
 
       <div className="rounded-2xl border bg-white p-6 shadow-sm">
+        <h2 className="mb-4 text-lg font-semibold">Calcoli</h2>
+
+        <div className="grid gap-4 md:grid-cols-3">
+          <InputField label="Totale" value={totale} disabled />
+
+          <InputField
+            label="POS"
+            value={pos}
+            inputValue={posInput}
+            setInputValue={setPosInput}
+            setValue={setPos}
+          />
+
+          <InputField
+            label="Prelievo"
+            value={speseExtra}
+            inputValue={speseExtraInput}
+            setInputValue={setSpeseExtraInput}
+            setValue={setSpeseExtra}
+          />
+
+          <InputField label="Versamento" value={versamento} disabled />
+
+          <InputField label="Da Versare" value={daVersare} disabled />
+
+          <InputField
+            label="Tot. Versato"
+            value={totVersato}
+            inputValue={totVersatoInput}
+            setInputValue={setTotVersatoInput}
+            setValue={setTotVersato}
+          />
+        </div>
+      </div>
+
+      <div className="rounded-2xl border bg-white p-6 shadow-sm">
         <h2 className="mb-4 text-lg font-semibold">Fondo Cassa</h2>
 
         {fondoInizialeMsg && (
@@ -677,42 +713,6 @@ export default function RiepilogoIncassatoNewClient() {
               Confronto tra Fondo Cassa Iniziale e Fondo Cassa finale.
             </div>
           </div>
-        </div>
-      </div>
-
-      <div className="rounded-2xl border bg-white p-6 shadow-sm">
-        <h2 className="mb-4 text-lg font-semibold">Calcoli</h2>
-
-        <div className="grid gap-4 md:grid-cols-3">
-          <InputField label="Totale" value={totale} disabled />
-
-          <InputField
-            label="POS"
-            value={pos}
-            inputValue={posInput}
-            setInputValue={setPosInput}
-            setValue={setPos}
-          />
-
-          <InputField
-            label="Spese Extra"
-            value={speseExtra}
-            inputValue={speseExtraInput}
-            setInputValue={setSpeseExtraInput}
-            setValue={setSpeseExtra}
-          />
-
-          <InputField label="Versamento" value={versamento} disabled />
-
-          <InputField label="Da Versare" value={daVersare} disabled />
-
-          <InputField
-            label="Tot. Versato"
-            value={totVersato}
-            inputValue={totVersatoInput}
-            setInputValue={setTotVersatoInput}
-            setValue={setTotVersato}
-          />
         </div>
       </div>
 
@@ -842,7 +842,6 @@ export default function RiepilogoIncassatoNewClient() {
     </div>
   );
 }
-
 function ReadOnlyField({
   label,
   value,
