@@ -78,6 +78,10 @@ export default function ProgressiviReportTable({
           .print-table td {
             padding: 6px !important;
           }
+
+          .recount-row {
+            background: #fef3c7 !important;
+          }
         }
       `}</style>
 
@@ -93,8 +97,8 @@ export default function ProgressiviReportTable({
               </span>
             </div>
             <div className="mt-1 text-xs text-gray-500">
-              Inventario corrente: {formatDateIT(data.current_header.inventory_date)} ·
-              {" "}Inventario precedente: {formatDateIT(data.previous_header?.inventory_date)}
+              Inventario corrente: {formatDateIT(data.current_header.inventory_date)} ·{" "}
+              Inventario precedente: {formatDateIT(data.previous_header?.inventory_date)}
             </div>
           </div>
 
@@ -164,29 +168,49 @@ export default function ProgressiviReportTable({
           </thead>
 
           <tbody>
-            {data.rows.map((row) => (
-              <tr key={row.item_code} className="odd:bg-white even:bg-gray-50">
-                <td className="border-b border-r p-3 font-mono">{row.item_code}</td>
-                <td className="border-b border-r p-3">{row.description || "—"}</td>
-                <td className="border-b border-r p-3">{row.um || "—"}</td>
-                <td className="border-b border-r p-3 text-right">{formatEur(row.prezzo_vendita_eur)}</td>
+            {data.rows.map((row) => {
+              const isRecounted = Boolean((row as any).is_recounted);
 
-                <td className="border-b border-r p-3 text-right">{formatNum(row.previous.inventario)}</td>
-                <td className="border-b border-r p-3 text-right">{formatNum(row.previous.giacenza_da_gestionale)}</td>
-                <td className="border-b border-r p-3 text-right">{formatNum(row.previous.carico_non_registrato)}</td>
-                <td className="border-b border-r p-3 text-right font-medium">{formatNum(row.previous.giacenza)}</td>
-                <td className="border-b border-r p-3 text-right">{formatEur(row.previous.valore_giacenza)}</td>
+              return (
+                <tr
+                  key={row.item_code}
+                  className={
+                    isRecounted
+                      ? "recount-row"
+                      : "odd:bg-white even:bg-gray-50"
+                  }
+                >
+                  <td className="border-b border-r p-3 font-mono">{row.item_code}</td>
+                  <td className="border-b border-r p-3">
+                    <div className="flex items-center gap-2">
+                      <span>{row.description || "—"}</span>
+                      {isRecounted ? (
+                        <span className="inline-flex items-center rounded-full bg-yellow-200 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-yellow-900 print:bg-yellow-200">
+                          Riconta
+                        </span>
+                      ) : null}
+                    </div>
+                  </td>
+                  <td className="border-b border-r p-3">{row.um || "—"}</td>
+                  <td className="border-b border-r p-3 text-right">{formatEur(row.prezzo_vendita_eur)}</td>
 
-                <td className="border-b border-r p-3 text-right">{formatNum(row.current.inventario)}</td>
-                <td className="border-b border-r p-3 text-right">{formatNum(row.current.giacenza_da_gestionale)}</td>
-                <td className="border-b border-r p-3 text-right">{formatNum(row.current.carico_non_registrato)}</td>
-                <td className="border-b border-r p-3 text-right font-medium">{formatNum(row.current.giacenza)}</td>
-                <td className="border-b border-r p-3 text-right">{formatEur(row.current.valore_giacenza)}</td>
+                  <td className="border-b border-r p-3 text-right">{formatNum(row.previous.inventario)}</td>
+                  <td className="border-b border-r p-3 text-right">{formatNum(row.previous.giacenza_da_gestionale)}</td>
+                  <td className="border-b border-r p-3 text-right">{formatNum(row.previous.carico_non_registrato)}</td>
+                  <td className="border-b border-r p-3 text-right font-medium">{formatNum(row.previous.giacenza)}</td>
+                  <td className="border-b border-r p-3 text-right">{formatEur(row.previous.valore_giacenza)}</td>
 
-                <td className="border-b border-r p-3 text-right font-semibold">{formatNum(row.riscontro.differenza)}</td>
-                <td className="border-b p-3 text-right font-semibold">{formatEur(row.riscontro.valore_differenza)}</td>
-              </tr>
-            ))}
+                  <td className="border-b border-r p-3 text-right">{formatNum(row.current.inventario)}</td>
+                  <td className="border-b border-r p-3 text-right">{formatNum(row.current.giacenza_da_gestionale)}</td>
+                  <td className="border-b border-r p-3 text-right">{formatNum(row.current.carico_non_registrato)}</td>
+                  <td className="border-b border-r p-3 text-right font-medium">{formatNum(row.current.giacenza)}</td>
+                  <td className="border-b border-r p-3 text-right">{formatEur(row.current.valore_giacenza)}</td>
+
+                  <td className="border-b border-r p-3 text-right font-semibold">{formatNum(row.riscontro.differenza)}</td>
+                  <td className="border-b p-3 text-right font-semibold">{formatEur(row.riscontro.valore_differenza)}</td>
+                </tr>
+              );
+            })}
           </tbody>
 
           <tfoot>

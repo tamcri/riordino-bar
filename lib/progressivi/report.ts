@@ -30,6 +30,7 @@ export type ProgressiviBlockRow = {
   description: string;
   um: string | null;
   prezzo_vendita_eur: number;
+  is_recounted?: boolean;
   previous: {
     inventario: number;
     giacenza_da_gestionale: number;
@@ -714,6 +715,10 @@ function snapshotRowToBlockRow(row: ProgressiviSnapshotRow): ProgressiviBlockRow
     description: row.description,
     um: row.um,
     prezzo_vendita_eur: round2(toNum(row.prezzo_vendita_eur)),
+
+    // ✅ QUESTA È LA CHIAVE
+    is_recounted: Boolean((row as any).is_recounted),
+
     previous: {
       inventario: normalizeQty(toNum(row.previous_inventario)),
       giacenza_da_gestionale: normalizeQty(toExactDecimal(row.previous_gestionale)),
