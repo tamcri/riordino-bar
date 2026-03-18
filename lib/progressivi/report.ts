@@ -1111,23 +1111,7 @@ export async function getProgressiviReportData(
         a.item_code.localeCompare(b.item_code, "it")
       );
 
-      const replacedRows = await replaceProgressiviSnapshotRows({
-        report_header_id: existingSnapshot.id,
-        rows: mergedRows.map((row) =>
-          blockRowToSnapshotInput(
-            row,
-            recountedCurrentCodes.has(normCodeCompact(row.item_code)),
-            recountedCurrentCodes.has(normCodeCompact(row.item_code))
-              ? live.currentHeader.id
-              : null
-          )
-        ),
-      });
-
-      finalRows =
-        replacedRows.length > 0
-          ? replacedRows.map(snapshotRowToBlockRow)
-          : mergedRows;
+      finalRows = mergedRows;
     }
   }
 
