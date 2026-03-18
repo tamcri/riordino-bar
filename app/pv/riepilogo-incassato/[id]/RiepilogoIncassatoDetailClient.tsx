@@ -10,6 +10,8 @@ type SupplierPayment = {
   amount: number;
 };
 
+type SummaryStatus = "bozza" | "completato" | "chiuso";
+
 type SummaryResponse = {
   ok: boolean;
   summary?: {
@@ -46,8 +48,6 @@ type SummaryResponse = {
   error?: string;
 };
 
-type SummaryStatus = "bozza" | "completato" | "chiuso";
-
 function n(value: number | null | undefined) {
   return value ?? 0;
 }
@@ -81,15 +81,13 @@ function normalizeStatus(status: string | null | undefined, isClosed: boolean): 
   return isClosed ? "chiuso" : "bozza";
 }
 
-function computeFondoDeltaPercent(initial: number | null | undefined, current: number | null | undefined) {
-  const i = Number(initial);
-  const c = Number(current);
-
-  if (!Number.isFinite(i) || !Number.isFinite(c) || i === 0) return null;
-  return roundMoney(((c - i) / i) * 100);
+function computeDeltaPercent(initial: number | null, current: number | null) {
+  if (initial === null || current === null) return null;
+  if (!Number.isFinite(initial) || !Number.isFinite(current) || initial === 0) return null;
+  return roundMoney(((current - initial) / initial) * 100);
 }
 
-function formatPercent(value: number | null) {
+function formatPercentLabel(value: number | null) {
   if (value === null || !Number.isFinite(value)) return "—";
   const sign = value > 0 ? "+" : "";
   return `${sign}${value.toLocaleString("it-IT", {
@@ -99,15 +97,9 @@ function formatPercent(value: number | null) {
 }
 
 function statusLabel(status: SummaryStatus) {
-  switch (status) {
-    case "chiuso":
-      return "Chiuso";
-    case "completato":
-      return "Completato";
-    case "bozza":
-    default:
-      return "Bozza";
-  }
+  if (status === "chiuso") return "Chiuso";
+  if (status === "completato") return "Completato";
+  return "Bozza";
 }
 
 export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
@@ -140,7 +132,8 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
   const [isClosed, setIsClosed] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  const isEditable = !viewMode && !isClosed;
+  const canEditMainFields = !viewMode && !isClosed && status === "bozza";
+  const canEditTotVersato = !viewMode && !isClosed && status !== "bozza";
 
   const pagamentoFornitori = useMemo(
     () => roundMoney(supplierPayments.reduce((sum, s) => sum + s.amount, 0)),
@@ -160,8 +153,8 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
       : versamento - n(totVersato)
   );
 
-  const fondoDeltaPercent = useMemo(() => {
-    return computeFondoDeltaPercent(fondoCassaIniziale, fondoCassa);
+  const deltaFondoCassaPercent = useMemo(() => {
+    return computeDeltaPercent(fondoCassaIniziale, fondoCassa);
   }, [fondoCassaIniziale, fondoCassa]);
 
   async function loadDetail() {
@@ -221,10 +214,9 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
   }, [id]);
 
   async function submitWithStatus(nextStatus: "bozza" | "completato") {
-    if (!data) return alert("Data obbligatoria");
-    if (!operatore.trim()) return alert("Operatore obbligatorio");
-
     if (nextStatus === "completato") {
+      if (!data) return alert("Data obbligatoria");
+      if (!operatore.trim()) return alert("Operatore obbligatorio");
       if (incassoTotale === null) return alert("Incasso Totale obbligatorio");
       if (gvPagati === null) return alert("G&V Pagati obbligatorio");
       if (lisPlus === null) return alert("LIS+ obbligatorio");
@@ -376,8 +368,20 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
         </div>
 
         <div className="grid gap-4 md:grid-cols-3">
-          <ReadOnlyField label="Data" value={data} />
-          <ReadOnlyField label="Operatore" value={operatore} />
+          <EditableField
+            label="Data"
+            value={data}
+            setValue={setData}
+            disabled={!canEditMainFields}
+            type="date"
+          />
+          <EditableField
+            label="Operatore"
+            value={operatore}
+            setValue={setOperatore}
+            disabled={!canEditMainFields}
+            type="text"
+          />
           <ReadOnlyField label="Stato" value={statusLabel(status)} />
         </div>
       </div>
@@ -386,11 +390,11 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
         <h2 className="mb-4 text-lg font-semibold">Esistenza Cassa</h2>
 
         <div className="grid gap-4 md:grid-cols-3">
-          <EditableField label="Incasso Totale" value={incassoTotale} setValue={setIncassoTotale} disabled={!isEditable} />
+          <EditableNumberField label="Incasso Totale" value={incassoTotale} setValue={setIncassoTotale} disabled={!canEditMainFields} />
           <ReadOnlyField label="Pagamento Fornitori" value={formatEuro(pagamentoFornitori)} />
-          <EditableField label="G&V Pagati" value={gvPagati} setValue={setGvPagati} disabled={!isEditable} />
-          <EditableField label="LIS+" value={lisPlus} setValue={setLisPlus} disabled={!isEditable} />
-          <EditableField label="MOONEY" value={mooney} setValue={setMooney} disabled={!isEditable} />
+          <EditableNumberField label="G&V Pagati" value={gvPagati} setValue={setGvPagati} disabled={!canEditMainFields} />
+          <EditableNumberField label="LIS+" value={lisPlus} setValue={setLisPlus} disabled={!canEditMainFields} />
+          <EditableNumberField label="MOONEY" value={mooney} setValue={setMooney} disabled={!canEditMainFields} />
           <ReadOnlyField label="Totale Esistenza Cassa" value={formatEuro(totaleEsistenzaCassa)} />
         </div>
       </div>
@@ -427,41 +431,41 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
       </div>
 
       <div className="rounded-2xl border bg-white p-6 shadow-sm">
-        <h2 className="mb-4 text-lg font-semibold">Fondo Cassa</h2>
-
-        <div className="grid gap-4 md:grid-cols-3">
-          <ReadOnlyField label="Fondo Cassa Iniziale" value={formatEuro(fondoCassaIniziale)} />
-          <EditableField label="Parziale 1" value={parziale1} setValue={setParziale1} disabled={!isEditable} />
-          <EditableField label="Parziale 2" value={parziale2} setValue={setParziale2} disabled={!isEditable} />
-          <EditableField label="Parziale 3" value={parziale3} setValue={setParziale3} disabled={!isEditable} />
-          <EditableField label="Fondo Cassa" value={fondoCassa} setValue={setFondoCassa} disabled={!isEditable} />
-          <ReadOnlyField label="Differenza % Fondo Cassa" value={formatPercent(fondoDeltaPercent)} />
-        </div>
-      </div>
-
-      <div className="rounded-2xl border bg-white p-6 shadow-sm">
         <h2 className="mb-4 text-lg font-semibold">Vendite e Calcoli</h2>
 
         <div className="grid gap-4 md:grid-cols-3">
-          <EditableField label="Vendita G&V" value={venditaGV} setValue={setVenditaGV} disabled={!isEditable} />
-          <EditableField label="Vendita Tabacchi" value={venditaTabacchi} setValue={setVenditaTabacchi} disabled={!isEditable} />
+          <EditableNumberField label="Vendita G&V" value={venditaGV} setValue={setVenditaGV} disabled={!canEditMainFields} />
+          <EditableNumberField label="Vendita Tabacchi" value={venditaTabacchi} setValue={setVenditaTabacchi} disabled={!canEditMainFields} />
           <ReadOnlyField label="Totale" value={formatEuro(totale)} />
-          <EditableField label="POS" value={pos} setValue={setPos} disabled={!isEditable} />
-          <EditableField label="Spese Extra" value={speseExtra} setValue={setSpeseExtra} disabled={!isEditable} />
+          <EditableNumberField label="POS" value={pos} setValue={setPos} disabled={!canEditMainFields} />
+          <EditableNumberField label="Prelievo" value={speseExtra} setValue={setSpeseExtra} disabled={!canEditMainFields} />
           <ReadOnlyField label="Versamento" value={formatEuro(versamento)} />
           <ReadOnlyField label="Da Versare" value={formatEuro(daVersare)} />
-          <EditableField
+          <EditableNumberField
             label="Tot. Versato"
             value={totVersato}
             setValue={setTotVersato}
-            disabled={isClosed || viewMode}
+            disabled={!canEditTotVersato}
           />
         </div>
       </div>
 
-      {!viewMode && (
+      <div className="rounded-2xl border bg-white p-6 shadow-sm">
+        <h2 className="mb-4 text-lg font-semibold">Fondo Cassa</h2>
+
+        <div className="grid gap-4 md:grid-cols-3">
+          <ReadOnlyField label="Fondo Cassa Iniziale" value={formatEuro(fondoCassaIniziale)} />
+          <EditableNumberField label="Parziale 1" value={parziale1} setValue={setParziale1} disabled={!canEditMainFields} />
+          <EditableNumberField label="Parziale 2" value={parziale2} setValue={setParziale2} disabled={!canEditMainFields} />
+          <EditableNumberField label="Parziale 3" value={parziale3} setValue={setParziale3} disabled={!canEditMainFields} />
+          <EditableNumberField label="Fondo Cassa" value={fondoCassa} setValue={setFondoCassa} disabled={!canEditMainFields} />
+          <ReadOnlyField label="Differenza % Fondo Cassa" value={formatPercentLabel(deltaFondoCassaPercent)} />
+        </div>
+      </div>
+
+      {!viewMode && !isClosed && (
         <div className="flex justify-end gap-3">
-          {!isClosed && (
+          {status === "bozza" && (
             <>
               <button
                 onClick={() => submitWithStatus("bozza")}
@@ -480,16 +484,18 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
               >
                 {saving ? "Salvo..." : "Completa"}
               </button>
-
-              <button
-                onClick={salvaTotVersato}
-                disabled={saving}
-                className="rounded-lg bg-green-600 px-6 py-3 font-semibold text-white disabled:opacity-50"
-                type="button"
-              >
-                {saving ? "Salvo..." : "Salva Tot. Versato"}
-              </button>
             </>
+          )}
+
+          {status === "completato" && (
+            <button
+              onClick={salvaTotVersato}
+              disabled={saving}
+              className="rounded-lg bg-green-600 px-6 py-3 font-semibold text-white disabled:opacity-50"
+              type="button"
+            >
+              {saving ? "Salvo..." : "Salva Tot. Versato"}
+            </button>
           )}
         </div>
       )}
@@ -511,6 +517,33 @@ function ReadOnlyField({ label, value }: { label: string; value: string }) {
 }
 
 function EditableField({
+  label,
+  value,
+  setValue,
+  disabled = false,
+  type = "text",
+}: {
+  label: string;
+  value: string;
+  setValue: (v: string) => void;
+  disabled?: boolean;
+  type?: "text" | "date";
+}) {
+  return (
+    <div className="flex flex-col">
+      <label className="mb-1 text-sm text-slate-600">{label}</label>
+      <input
+        type={type}
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        className={`rounded-lg border px-3 py-2 ${disabled ? "bg-slate-100" : ""}`}
+        disabled={disabled}
+      />
+    </div>
+  );
+}
+
+function EditableNumberField({
   label,
   value,
   setValue,

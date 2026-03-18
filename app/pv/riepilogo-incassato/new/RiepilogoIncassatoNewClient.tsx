@@ -373,10 +373,9 @@ export default function RiepilogoIncassatoNewClient() {
   }, []);
 
   async function submitWithStatus(status: "bozza" | "completato") {
-    if (!data) return alert("Data obbligatoria");
-    if (!operatore.trim()) return alert("Operatore obbligatorio");
-
     if (status === "completato") {
+      if (!data) return alert("Data obbligatoria");
+      if (!operatore.trim()) return alert("Operatore obbligatorio");
       if (incassoTotale === null) return alert("Incasso Totale obbligatorio");
       if (gvPagati === null) return alert("G&V Pagati obbligatorio");
       if (lisPlus === null) return alert("LIS+ obbligatorio");
@@ -842,6 +841,7 @@ export default function RiepilogoIncassatoNewClient() {
     </div>
   );
 }
+
 function ReadOnlyField({
   label,
   value,

@@ -39,6 +39,14 @@ type Body = {
 
 const USER_TABLE_CANDIDATES = ["app_user", "app_users", "utenti", "users"];
 
+function todayISO() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
 function isUuid(v: string | null | undefined) {
   if (!v) return false;
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
@@ -140,35 +148,69 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Body non valido" }, { status: 400 });
     }
 
-    const data = String(body.data ?? "").trim();
-    const operatore = String(body.operatore ?? "").trim();
+    const requestedData = String(body.data ?? "").trim();
+    const requestedOperatore = String(body.operatore ?? "").trim();
+    const rawTotVersato = toNumber(body.tot_versato);
+    const isClosingNow = rawTotVersato !== null;
+    const status = normalizeStatus(body.status, isClosingNow);
+    const isBozza = status === "bozza";
 
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) {
-      return NextResponse.json({ ok: false, error: "Data non valida (YYYY-MM-DD)" }, { status: 400 });
+    const data = requestedData || (isBozza ? todayISO() : "");
+    const operatore = requestedOperatore;
+
+    if (!isBozza && !/^\d{4}-\d{2}-\d{2}$/.test(data)) {
+      return NextResponse.json(
+        { ok: false, error: "Data non valida (YYYY-MM-DD)" },
+        { status: 400 }
+      );
     }
 
-    if (!operatore) {
-      return NextResponse.json({ ok: false, error: "Operatore obbligatorio" }, { status: 400 });
+    if (!isBozza && !operatore) {
+      return NextResponse.json(
+        { ok: false, error: "Operatore obbligatorio" },
+        { status: 400 }
+      );
     }
 
-    const incasso_totale = toNumber(body.incasso_totale);
-    const pagamento_fornitori = toNumber(body.pagamento_fornitori) ?? 0;
-    const gv_pagati = toNumber(body.gv_pagati);
-    const lis_plus = toNumber(body.lis_plus);
-    const mooney = toNumber(body.mooney);
-    const totale_esistenza_cassa = toNumber(body.totale_esistenza_cassa);
-    const vendita_gv = toNumber(body.vendita_gv);
-    const vendita_tabacchi = toNumber(body.vendita_tabacchi);
-    const totale = toNumber(body.totale);
-    const pos = toNumber(body.pos);
-    const spese_extra = toNumber(body.spese_extra) ?? 0;
-    const versamento = toNumber(body.versamento);
-    const da_versare = toNumber(body.da_versare);
-    const tot_versato = toNumber(body.tot_versato);
-    const fondo_cassa = toNumber(body.fondo_cassa);
-    const parziale_1 = toNumber(body.parziale_1);
-    const parziale_2 = toNumber(body.parziale_2);
-    const parziale_3 = toNumber(body.parziale_3);
+    let incasso_totale = toNumber(body.incasso_totale);
+    let pagamento_fornitori = toNumber(body.pagamento_fornitori) ?? 0;
+    let gv_pagati = toNumber(body.gv_pagati);
+    let lis_plus = toNumber(body.lis_plus);
+    let mooney = toNumber(body.mooney);
+    let totale_esistenza_cassa = toNumber(body.totale_esistenza_cassa);
+    let vendita_gv = toNumber(body.vendita_gv);
+    let vendita_tabacchi = toNumber(body.vendita_tabacchi);
+    let totale = toNumber(body.totale);
+    let pos = toNumber(body.pos);
+    let spese_extra = toNumber(body.spese_extra) ?? 0;
+    let versamento = toNumber(body.versamento);
+    let da_versare = toNumber(body.da_versare);
+    let tot_versato = rawTotVersato;
+    let fondo_cassa = toNumber(body.fondo_cassa);
+    let parziale_1 = toNumber(body.parziale_1);
+    let parziale_2 = toNumber(body.parziale_2);
+    let parziale_3 = toNumber(body.parziale_3);
+
+    if (isBozza) {
+      incasso_totale = incasso_totale ?? 0;
+      pagamento_fornitori = pagamento_fornitori ?? 0;
+      gv_pagati = gv_pagati ?? 0;
+      lis_plus = lis_plus ?? 0;
+      mooney = mooney ?? 0;
+      totale_esistenza_cassa = totale_esistenza_cassa ?? 0;
+      vendita_gv = vendita_gv ?? 0;
+      vendita_tabacchi = vendita_tabacchi ?? 0;
+      totale = totale ?? 0;
+      pos = pos ?? 0;
+      spese_extra = spese_extra ?? 0;
+      versamento = versamento ?? 0;
+      da_versare = da_versare ?? 0;
+      tot_versato = tot_versato ?? 0;
+      fondo_cassa = fondo_cassa ?? 0;
+      parziale_1 = parziale_1 ?? 0;
+      parziale_2 = parziale_2 ?? 0;
+      parziale_3 = parziale_3 ?? 0;
+    }
 
     let pv_id: string | null = null;
 
@@ -209,10 +251,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: existingErr.message }, { status: 500 });
     }
 
-    const isClosingNow = tot_versato !== null;
-    const status = normalizeStatus(body.status, isClosingNow);
-    const isBozza = status === "bozza";
-
     if (!isBozza) {
       if (incasso_totale === null) {
         return NextResponse.json({ ok: false, error: "Incasso Totale obbligatorio" }, { status: 400 });
@@ -227,7 +265,10 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: false, error: "MOONEY obbligatorio" }, { status: 400 });
       }
       if (totale_esistenza_cassa === null) {
-        return NextResponse.json({ ok: false, error: "Totale Esistenza Cassa obbligatorio" }, { status: 400 });
+        return NextResponse.json(
+          { ok: false, error: "Totale Esistenza Cassa obbligatorio" },
+          { status: 400 }
+        );
       }
       if (vendita_gv === null) {
         return NextResponse.json({ ok: false, error: "Vendita G&V obbligatorio" }, { status: 400 });
@@ -269,7 +310,7 @@ export async function POST(req: Request) {
       const payload = {
         pv_id,
         data,
-        operatore,
+        operatore: isBozza ? operatore : operatore || "",
         incasso_totale,
         pagamento_fornitori,
         gv_pagati,
@@ -351,7 +392,7 @@ export async function POST(req: Request) {
 
     if (!isVersatoOnlyUpdate) {
       const payload = {
-        operatore,
+        operatore: isBozza ? operatore : operatore || "",
         incasso_totale,
         pagamento_fornitori,
         gv_pagati,
