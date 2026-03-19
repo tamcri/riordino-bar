@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 type SupplierPayment = {
@@ -8,6 +8,13 @@ type SupplierPayment = {
   code: string;
   name: string;
   amount: number;
+};
+
+type SupplierSearchRow = {
+  id: string;
+  code: string;
+  name: string;
+  is_active?: boolean;
 };
 
 type SummaryStatus = "bozza" | "completato" | "chiuso";
@@ -62,6 +69,33 @@ function parseMoney(value: string): number | null {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed)) return null;
   return roundMoney(parsed);
+}
+
+function normalizeMoneyInput(value: string) {
+  return value.replace(/\./g, ",");
+}
+
+function sanitizeMoneyTyping(value: string) {
+  let next = value.replace(/\./g, ",");
+  next = next.replace(/[^\d,]/g, "");
+
+  const firstCommaIndex = next.indexOf(",");
+  if (firstCommaIndex !== -1) {
+    const integerPart = next.slice(0, firstCommaIndex + 1);
+    const decimalPart = next
+      .slice(firstCommaIndex + 1)
+      .replace(/,/g, "")
+      .slice(0, 2);
+
+    next = integerPart + decimalPart;
+  }
+
+  return next;
+}
+
+function formatMoneyInput(value: number | null) {
+  if (value === null || !Number.isFinite(value)) return "";
+  return roundMoney(value).toFixed(2).replace(".", ",");
 }
 
 function formatEuro(value: number | null | undefined) {
@@ -132,6 +166,20 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
   const [isClosed, setIsClosed] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  const [showModal, setShowModal] = useState(false);
+  const [supplierCode, setSupplierCode] = useState("");
+  const [supplierName, setSupplierName] = useState("");
+  const [supplierAmount, setSupplierAmount] = useState<number | null>(null);
+  const [supplierAmountInput, setSupplierAmountInput] = useState("");
+  const [supplierSearch, setSupplierSearch] = useState("");
+  const [supplierResults, setSupplierResults] = useState<SupplierSearchRow[]>([]);
+  const [loadingSuppliers, setLoadingSuppliers] = useState(false);
+  const [supplierSearchTouched, setSupplierSearchTouched] = useState(false);
+
+  const supplierSearchInputRef = useRef<HTMLInputElement | null>(null);
+  const supplierAmountInputRef = useRef<HTMLInputElement | null>(null);
+  const searchRequestIdRef = useRef(0);
+
   const canEditMainFields = !viewMode && !isClosed && status === "bozza";
   const canEditTotVersato = !viewMode && !isClosed && status !== "bozza";
 
@@ -156,6 +204,156 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
   const deltaFondoCassaPercent = useMemo(() => {
     return computeDeltaPercent(fondoCassaIniziale, fondoCassa);
   }, [fondoCassaIniziale, fondoCassa]);
+
+  function syncMoneyState(
+    rawValue: string,
+    setInput: (value: string) => void,
+    setNumeric: (value: number | null) => void
+  ) {
+    const sanitized = sanitizeMoneyTyping(rawValue);
+    setInput(sanitized);
+    setNumeric(parseMoney(sanitized));
+  }
+
+  function blurMoneyState(
+    value: number | null,
+    setInput: (value: string) => void
+  ) {
+    setInput(formatMoneyInput(value));
+  }
+
+  function resetSupplierModalState() {
+    setSupplierCode("");
+    setSupplierName("");
+    setSupplierAmount(null);
+    setSupplierAmountInput("");
+    setSupplierSearch("");
+    setSupplierResults([]);
+    setSupplierSearchTouched(false);
+    setLoadingSuppliers(false);
+  }
+
+  function selectSupplier(s: SupplierSearchRow) {
+    setSupplierCode(s.code);
+    setSupplierName(s.name);
+    setSupplierSearch(`${s.code} - ${s.name}`);
+    setSupplierResults([]);
+    setSupplierSearchTouched(true);
+
+    setTimeout(() => {
+      const input = supplierAmountInputRef.current;
+      if (!input) return;
+      input.focus();
+      const len = input.value.length;
+      input.setSelectionRange(len, len);
+    }, 0);
+  }
+
+  function addSupplierPayment() {
+    if (!supplierCode || !supplierName || supplierAmount === null) return;
+
+    const alreadyExists = supplierPayments.some((s) => s.code === supplierCode);
+
+    if (alreadyExists) {
+      alert("Questo fornitore è già stato inserito.");
+      return;
+    }
+
+    const newPayment: SupplierPayment = {
+      id: Date.now(),
+      code: supplierCode,
+      name: supplierName,
+      amount: roundMoney(supplierAmount),
+    };
+
+    setSupplierPayments((prev) => [...prev, newPayment]);
+    resetSupplierModalState();
+    setShowModal(false);
+  }
+
+  function removeSupplier(idToRemove: number) {
+    setSupplierPayments((prev) => prev.filter((s) => s.id !== idToRemove));
+  }
+
+  function updateSupplierAmount(idToUpdate: number, value: string) {
+    const parsed = parseMoney(value) ?? 0;
+
+    setSupplierPayments((prev) =>
+      prev.map((s) =>
+        s.id === idToUpdate
+          ? {
+              ...s,
+              amount: roundMoney(parsed),
+            }
+          : s
+      )
+    );
+  }
+
+  async function runSupplierSearch(q: string, requestId: number) {
+    setLoadingSuppliers(true);
+
+    try {
+      const res = await fetch(`/api/suppliers/search?q=${encodeURIComponent(q)}`, {
+        cache: "no-store",
+      });
+
+      const json = await res.json().catch(() => null);
+
+      if (requestId !== searchRequestIdRef.current) return;
+
+      if (!res.ok || !json?.rows) {
+        setSupplierResults([]);
+        return;
+      }
+
+      const activeOnly = (Array.isArray(json.rows) ? json.rows : []).filter(
+        (row: SupplierSearchRow) => row.is_active !== false
+      );
+
+      setSupplierResults(activeOnly);
+    } catch {
+      if (requestId !== searchRequestIdRef.current) return;
+      setSupplierResults([]);
+    } finally {
+      if (requestId === searchRequestIdRef.current) {
+        setLoadingSuppliers(false);
+      }
+    }
+  }
+
+  useEffect(() => {
+    if (!showModal) return;
+
+    setTimeout(() => {
+      const input = supplierSearchInputRef.current;
+      if (!input) return;
+      input.focus();
+      const len = input.value.length;
+      input.setSelectionRange(len, len);
+    }, 0);
+
+    const q = supplierSearch.trim();
+    setSupplierSearchTouched(true);
+
+    if (q.length < 2) {
+      searchRequestIdRef.current += 1;
+      setSupplierResults([]);
+      setLoadingSuppliers(false);
+      return;
+    }
+
+    const nextRequestId = searchRequestIdRef.current + 1;
+    searchRequestIdRef.current = nextRequestId;
+
+    const timer = window.setTimeout(() => {
+      runSupplierSearch(q, nextRequestId);
+    }, 300);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [supplierSearch, showModal]);
 
   async function loadDetail() {
     setLoading(true);
@@ -400,7 +598,19 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
       </div>
 
       <div className="rounded-2xl border bg-white p-6 shadow-sm">
-        <h2 className="mb-4 text-lg font-semibold">Pagamenti Fornitori</h2>
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold">Pagamenti Fornitori</h2>
+
+          {canEditMainFields && (
+            <button
+              onClick={() => setShowModal(true)}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-white"
+              type="button"
+            >
+              Aggiungi Fornitore
+            </button>
+          )}
+        </div>
 
         <table className="w-full border text-sm">
           <thead className="bg-slate-100">
@@ -408,6 +618,7 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
               <th className="p-2 text-left">Codice</th>
               <th className="p-2 text-left">Ragione Sociale</th>
               <th className="p-2 text-right">Importo</th>
+              {canEditMainFields && <th className="p-2 text-right">Azioni</th>}
             </tr>
           </thead>
           <tbody>
@@ -415,13 +626,39 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
               <tr key={s.id} className="border-t">
                 <td className="p-2">{s.code}</td>
                 <td className="p-2">{s.name}</td>
-                <td className="p-2 text-right">{formatEuro(s.amount)}</td>
+                <td className="p-2">
+                  {canEditMainFields ? (
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      className="w-full rounded border p-2 text-right"
+                      value={formatMoneyInput(s.amount)}
+                      onChange={(e) =>
+                        updateSupplierAmount(s.id, normalizeMoneyInput(e.target.value))
+                      }
+                    />
+                  ) : (
+                    <div className="text-right">{formatEuro(s.amount)}</div>
+                  )}
+                </td>
+
+                {canEditMainFields && (
+                  <td className="p-2 text-right">
+                    <button
+                      onClick={() => removeSupplier(s.id)}
+                      className="text-red-600"
+                      type="button"
+                    >
+                      elimina
+                    </button>
+                  </td>
+                )}
               </tr>
             ))}
 
             {supplierPayments.length === 0 && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={3}>
+                <td className="p-3 text-gray-500" colSpan={canEditMainFields ? 4 : 3}>
                   Nessun pagamento fornitore inserito.
                 </td>
               </tr>
@@ -497,6 +734,110 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
               {saving ? "Salvo..." : "Salva Tot. Versato"}
             </button>
           )}
+        </div>
+      )}
+
+      {showModal && canEditMainFields && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-md space-y-4 rounded-xl bg-white p-6">
+            <h3 className="text-lg font-semibold">Pagamento Fornitore</h3>
+
+            <div className="space-y-2">
+              <input
+                ref={supplierSearchInputRef}
+                placeholder="Cerca fornitore..."
+                className="w-full rounded-lg border p-2"
+                value={supplierSearch}
+                onChange={(e) => setSupplierSearch(e.target.value)}
+              />
+
+              {supplierSearch.trim().length > 0 && supplierSearch.trim().length < 2 && (
+                <div className="text-xs text-slate-500">
+                  Scrivi almeno 2 caratteri.
+                </div>
+              )}
+
+              {loadingSuppliers && (
+                <div className="rounded border bg-slate-50 p-2 text-sm text-slate-500">
+                  Ricerca fornitori in corso...
+                </div>
+              )}
+
+              {!loadingSuppliers &&
+                supplierSearchTouched &&
+                supplierSearch.trim().length >= 2 &&
+                supplierResults.length > 0 && (
+                  <div className="max-h-40 overflow-y-auto rounded border">
+                    {supplierResults.map((s) => (
+                      <button
+                        key={s.id}
+                        type="button"
+                        className="w-full border-b p-2 text-left text-sm hover:bg-gray-100 last:border-b-0"
+                        onClick={() => selectSupplier(s)}
+                      >
+                        {s.code} — {s.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+              {!loadingSuppliers &&
+                supplierSearchTouched &&
+                supplierSearch.trim().length >= 2 &&
+                supplierResults.length === 0 && (
+                  <div className="rounded border bg-slate-50 p-2 text-sm text-slate-500">
+                    Nessun fornitore trovato.
+                  </div>
+                )}
+            </div>
+
+            <input
+              placeholder="Ragione Sociale"
+              className="w-full rounded-lg border bg-slate-50 p-2"
+              value={supplierName}
+              disabled
+            />
+
+            <input
+              ref={supplierAmountInputRef}
+              type="text"
+              inputMode="decimal"
+              placeholder="Importo"
+              className="w-full rounded-lg border p-2"
+              value={supplierAmountInput}
+              onChange={(e) => {
+                syncMoneyState(
+                  e.target.value,
+                  setSupplierAmountInput,
+                  setSupplierAmount
+                );
+              }}
+              onBlur={() => {
+                blurMoneyState(supplierAmount, setSupplierAmountInput);
+              }}
+            />
+
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => {
+                  setShowModal(false);
+                  resetSupplierModalState();
+                }}
+                className="rounded border px-4 py-2"
+                type="button"
+              >
+                Annulla
+              </button>
+
+              <button
+                onClick={addSupplierPayment}
+                className="rounded bg-blue-600 px-4 py-2 text-white"
+                type="button"
+              >
+                Salva
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

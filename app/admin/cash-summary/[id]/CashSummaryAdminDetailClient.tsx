@@ -566,7 +566,7 @@ export default function CashSummaryAdminDetailClient({ id }: { id: string }) {
           />
 
           <EditableNumberField
-            label="Spese Extra"
+            label="Prelievo"
             value={summary.spese_extra ?? null}
             onChange={(value) => setSummary({ ...summary, spese_extra: value })}
             comment={fieldComments.spese_extra ?? ""}
