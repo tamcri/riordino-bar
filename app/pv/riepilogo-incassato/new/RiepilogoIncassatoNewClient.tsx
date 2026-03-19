@@ -388,38 +388,43 @@ export default function RiepilogoIncassatoNewClient() {
 
     setSaving(true);
 
-    try {
-      const res = await fetch("/api/cash-summary/save", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          data,
-          operatore: operatore.trim(),
-          incasso_totale: incassoTotale,
-          pagamento_fornitori: pagamentoFornitori,
-          gv_pagati: gvPagati,
-          lis_plus: lisPlus,
-          mooney,
-          totale_esistenza_cassa: totaleEsistenzaCassa,
-          vendita_gv: venditaGV,
-          vendita_tabacchi: venditaTabacchi,
-          totale,
-          pos,
-          spese_extra: speseExtra ?? 0,
-          versamento,
-          da_versare: daVersare,
-          tot_versato: totVersato,
-          fondo_cassa_iniziale: fondoCassaIniziale,
-          parziale_1: parziale1,
-          parziale_2: parziale2,
-          parziale_3: parziale3,
-          fondo_cassa: fondoCassa,
-          status,
-          fornitori: supplierPayments,
-        }),
-      });
+try {
+  const finalStatus =
+    status === "completato" && totVersato !== null && totVersato > 0
+      ? "chiuso"
+      : status;
+
+  const res = await fetch("/api/cash-summary/save", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      data,
+      operatore: operatore.trim(),
+      incasso_totale: incassoTotale,
+      pagamento_fornitori: pagamentoFornitori,
+      gv_pagati: gvPagati,
+      lis_plus: lisPlus,
+      mooney,
+      totale_esistenza_cassa: totaleEsistenzaCassa,
+      vendita_gv: venditaGV,
+      vendita_tabacchi: venditaTabacchi,
+      totale,
+      pos,
+      spese_extra: speseExtra ?? 0,
+      versamento,
+      da_versare: daVersare,
+      tot_versato: totVersato,
+      fondo_cassa_iniziale: fondoCassaIniziale,
+      parziale_1: parziale1,
+      parziale_2: parziale2,
+      parziale_3: parziale3,
+      fondo_cassa: fondoCassa,
+      status: finalStatus,
+      fornitori: supplierPayments,
+    }),
+  });
 
       const json = await res.json().catch(() => null);
 

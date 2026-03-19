@@ -230,7 +230,16 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: existingErr.message }, { status: 500 });
     }
 
-    if (existing && String(existing.status ?? "").trim().toLowerCase() === "bozza" && !isClosingNow) {
+    // FIX:
+    // se il record esiste già in bozza, lo manteniamo in bozza
+    // SOLO quando il frontend sta chiedendo di salvare ancora come bozza.
+    // Se invece il frontend manda "completato", deve passare davvero a completato.
+    if (
+      existing &&
+      String(existing.status ?? "").trim().toLowerCase() === "bozza" &&
+      String(body.status ?? "").trim().toLowerCase() === "bozza" &&
+      !isClosingNow
+    ) {
       status = "bozza";
     }
 
@@ -394,7 +403,8 @@ export async function POST(req: Request) {
 
     const isVersatoOnlyUpdate =
       tot_versato !== null &&
-      existing.tot_versato === null;
+      tot_versato > 0 &&
+      (existing.tot_versato === null || Number(existing.tot_versato) === 0);
 
     if (!isVersatoOnlyUpdate) {
       const payload = {
