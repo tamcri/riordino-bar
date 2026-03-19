@@ -421,11 +421,31 @@ export async function POST(req: Request) {
         inventory_header_id ? await hasRecountEventsForHeader(inventory_header_id) : false;
 
       if (!hasRecount) {
-        invalidated_report_snapshots = await invalidateProgressiviReportSnapshotsForDate(
-          pv_id,
-          inventory_date
-        );
-      }
+  if (inventory_header_id) {
+    // invalida SOLO questo inventario
+    const { error: deleteRowsErr } = await supabaseAdmin
+      .from("progressivi_report_rows")
+      .delete()
+      .eq("report_header_id", inventory_header_id);
+
+    const { error: deleteHeaderErr } = await supabaseAdmin
+      .from("progressivi_report_headers")
+      .delete()
+      .eq("current_header_id", inventory_header_id);
+
+    if (deleteRowsErr || deleteHeaderErr) {
+      throw new Error("Errore invalidazione snapshot specifico");
+    }
+
+    invalidated_report_snapshots = 1;
+  } else {
+    // fallback legacy (se manca header_id)
+    invalidated_report_snapshots = await invalidateProgressiviReportSnapshotsForDate(
+      pv_id,
+      inventory_date
+    );
+  }
+}
     } catch (e: any) {
       console.error("[progressivi/upload] snapshot invalidate error", e);
       return NextResponse.json(

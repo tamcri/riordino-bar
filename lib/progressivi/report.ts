@@ -476,21 +476,37 @@ async function loadProgressiviRows(
 ): Promise<ProgressivoNormalizedRow[]> {
   const headerId = String(input.headerId ?? "").trim();
 
-  let q = supabaseAdmin
-    .from("inventory_progressivi_rows")
-    .select("item_code, giacenza_qta1_fiscale");
+  let data: ProgressivoRowRaw[] | null = null;
 
+  // 🔵 PRIMO TENTATIVO: per header_id
   if (isUuid(headerId)) {
-    q = q.eq("inventory_header_id", headerId);
-  } else {
-    q = q.eq("pv_id", input.pvId).eq("inventory_date", input.inventoryDate);
+    const { data: dataByHeader, error } = await supabaseAdmin
+      .from("inventory_progressivi_rows")
+      .select("item_code, giacenza_qta1_fiscale")
+      .eq("inventory_header_id", headerId);
+
+    if (error) throw error;
+
+    // ✅ se trovi righe → usa queste
+    if (dataByHeader && dataByHeader.length > 0) {
+      data = dataByHeader;
+    }
   }
 
-  const { data, error } = await q;
+  // 🟡 FALLBACK: legacy (pv_id + inventory_date)
+  if (!data || data.length === 0) {
+    const { data: dataLegacy, error } = await supabaseAdmin
+      .from("inventory_progressivi_rows")
+      .select("item_code, giacenza_qta1_fiscale")
+      .eq("pv_id", input.pvId)
+      .eq("inventory_date", input.inventoryDate);
 
-  if (error) throw error;
+    if (error) throw error;
 
-  return ((data ?? []) as ProgressivoRowRaw[])
+    data = dataLegacy ?? [];
+  }
+
+  return (data as ProgressivoRowRaw[])
     .map((row) => ({
       raw_code: String(row.item_code ?? "").trim(),
       normalized_code_legacy: normCode(row.item_code),
