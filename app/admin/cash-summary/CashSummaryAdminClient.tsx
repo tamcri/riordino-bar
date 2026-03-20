@@ -1,11 +1,13 @@
 "use client";
-
-import { useEffect, useMemo, useState } from "react";
 import {
-  BarChart,
-  Bar,
+  generateCashSummaryDataReport,
+  type CashSummaryDataReportRow,
+} from "@/lib/cash-summary-report-data";
+import { useEffect, useMemo, useRef, useState } from "react";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+import {
   CartesianGrid,
-  Cell,
   Legend,
   Line,
   LineChart,
@@ -76,6 +78,13 @@ type MetricOption = {
   label: string;
 };
 
+type ComparisonSeriesMeta = {
+  pv_id: string;
+  pv_code: string;
+  pv_label: string;
+  color: string;
+};
+
 const METRIC_OPTIONS: MetricOption[] = [
   { key: "incasso_totale", label: "Incasso Totale" },
   { key: "gv_pagati", label: "Pagati G&V" },
@@ -93,6 +102,21 @@ const METRIC_COLORS: Record<MetricKey, string> = {
   lis_plus: "#ea580c",
   mooney: "#ca8a04",
 };
+
+const PV_COMPARE_LINE_COLORS = [
+  "#2563eb",
+  "#16a34a",
+  "#dc2626",
+  "#9333ea",
+  "#ea580c",
+  "#0891b2",
+  "#ca8a04",
+  "#be185d",
+  "#4f46e5",
+  "#0f766e",
+  "#7c3aed",
+  "#1d4ed8",
+];
 
 function todayISO() {
   const d = new Date();
@@ -152,6 +176,13 @@ function formatShortDate(value: string) {
   const [yyyy, mm, dd] = value.split("-");
   if (!yyyy || !mm || !dd) return value;
   return `${dd}/${mm}`;
+}
+
+function formatLongDate(value: string) {
+  if (!value) return "";
+  const [yyyy, mm, dd] = value.split("-");
+  if (!yyyy || !mm || !dd) return value;
+  return `${dd}/${mm}/${yyyy}`;
 }
 
 function renderSaldoLabel(value: number) {
@@ -215,6 +246,57 @@ function TooltipValue({ active, payload, label }: any) {
   );
 }
 
+function ComparisonTooltip({
+  active,
+  payload,
+  label,
+  seriesMap,
+}: {
+  active?: boolean;
+  payload?: Array<any>;
+  label?: string;
+  seriesMap: Record<string, ComparisonSeriesMeta>;
+}) {
+  if (!active || !payload?.length) return null;
+
+  const sortedPayload = [...payload]
+    .filter((entry) => Number.isFinite(Number(entry?.value)))
+    .sort((a, b) => Number(b?.value ?? 0) - Number(a?.value ?? 0));
+
+  if (sortedPayload.length === 0) return null;
+
+  return (
+    <div className="min-w-[220px] rounded-xl border bg-white p-3 text-sm shadow-lg">
+      <div className="border-b pb-2 font-semibold text-slate-900">
+        {formatLongDate(String(label ?? ""))}
+      </div>
+
+      <div className="mt-2 space-y-1.5">
+        {sortedPayload.map((entry, index) => {
+          const meta = seriesMap[String(entry.dataKey)] ?? null;
+          return (
+            <div
+              key={`${entry?.dataKey ?? "series"}-${index}`}
+              className="flex items-center justify-between gap-3"
+            >
+              <div className="flex min-w-0 items-center gap-2 text-slate-700">
+                <span
+                  className="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
+                  style={{ backgroundColor: meta?.color ?? "#64748b" }}
+                />
+                <span className="truncate">{meta?.pv_label ?? entry?.name ?? "PV"}</span>
+              </div>
+              <span className="shrink-0 font-semibold text-slate-900">
+                {formatEuro(Number(entry?.value ?? 0))}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function computePercentDifference(initialValue: number | null, finalValue: number | null) {
   const initial = Number(initialValue);
   const final = Number(finalValue);
@@ -235,7 +317,107 @@ function formatPercent(value: number | null) {
   })}%`;
 }
 
+function fallbackColorFromString(value: string) {
+  let hash = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    hash = value.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return PV_COMPARE_LINE_COLORS[Math.abs(hash) % PV_COMPARE_LINE_COLORS.length];
+}
+
+function drawKpiBox(pdf: jsPDF, x: number, y: number, w: number, h: number, title: string, value: string, note?: string) {
+  pdf.setDrawColor(203, 213, 225);
+  pdf.setFillColor(248, 250, 252);
+  pdf.roundedRect(x, y, w, h, 2, 2, "FD");
+
+  pdf.setFont("helvetica", "normal");
+  pdf.setFontSize(9);
+  pdf.setTextColor(100, 116, 139);
+  pdf.text(title, x + 3, y + 5);
+
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(11);
+  pdf.setTextColor(15, 23, 42);
+  pdf.text(value, x + 3, y + 12);
+
+  if (note) {
+    pdf.setFont("helvetica", "normal");
+    pdf.setFontSize(8);
+    pdf.setTextColor(71, 85, 105);
+    const lines = pdf.splitTextToSize(note, w - 6);
+    pdf.text(lines, x + 3, y + 17);
+  }
+}
+
+function drawSimpleLineChart(
+  pdf: jsPDF,
+  rows: Array<{ date: string; value: number }>,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  colorHex: string,
+  metricTitle: string
+) {
+  pdf.setDrawColor(203, 213, 225);
+  pdf.setFillColor(255, 255, 255);
+  pdf.roundedRect(x, y, w, h, 2, 2, "FD");
+
+
+  if (rows.length === 0) {
+    pdf.setFont("helvetica", "normal");
+    pdf.setFontSize(10);
+    pdf.setTextColor(100, 116, 139);
+    pdf.text("Nessun dato disponibile", x + 3, y + 15);
+    return;
+  }
+
+  const plotX = x + 8;
+  const plotY = y + 8;
+  const plotW = w - 12;
+  const plotH = h - 14;
+
+  const values = rows.map((row) => row.value);
+  const max = Math.max(...values);
+  const min = Math.min(...values);
+  const range = max - min || 1;
+
+  pdf.setDrawColor(226, 232, 240);
+  for (let i = 0; i <= 4; i += 1) {
+    const gy = plotY + (plotH / 4) * i;
+    pdf.line(plotX, gy, plotX + plotW, gy);
+  }
+  pdf.line(plotX, plotY, plotX, plotY + plotH);
+  pdf.line(plotX, plotY + plotH, plotX + plotW, plotY + plotH);
+
+  const rgb = colorHex.replace("#", "");
+  const r = parseInt(rgb.substring(0, 2), 16);
+  const g = parseInt(rgb.substring(2, 4), 16);
+  const b = parseInt(rgb.substring(4, 6), 16);
+
+  pdf.setDrawColor(r, g, b);
+  pdf.setLineWidth(0.8);
+
+  let prevX = 0;
+  let prevY = 0;
+  rows.forEach((row, index) => {
+    const px = plotX + (rows.length === 1 ? plotW / 2 : (plotW / (rows.length - 1)) * index);
+    const py = plotY + plotH - ((row.value - min) / range) * plotH;
+
+    if (index > 0) {
+      pdf.line(prevX, prevY, px, py);
+    }
+
+    pdf.setFillColor(r, g, b);
+    pdf.circle(px, py, 0.9, "F");
+    prevX = px;
+    prevY = py;
+  });
+}
+
 export default function CashSummaryAdminClient() {
+  const reportChartRef = useRef<HTMLDivElement | null>(null);
+
   const [pvs, setPvs] = useState<PV[]>([]);
   const [pvId, setPvId] = useState("");
   const [dateFrom, setDateFrom] = useState("");
@@ -253,6 +435,10 @@ export default function CashSummaryAdminClient() {
   const [detailFilter, setDetailFilter] = useState<"all" | "check">("all");
 
   const [selectedComparePvIds, setSelectedComparePvIds] = useState<string[]>([]);
+  const [activeComparePvId, setActiveComparePvId] = useState<string | null>(null);
+
+  const [showBalanceBlock, setShowBalanceBlock] = useState(false);
+  const [showFondoBlock, setShowFondoBlock] = useState(false);
 
   const [balancePvId, setBalancePvId] = useState("");
   const [balanceStartDate, setBalanceStartDate] = useState("2026-02-28");
@@ -627,6 +813,14 @@ export default function CashSummaryAdminClient() {
     loadChartFondoInitial(pvId);
   }, [pvId]);
 
+  const compareColorByPvId = useMemo(() => {
+    const map: Record<string, string> = {};
+    pvs.forEach((pv, index) => {
+      map[pv.id] = PV_COMPARE_LINE_COLORS[index % PV_COMPARE_LINE_COLORS.length];
+    });
+    return map;
+  }, [pvs]);
+
   const computedRows = useMemo<ViewRow[]>(() => {
     const sorted = [...rows].sort((a, b) => {
       if (a.pv_id !== b.pv_id) return a.pv_id.localeCompare(b.pv_id);
@@ -724,6 +918,16 @@ export default function CashSummaryAdminClient() {
     };
   }, [computedRows, metric]);
 
+  const bestRow = useMemo(() => {
+    if (chartData.rows.length === 0) return null;
+    return [...chartData.rows].sort((a, b) => b.value - a.value)[0];
+  }, [chartData.rows]);
+
+  const worstRow = useMemo(() => {
+    if (chartData.rows.length === 0) return null;
+    return [...chartData.rows].sort((a, b) => a.value - b.value)[0];
+  }, [chartData.rows]);
+
   const latestFilteredPvRow = useMemo(() => {
     if (!pvId) return null;
 
@@ -778,14 +982,50 @@ export default function CashSummaryAdminClient() {
   }, [computedRows, metric, selectedComparePvIds]);
 
   const comparisonChartData = useMemo(() => {
-    const metricColor = METRIC_COLORS[metric];
+    const filteredRows =
+      selectedComparePvIds.length > 0
+        ? computedRows.filter((row) => selectedComparePvIds.includes(row.pv_id))
+        : computedRows;
 
-    return compareByPv.map((row) => ({
-      name: row.pv_code,
-      totale: row.total,
-      fill: row.total < 0 ? "#dc2626" : metricColor,
+    const grouped = new Map<string, Record<string, number | string>>();
+
+    filteredRows
+      .slice()
+      .sort((a, b) => a.data.localeCompare(b.data))
+      .forEach((row) => {
+        const current = grouped.get(row.data) ?? {
+          date: row.data,
+          label: formatShortDate(row.data),
+        };
+
+        current[row.pv_id] = n(current[row.pv_id]) + metricValue(row, metric);
+        grouped.set(row.data, current);
+      });
+
+    const rows = Array.from(grouped.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([, value]) => value);
+
+    const series = compareByPv.map((row) => ({
+      pv_id: row.pv_id,
+      pv_code: row.pv_code,
+      pv_label: row.pv_label,
+      color: compareColorByPvId[row.pv_id] ?? fallbackColorFromString(row.pv_id),
     }));
-  }, [compareByPv, metric]);
+
+    return {
+      rows,
+      series,
+    };
+  }, [compareByPv, compareColorByPvId, computedRows, metric, selectedComparePvIds]);
+
+  const comparisonSeriesMap = useMemo(() => {
+    const map: Record<string, ComparisonSeriesMeta> = {};
+    comparisonChartData.series.forEach((series) => {
+      map[series.pv_id] = series;
+    });
+    return map;
+  }, [comparisonChartData.series]);
 
   const detailRows = useMemo(() => {
     return [...computedRows]
@@ -832,6 +1072,256 @@ export default function CashSummaryAdminClient() {
     return counts;
   }, [computedRows]);
 
+    function handleGenerateDataReport() {
+    try {
+      const rowsForReport = computedRows.map((row) => ({
+        data: row.data,
+        pv_label: row.pv_label,
+        operatore: row.operatore,
+        incasso_totale: Number(row.incasso_totale || 0),
+        gv_pagati: Number(row.gv_pagati || 0),
+        lis_plus: Number(row.lis_plus || 0),
+        mooney: Number(row.mooney || 0),
+        vendita_gv: Number(row.vendita_gv || 0),
+        vendita_tabacchi: Number(row.vendita_tabacchi || 0),
+        saldo_giorno: Number(row.saldo_giorno || 0),
+        progressivo_da_versare: Number(row.progressivo_da_versare || 0),
+        fondo_cassa: Number(row.fondo_cassa || 0),
+      }));
+
+      const selectedPvRow = pvs.find((pv) => pv.id === pvId);
+      const selectedPvLabel = selectedPvRow
+        ? `${selectedPvRow.code} — ${selectedPvRow.name}`
+        : "Tutti i PV";
+
+      generateCashSummaryDataReport({
+        rows: rowsForReport,
+        pvLabel: selectedPvLabel,
+        dateFrom,
+        dateTo,
+      });
+
+      setMsg("Report dati generato correttamente.");
+    } catch (error) {
+      console.error("REPORT DATI ERROR:", error);
+      setMsg("Errore durante la generazione del report dati.");
+    }
+  }
+
+  async function handleGenerateReport() {
+    if (chartData.rows.length === 0) {
+      setMsg("Nessun dato disponibile per generare il report.");
+      return;
+    }
+
+    try {
+      setMsg(null);
+
+      const pdf = new jsPDF({ orientation: "p", unit: "mm", format: "a4" });
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const margin = 12;
+      const contentWidth = pageWidth - margin * 2;
+
+      const selectedPvRow = pvs.find((pv) => pv.id === pvId);
+      const selectedPv = selectedPvRow
+        ? `${selectedPvRow.code} — ${selectedPvRow.name}`
+        : "Tutti i PV";
+
+      const periodLabel = `${dateFrom ? formatLongDate(dateFrom) : "inizio"} - ${
+        dateTo ? formatLongDate(dateTo) : "oggi"
+      }`;
+
+      const sortedRows = [...chartData.rows].sort((a, b) => a.date.localeCompare(b.date));
+      const firstValue = sortedRows[0]?.value ?? null;
+      const lastValue = sortedRows[sortedRows.length - 1]?.value ?? null;
+      const trendPercent = computePercentDifference(firstValue, lastValue);
+      const trendLabel =
+        trendPercent === null
+          ? "Non disponibile"
+          : trendPercent > 3
+            ? "In crescita"
+            : trendPercent < -3
+              ? "In calo"
+              : "Stabile";
+      const aboveAverageDays = sortedRows.filter((row) => row.value > chartData.average).length;
+      const belowAverageDays = sortedRows.filter((row) => row.value < chartData.average).length;
+      const generatedAt = new Date().toLocaleString("it-IT");
+
+      let y = 14;
+
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(17);
+      pdf.setTextColor(15, 23, 42);
+      pdf.text("Report Analitico Riepiloghi Incassato", margin, y);
+
+      y += 8;
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(10);
+      pdf.setTextColor(71, 85, 105);
+      pdf.text(`PV: ${selectedPv}`, margin, y);
+      y += 5;
+      pdf.text(`Periodo: ${periodLabel}`, margin, y);
+      y += 5;
+      pdf.text(`Metrica: ${metricLabel(metric)}`, margin, y);
+      y += 5;
+      pdf.text(`Generato il: ${generatedAt}`, margin, y);
+
+      y += 8;
+      const gap = 4;
+      const boxWidth = (contentWidth - gap) / 2;
+      drawKpiBox(pdf, margin, y, boxWidth, 22, "Totale periodo", formatEuro(chartData.total));
+      drawKpiBox(pdf, margin + boxWidth + gap, y, boxWidth, 22, "Media giornaliera", formatEuro(chartData.average));
+      y += 26;
+      drawKpiBox(
+        pdf,
+        margin,
+        y,
+        boxWidth,
+        22,
+        "Giorno migliore",
+        bestRow ? formatEuro(bestRow.value) : "—",
+        bestRow ? formatLongDate(bestRow.date) : undefined
+      );
+      drawKpiBox(
+        pdf,
+        margin + boxWidth + gap,
+        y,
+        boxWidth,
+        22,
+        "Giorno peggiore",
+        worstRow ? formatEuro(worstRow.value) : "—",
+        worstRow ? formatLongDate(worstRow.date) : undefined
+      );
+      y += 26;
+      const boxWidthThree = (contentWidth - gap * 2) / 3;
+      drawKpiBox(pdf, margin, y, boxWidthThree, 22, "Giorni analizzati", String(sortedRows.length));
+      drawKpiBox(pdf, margin + boxWidthThree + gap, y, boxWidthThree, 22, "Trend periodo", trendLabel);
+      drawKpiBox(
+        pdf,
+        margin + (boxWidthThree + gap) * 2,
+        y,
+        boxWidthThree,
+        22,
+        "Variazione primo/ultimo",
+        trendPercent === null ? "—" : formatPercent(trendPercent)
+      );
+      y += 30;
+
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(12);
+      pdf.setTextColor(15, 23, 42);
+      pdf.text("Lettura veloce", margin, y);
+      y += 6;
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(10);
+      pdf.setTextColor(51, 65, 85);
+
+      const insights = [
+        `Totale periodo ${formatEuro(chartData.total)} con media giornaliera di ${formatEuro(chartData.average)}.`,
+        bestRow
+          ? `Picco massimo registrato il ${formatLongDate(bestRow.date)} con ${formatEuro(bestRow.value)}.`
+          : "Picco massimo non disponibile.",
+        worstRow
+          ? `Valore minimo registrato il ${formatLongDate(worstRow.date)} con ${formatEuro(worstRow.value)}.`
+          : "Valore minimo non disponibile.",
+        `Trend del periodo: ${trendLabel}${trendPercent === null ? "" : ` (${formatPercent(trendPercent)})`}.`,
+        `Giorni sopra media: ${aboveAverageDays}. Giorni sotto media: ${belowAverageDays}.`,
+      ];
+
+      insights.forEach((text) => {
+        const lines = pdf.splitTextToSize(`• ${text}`, contentWidth);
+        pdf.text(lines, margin, y);
+        y += lines.length * 4.5;
+      });
+
+      y += 4;
+      drawSimpleLineChart(
+        pdf,
+        sortedRows,
+        margin,
+        y,
+        contentWidth,
+        58,
+        METRIC_COLORS[metric],
+        metricLabel(metric)
+      );
+      y += 66;
+
+      autoTable(pdf, {
+        startY: y,
+        theme: "grid",
+        head: [["Data", "Valore", "Scost. giorno prec.", "Indicatore"]],
+        body: sortedRows.map((row, index) => {
+          const prevValue = index > 0 ? sortedRows[index - 1].value : null;
+          const delta = prevValue === null ? null : row.value - prevValue;
+          const indicator =
+            row.value > chartData.average ? "Sopra media" : row.value < chartData.average ? "Sotto media" : "In media";
+
+          return [
+            formatLongDate(row.date),
+            formatEuro(row.value),
+            delta === null ? "—" : formatEuro(delta),
+            indicator,
+          ];
+        }),
+        headStyles: {
+          fillColor: [15, 23, 42],
+          textColor: 255,
+          fontStyle: "bold",
+        },
+        bodyStyles: {
+          textColor: [51, 65, 85],
+        },
+        alternateRowStyles: {
+          fillColor: [248, 250, 252],
+        },
+        columnStyles: {
+          1: { halign: "right" },
+          2: { halign: "right" },
+        },
+        margin: { left: margin, right: margin },
+        didDrawPage: () => {
+          const totalPages = pdf.getNumberOfPages();
+          const currentPage = pdf.getCurrentPageInfo().pageNumber;
+          pdf.setFontSize(9);
+          pdf.setTextColor(100, 116, 139);
+          pdf.text(
+            `Pagina ${currentPage} di ${totalPages}`,
+            pageWidth - margin,
+            pdf.internal.pageSize.getHeight() - 6,
+            { align: "right" }
+          );
+        },
+      });
+
+      const fileMetric = metricLabel(metric).toLowerCase().replace(/\s+/g, "-");
+      
+const pvCode = selectedPvRow?.code || "Tutti";
+
+const metricLabelMap: Record<string, string> = {
+  incasso_totale: "IncassoTotale",
+  vendita_tabacchi: "Tabacchi",
+  vendita_gv: "GrattaEVinci",
+  lis_plus: "LIS",
+  mooney: "Mooney",
+  gv_pagati: "PagatiGV",
+};
+
+const metricName = metricLabelMap[metric] || metric;
+
+const safePv = pvCode.replace(/\s+/g, "").replace(/[^\w\-]/g, "");
+
+const fileName = `Report-Analitico-${safePv}-${metricName}.pdf`;
+
+pdf.save(fileName);
+      setMsg("Report generato correttamente.");
+    } catch (error) {
+      console.error("REPORT PDF ERROR:", error);
+      const message = error instanceof Error ? error.message : "Errore sconosciuto";
+      setMsg(`Errore report PDF: ${message}`);
+    }
+  }
+
   async function onFilter(e: React.FormEvent) {
     e.preventDefault();
     await loadRows();
@@ -840,115 +1330,151 @@ export default function CashSummaryAdminClient() {
   return (
     <div className="space-y-6">
       <section className="rounded-2xl border bg-white p-4">
-        <h2 className="text-lg font-semibold">Saldo iniziale PV</h2>
-        <p className="mt-1 text-sm text-gray-600">
-          Serve solo come punto di partenza del progressivo. Dopo il riporto continua in automatico.
-        </p>
-
-        <form onSubmit={saveBalanceStart} className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-4">
+        <div className="flex items-start justify-between gap-4">
           <div>
-            <label className="mb-2 block text-sm font-medium">Punto Vendita</label>
-            <select
-              className="w-full rounded-xl border bg-white p-3"
-              value={balancePvId}
-              onChange={(e) => setBalancePvId(e.target.value)}
-            >
-              <option value="">Seleziona</option>
-              {pvs.map((pv) => (
-                <option key={pv.id} value={pv.id}>
-                  {pv.code} — {pv.name}
-                </option>
-              ))}
-            </select>
+            <h2 className="text-lg font-semibold">Saldo iniziale PV</h2>
+            <p className="mt-1 text-sm text-gray-600">
+              Serve solo come punto di partenza del progressivo. Dopo il riporto continua in automatico.
+            </p>
           </div>
 
-          <div>
-            <label className="mb-2 block text-sm font-medium">Data riferimento</label>
-            <input
-              type="date"
-              className="w-full rounded-xl border bg-white p-3"
-              value={balanceStartDate}
-              onChange={(e) => setBalanceStartDate(e.target.value)}
-            />
-          </div>
+          <button
+            type="button"
+            onClick={() => setShowBalanceBlock((prev) => !prev)}
+            aria-expanded={showBalanceBlock}
+            aria-label={showBalanceBlock ? "Chiudi saldo iniziale PV" : "Apri saldo iniziale PV"}
+            className="inline-flex h-10 w-10 items-center justify-center rounded-xl border text-xl font-semibold text-slate-700 transition hover:bg-slate-50"
+          >
+            {showBalanceBlock ? "−" : "+"}
+          </button>
+        </div>
 
-          <div>
-            <label className="mb-2 block text-sm font-medium">Saldo iniziale</label>
-            <input
-              type="number"
-              step="0.01"
-              className="w-full rounded-xl border bg-white p-3"
-              value={balanceValue ?? ""}
-              onChange={(e) => {
-                const raw = e.target.value;
-                setBalanceValue(raw === "" ? null : Number(raw));
-              }}
-            />
-          </div>
+        {showBalanceBlock && (
+          <>
+            <form onSubmit={saveBalanceStart} className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-4">
+              <div>
+                <label className="mb-2 block text-sm font-medium">Punto Vendita</label>
+                <select
+                  className="w-full rounded-xl border bg-white p-3"
+                  value={balancePvId}
+                  onChange={(e) => setBalancePvId(e.target.value)}
+                >
+                  <option value="">Seleziona</option>
+                  {pvs.map((pv) => (
+                    <option key={pv.id} value={pv.id}>
+                      {pv.code} — {pv.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
 
-          <div className="flex items-end">
-            <button
-              type="submit"
-              className="w-full rounded-xl bg-slate-900 p-3 text-white disabled:opacity-60"
-              disabled={balanceLoading}
-            >
-              {balanceLoading ? "Salvo..." : "Salva saldo iniziale"}
-            </button>
-          </div>
-        </form>
+              <div>
+                <label className="mb-2 block text-sm font-medium">Data riferimento</label>
+                <input
+                  type="date"
+                  className="w-full rounded-xl border bg-white p-3"
+                  value={balanceStartDate}
+                  onChange={(e) => setBalanceStartDate(e.target.value)}
+                />
+              </div>
 
-        {balanceMsg && <div className="mt-3 text-sm text-gray-700">{balanceMsg}</div>}
+              <div>
+                <label className="mb-2 block text-sm font-medium">Saldo iniziale</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  className="w-full rounded-xl border bg-white p-3"
+                  value={balanceValue ?? ""}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    setBalanceValue(raw === "" ? null : Number(raw));
+                  }}
+                />
+              </div>
+
+              <div className="flex items-end">
+                <button
+                  type="submit"
+                  className="w-full rounded-xl bg-slate-900 p-3 text-white disabled:opacity-60"
+                  disabled={balanceLoading}
+                >
+                  {balanceLoading ? "Salvo..." : "Salva saldo iniziale"}
+                </button>
+              </div>
+            </form>
+
+            {balanceMsg && <div className="mt-3 text-sm text-gray-700">{balanceMsg}</div>}
+          </>
+        )}
       </section>
 
       <section className="rounded-2xl border bg-white p-4">
-        <h2 className="text-lg font-semibold">Fondo Cassa Iniziale PV</h2>
-        <p className="mt-1 text-sm text-gray-600">
-          È un dato amministrativo fisso del PV, separato dal saldo iniziale e usato nei controlli del fondo cassa.
-        </p>
-
-        <form onSubmit={saveFondoCassaIniziale} className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+        <div className="flex items-start justify-between gap-4">
           <div>
-            <label className="mb-2 block text-sm font-medium">Punto Vendita</label>
-            <select
-              className="w-full rounded-xl border bg-white p-3"
-              value={fondoPvId}
-              onChange={(e) => setFondoPvId(e.target.value)}
-            >
-              <option value="">Seleziona</option>
-              {pvs.map((pv) => (
-                <option key={pv.id} value={pv.id}>
-                  {pv.code} — {pv.name}
-                </option>
-              ))}
-            </select>
+            <h2 className="text-lg font-semibold">Fondo Cassa Iniziale PV</h2>
+            <p className="mt-1 text-sm text-gray-600">
+              È un dato amministrativo fisso del PV, separato dal saldo iniziale e usato nei controlli del fondo cassa.
+            </p>
           </div>
 
-          <div>
-            <label className="mb-2 block text-sm font-medium">Fondo Cassa Iniziale</label>
-            <input
-              type="number"
-              step="0.01"
-              className="w-full rounded-xl border bg-white p-3"
-              value={fondoValue ?? ""}
-              onChange={(e) => {
-                const raw = e.target.value;
-                setFondoValue(raw === "" ? null : Number(raw));
-              }}
-            />
-          </div>
+          <button
+            type="button"
+            onClick={() => setShowFondoBlock((prev) => !prev)}
+            aria-expanded={showFondoBlock}
+            aria-label={showFondoBlock ? "Chiudi fondo cassa iniziale PV" : "Apri fondo cassa iniziale PV"}
+            className="inline-flex h-10 w-10 items-center justify-center rounded-xl border text-xl font-semibold text-slate-700 transition hover:bg-slate-50"
+          >
+            {showFondoBlock ? "−" : "+"}
+          </button>
+        </div>
 
-          <div className="flex items-end">
-            <button
-              type="submit"
-              className="w-full rounded-xl bg-slate-900 p-3 text-white disabled:opacity-60"
-              disabled={fondoLoading}
-            >
-              {fondoLoading ? "Salvo..." : "Salva fondo cassa iniziale"}
-            </button>
-          </div>
-        </form>
+        {showFondoBlock && (
+          <>
+            <form onSubmit={saveFondoCassaIniziale} className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+              <div>
+                <label className="mb-2 block text-sm font-medium">Punto Vendita</label>
+                <select
+                  className="w-full rounded-xl border bg-white p-3"
+                  value={fondoPvId}
+                  onChange={(e) => setFondoPvId(e.target.value)}
+                >
+                  <option value="">Seleziona</option>
+                  {pvs.map((pv) => (
+                    <option key={pv.id} value={pv.id}>
+                      {pv.code} — {pv.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
 
-        {fondoMsg && <div className="mt-3 text-sm text-gray-700">{fondoMsg}</div>}
+              <div>
+                <label className="mb-2 block text-sm font-medium">Fondo Cassa Iniziale</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  className="w-full rounded-xl border bg-white p-3"
+                  value={fondoValue ?? ""}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    setFondoValue(raw === "" ? null : Number(raw));
+                  }}
+                />
+              </div>
+
+              <div className="flex items-end">
+                <button
+                  type="submit"
+                  className="w-full rounded-xl bg-slate-900 p-3 text-white disabled:opacity-60"
+                  disabled={fondoLoading}
+                >
+                  {fondoLoading ? "Salvo..." : "Salva fondo cassa iniziale"}
+                </button>
+              </div>
+            </form>
+
+            {fondoMsg && <div className="mt-3 text-sm text-gray-700">{fondoMsg}</div>}
+          </>
+        )}
       </section>
 
       <section className="rounded-2xl border bg-white p-4">
@@ -1022,6 +1548,24 @@ export default function CashSummaryAdminClient() {
             )}
 
             <button
+            type="button"
+            onClick={handleGenerateDataReport}
+            title="Dati completi per tutte le metriche"
+            className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50"
+            >
+            REPORT COMPLETO
+            </button>
+
+            <button
+              type="button"
+              onClick={handleGenerateReport}
+              title="Analisi grafica della metrica selezionata"
+              className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50"
+            >
+              REPORT ANALITICO
+            </button>
+
+            <button
               type="button"
               onClick={() => setShowDetail((prev) => !prev)}
               className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50"
@@ -1065,28 +1609,30 @@ export default function CashSummaryAdminClient() {
           })}
         </div>
 
-        <div className="mt-6 h-80 rounded-2xl border bg-slate-50 p-4">
+        <div ref={reportChartRef} className="mt-6 rounded-2xl border bg-slate-50 p-4">
           {chartData.rows.length > 0 ? (
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={chartData.rows}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="label" />
-                <YAxis tickFormatter={formatAxisEuro} width={70} />
-                <Tooltip content={<TooltipValue />} />
-                <Legend />
-                <Line
-                  type="monotone"
-                  dataKey="value"
-                  name={metricLabel(metric)}
-                  stroke={METRIC_COLORS[metric]}
-                  strokeWidth={3}
-                  dot={{ r: 4 }}
-                  activeDot={{ r: 6 }}
-                />
-              </LineChart>
-            </ResponsiveContainer>
+            <div className="h-80">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={chartData.rows}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="label" />
+                  <YAxis tickFormatter={formatAxisEuro} width={70} />
+                  <Tooltip content={<TooltipValue />} />
+                  <Legend />
+                  <Line
+                    type="monotone"
+                    dataKey="value"
+                    name={metricLabel(metric)}
+                    stroke={METRIC_COLORS[metric]}
+                    strokeWidth={3}
+                    dot={{ r: 4 }}
+                    activeDot={{ r: 6 }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
           ) : (
-            <div className="flex h-full items-center justify-center text-sm text-gray-500">
+            <div className="flex h-80 items-center justify-center text-sm text-gray-500">
               Nessun dato disponibile per il grafico.
             </div>
           )}
@@ -1094,9 +1640,7 @@ export default function CashSummaryAdminClient() {
 
         <div className="mt-4 flex flex-wrap items-stretch justify-between gap-3">
           <div className="rounded-xl border bg-slate-50 px-4 py-3">
-            <div className="text-xs uppercase tracking-wide text-gray-500">
-              Differenza % Fondo Cassa
-            </div>
+            <div className="text-xs uppercase tracking-wide text-gray-500">Differenza % Fondo Cassa</div>
 
             <div
               className={`mt-1 text-lg font-semibold ${
@@ -1123,21 +1667,25 @@ export default function CashSummaryAdminClient() {
 
           <div className="flex flex-wrap justify-end gap-3">
             <div className="rounded-xl border bg-slate-50 px-4 py-3 text-right">
-              <div className="text-xs uppercase tracking-wide text-gray-500">
-                Totale {metricLabel(metric)}
-              </div>
-              <div className="text-lg font-semibold text-slate-900">
-                {formatEuro(chartData.total)}
-              </div>
+              <div className="text-xs uppercase tracking-wide text-gray-500">Totale {metricLabel(metric)}</div>
+              <div className="text-lg font-semibold text-slate-900">{formatEuro(chartData.total)}</div>
             </div>
 
             <div className="rounded-xl border bg-slate-50 px-4 py-3 text-right">
-              <div className="text-xs uppercase tracking-wide text-gray-500">
-                Media giornaliera
-              </div>
-              <div className="text-lg font-semibold text-slate-900">
-                {formatEuro(chartData.average)}
-              </div>
+              <div className="text-xs uppercase tracking-wide text-gray-500">Media giornaliera</div>
+              <div className="text-lg font-semibold text-slate-900">{formatEuro(chartData.average)}</div>
+            </div>
+
+            <div className="rounded-xl border bg-slate-50 px-4 py-3 text-right">
+              <div className="text-xs uppercase tracking-wide text-gray-500">Giorno migliore</div>
+              <div className="text-sm font-semibold text-slate-900">{bestRow ? formatLongDate(bestRow.date) : "—"}</div>
+              <div className="text-sm text-slate-700">{bestRow ? formatEuro(bestRow.value) : "—"}</div>
+            </div>
+
+            <div className="rounded-xl border bg-slate-50 px-4 py-3 text-right">
+              <div className="text-xs uppercase tracking-wide text-gray-500">Giorno peggiore</div>
+              <div className="text-sm font-semibold text-slate-900">{worstRow ? formatLongDate(worstRow.date) : "—"}</div>
+              <div className="text-sm text-slate-700">{worstRow ? formatEuro(worstRow.value) : "—"}</div>
             </div>
           </div>
         </div>
@@ -1146,12 +1694,8 @@ export default function CashSummaryAdminClient() {
           <div className="mt-6 rounded-2xl border bg-white p-4">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h3 className="text-base font-semibold">
-                  Dettaglio movimenti — {metricLabel(metric)}
-                </h3>
-                <p className="mt-1 text-sm text-gray-600">
-                  Segna le righe come OK oppure Da ricontrollare.
-                </p>
+                <h3 className="text-base font-semibold">Dettaglio movimenti — {metricLabel(metric)}</h3>
+                <p className="mt-1 text-sm text-gray-600">Segna le righe come OK oppure Da ricontrollare.</p>
               </div>
 
               <div className="flex items-center gap-2">
@@ -1232,9 +1776,7 @@ export default function CashSummaryAdminClient() {
                           <div className="flex justify-center gap-2">
                             <button
                               type="button"
-                              onClick={() =>
-                                saveDetailCheck(row.id, metric, status === "ok" ? null : "ok")
-                              }
+                              onClick={() => saveDetailCheck(row.id, metric, status === "ok" ? null : "ok")}
                               disabled={isSaving}
                               className="rounded-lg border border-green-600 px-3 py-1 text-green-700 hover:bg-green-50 disabled:opacity-50"
                             >
@@ -1275,7 +1817,7 @@ export default function CashSummaryAdminClient() {
       <section className="rounded-2xl border bg-white p-4">
         <h2 className="text-lg font-semibold">Confronto PV</h2>
         <p className="mt-1 text-sm text-gray-600">
-          Seleziona due o più PV per confrontare il totale periodo sulla metrica selezionata.
+          Seleziona due o più PV per confrontare l'andamento periodo sulla metrica selezionata.
         </p>
 
         <div className="mt-4">
@@ -1307,22 +1849,40 @@ export default function CashSummaryAdminClient() {
           </div>
         </div>
 
-        <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-[1.2fr_0.8fr]">
+        <div className="mt-6 grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.6fr)_280px]">
           <div className="h-80 rounded-2xl border bg-slate-50 p-4">
-            {comparisonChartData.length > 0 ? (
+            {comparisonChartData.rows.length > 0 && comparisonChartData.series.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={comparisonChartData} margin={{ top: 8, right: 12, left: 12, bottom: 8 }}>
+                <LineChart
+                  data={comparisonChartData.rows}
+                  margin={{ top: 8, right: 12, left: 8, bottom: 8 }}
+                  onMouseLeave={() => setActiveComparePvId(null)}
+                >
                   <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="name" />
-                  <YAxis tickFormatter={formatAxisEuro} width={80} />
-                  <Tooltip content={<TooltipValue />} />
+                  <XAxis dataKey="label" />
+                  <YAxis tickFormatter={formatAxisEuro} width={70} />
+                  <Tooltip content={<ComparisonTooltip seriesMap={comparisonSeriesMap} />} />
                   <Legend />
-                  <Bar dataKey="totale" name="Totale periodo" radius={[8, 8, 0, 0]}>
-                    {comparisonChartData.map((entry, index) => (
-                      <Cell key={`cell-${entry.name}-${index}`} fill={entry.fill} />
-                    ))}
-                  </Bar>
-                </BarChart>
+                  {comparisonChartData.series.map((series) => {
+                    const isActive = activeComparePvId === series.pv_id;
+                    const hasActive = activeComparePvId !== null;
+
+                    return (
+                      <Line
+                        key={series.pv_id}
+                        type="monotone"
+                        dataKey={series.pv_id}
+                        name={series.pv_code}
+                        stroke={series.color}
+                        strokeWidth={isActive ? 4 : 3}
+                        opacity={hasActive && !isActive ? 0.2 : 1}
+                        dot={{ r: isActive ? 4 : 3 }}
+                        activeDot={{ r: isActive ? 6 : 5 }}
+                        connectNulls
+                      />
+                    );
+                  })}
+                </LineChart>
               </ResponsiveContainer>
             ) : (
               <div className="flex h-full items-center justify-center text-sm text-gray-500">
@@ -1331,34 +1891,55 @@ export default function CashSummaryAdminClient() {
             )}
           </div>
 
-          <div className="space-y-3">
+          <div className="space-y-2">
             {compareByPv.map((row) => {
               const max = Math.max(...compareByPv.map((x) => Math.abs(x.total)), 1);
               const width = (Math.abs(row.total) / max) * 100;
+              const color = compareColorByPvId[row.pv_id] ?? fallbackColorFromString(row.pv_id);
+              const isActive = activeComparePvId === row.pv_id;
+              const hasActive = activeComparePvId !== null;
 
               return (
-                <div key={row.pv_id} className="space-y-1">
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="truncate font-medium">{row.pv_label}</span>
-                    <span className="font-semibold">{formatEuro(row.total)}</span>
+                <button
+                  key={row.pv_id}
+                  type="button"
+                  onMouseEnter={() => setActiveComparePvId(row.pv_id)}
+                  onMouseLeave={() => setActiveComparePvId(null)}
+                  onFocus={() => setActiveComparePvId(row.pv_id)}
+                  onBlur={() => setActiveComparePvId(null)}
+                  className={`block w-full rounded-xl border px-3 py-2 text-left transition ${
+                    isActive
+                      ? "border-slate-400 bg-slate-50 shadow-sm"
+                      : "border-slate-200 bg-white hover:bg-slate-50"
+                  } ${hasActive && !isActive ? "opacity-60" : "opacity-100"}`}
+                >
+                  <div className="flex items-center justify-between gap-2 text-[13px] leading-tight">
+                    <span className="flex min-w-0 items-center gap-2 font-medium text-slate-700">
+                      <span
+                        className="inline-block h-2.5 w-2.5 rounded-full"
+                        style={{ backgroundColor: color }}
+                      />
+                      <span className="truncate">{row.pv_label}</span>
+                    </span>
+                    <span className="shrink-0 font-semibold text-slate-900">
+                      {formatEuro(row.total)}
+                    </span>
                   </div>
-                  <div className="h-4 overflow-hidden rounded bg-gray-100">
+                  <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-gray-100">
                     <div
-                      className={row.total < 0 ? "h-full bg-red-600" : ""}
+                      className="h-full rounded-full"
                       style={{
                         width: `${width}%`,
-                        backgroundColor: row.total < 0 ? "#dc2626" : METRIC_COLORS[metric],
+                        backgroundColor: row.total < 0 ? "#dc2626" : color,
                       }}
                     />
                   </div>
-                </div>
+                </button>
               );
             })}
 
             {compareByPv.length === 0 && (
-              <div className="text-sm text-gray-500">
-                Nessun dato disponibile per il confronto.
-              </div>
+              <div className="text-sm text-gray-500">Nessun dato disponibile per il confronto.</div>
             )}
           </div>
         </div>
