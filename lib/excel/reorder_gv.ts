@@ -225,7 +225,15 @@ export async function processReorderGVExcel(
 
     const base = qtaVenduta * 2 - giacenzaBarQty;
     let qtaDaOrdinare = 0;
-    if (base > 0 && fattco > 0) qtaDaOrdinare = Math.ceil(base / fattco);
+    
+    if (base > 0 && fattco > 0) {
+  const basePack = Math.floor(base / fattco);
+  const resto = base % fattco;
+
+  const aggiunta = resto / fattco >= 0.51 ? 1 : 0;
+
+  qtaDaOrdinare = basePack + aggiunta;
+}
 
     const prezzo = priceMap[codArticolo] || 0;
     const valoreDaOrdinare = qtaDaOrdinare * fattco * prezzo;
