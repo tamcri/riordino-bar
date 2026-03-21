@@ -1,4 +1,5 @@
 "use client";
+import { generateCashSummaryExcelReport } from "@/lib/cash-summary-report-excel";
 import {
   generateCashSummaryDataReport,
   type CashSummaryDataReportRow,
@@ -1108,6 +1109,42 @@ export default function CashSummaryAdminClient() {
     }
   }
 
+    function handleGenerateExcelReport() {
+    try {
+      const rowsForReport = computedRows.map((row) => ({
+        data: String(row.data ?? ""),
+        pv_label: String(row.pv_label ?? ""),
+        operatore: String(row.operatore ?? ""),
+        incasso_totale: Number(row.incasso_totale ?? 0),
+        gv_pagati: Number(row.gv_pagati ?? 0),
+        lis_plus: Number(row.lis_plus ?? 0),
+        mooney: Number(row.mooney ?? 0),
+        vendita_gv: Number(row.vendita_gv ?? 0),
+        vendita_tabacchi: Number(row.vendita_tabacchi ?? 0),
+        saldo_giorno: Number(row.saldo_giorno ?? 0),
+        progressivo_da_versare: Number(row.progressivo_da_versare ?? 0),
+        fondo_cassa: Number(row.fondo_cassa ?? 0),
+      }));
+
+      const selectedPvRow = pvs.find((pv) => pv.id === pvId);
+      const selectedPvLabel = selectedPvRow
+        ? `${selectedPvRow.code} — ${selectedPvRow.name}`
+        : "Tutti i PV";
+
+      generateCashSummaryExcelReport({
+        rows: rowsForReport,
+        pvLabel: selectedPvLabel,
+        dateFrom: dateFrom || undefined,
+        dateTo: dateTo || undefined,
+      });
+
+      setMsg("Report Excel generato correttamente.");
+    } catch (error) {
+      console.error("REPORT EXCEL ERROR:", error);
+      setMsg("Errore durante la generazione del report Excel.");
+    }
+  }
+
   async function handleGenerateReport() {
     if (chartData.rows.length === 0) {
       setMsg("Nessun dato disponibile per generare il report.");
@@ -1554,6 +1591,15 @@ pdf.save(fileName);
             className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50"
             >
             REPORT COMPLETO
+            </button>
+
+            <button
+            type="button"
+            onClick={handleGenerateExcelReport}
+           title="Esporta in Excel tutti i dati del report completo"
+           className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50"
+            >
+           EXPORT EXCEL
             </button>
 
             <button
