@@ -36,7 +36,11 @@ export default async function ProgressiviReportViewPage({ searchParams }: Props)
 
     return (
       <div className="p-6">
-        <ProgressiviReportTable data={data} downloadHref={`/api/inventories/progressivi/report?${qs.toString()}`} />
+        <ProgressiviReportTable
+          data={data}
+          reportHeaderId={data.report_header_id}
+          downloadHref={`/api/inventories/progressivi/report?${qs.toString()}`}
+        />
       </div>
     );
   } catch (e: any) {

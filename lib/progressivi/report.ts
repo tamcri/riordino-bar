@@ -52,6 +52,7 @@ export type ProgressiviBlockRow = {
 };
 
 export type ProgressiviReportData = {
+  report_header_id: string | null;
   current_header: {
     id: string;
     pv_id: string;
@@ -478,7 +479,6 @@ async function loadProgressiviRows(
 
   let data: ProgressivoRowRaw[] | null = null;
 
-  // 🔵 PRIMO TENTATIVO: per header_id
   if (isUuid(headerId)) {
     const { data: dataByHeader, error } = await supabaseAdmin
       .from("inventory_progressivi_rows")
@@ -487,13 +487,11 @@ async function loadProgressiviRows(
 
     if (error) throw error;
 
-    // ✅ se trovi righe → usa queste
     if (dataByHeader && dataByHeader.length > 0) {
       data = dataByHeader;
     }
   }
 
-  // 🟡 FALLBACK: legacy (pv_id + inventory_date)
   if (!data || data.length === 0) {
     const { data: dataLegacy, error } = await supabaseAdmin
       .from("inventory_progressivi_rows")
@@ -731,10 +729,7 @@ function snapshotRowToBlockRow(row: ProgressiviSnapshotRow): ProgressiviBlockRow
     description: row.description,
     um: row.um,
     prezzo_vendita_eur: round2(toNum(row.prezzo_vendita_eur)),
-
-    // ✅ QUESTA È LA CHIAVE
     is_recounted: Boolean((row as any).is_recounted),
-
     previous: {
       inventario: normalizeQty(toNum(row.previous_inventario)),
       giacenza_da_gestionale: normalizeQty(toExactDecimal(row.previous_gestionale)),
@@ -1002,6 +997,7 @@ export async function getProgressiviReportData(
   });
 
   let finalRows: ProgressiviBlockRow[] = [];
+  let reportHeaderId: string | null = existingSnapshot?.id ?? null;
 
   const recountedCurrentCodes = await loadRecountedItemCodesForHeader(
     live.currentHeader.id
@@ -1033,6 +1029,7 @@ export async function getProgressiviReportData(
       ),
     });
 
+    reportHeaderId = created.header.id;
     finalRows = created.rows.length > 0 ? created.rows.map(snapshotRowToBlockRow) : live.rows;
   } else {
     const snapshot = await loadProgressiviSnapshot(existingSnapshot.id);
@@ -1085,6 +1082,7 @@ export async function getProgressiviReportData(
         ),
       });
 
+      reportHeaderId = recreated.header.id;
       finalRows =
         recreated.rows.length > 0
           ? recreated.rows.map(snapshotRowToBlockRow)
@@ -1113,7 +1111,6 @@ export async function getProgressiviReportData(
           continue;
         }
 
-        // NON ricontato: mantieni lo snapshot completo, senza toccare la giacenza gestionale
         mergedRowsMap.set(normalizedCode, snapshotRow);
       }
 
@@ -1128,12 +1125,14 @@ export async function getProgressiviReportData(
       );
 
       finalRows = mergedRows;
+      reportHeaderId = existingSnapshot.id;
     }
   }
 
   const totals = computeTotals(finalRows);
 
   return {
+    report_header_id: reportHeaderId,
     current_header: live.currentHeader,
     previous_header: live.previousHeader,
     pv: live.pv,

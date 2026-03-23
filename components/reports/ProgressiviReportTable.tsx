@@ -1,5 +1,7 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import type { ProgressiviReportData } from "@/lib/progressivi/report";
 
 function formatDateIT(iso: string | null | undefined) {
@@ -23,19 +25,119 @@ function formatEur(n: number) {
   }).format(n || 0);
 }
 
+function toInputValue(n: number) {
+  if (!Number.isFinite(n)) return "0";
+  return String(n);
+}
+
+function parseDecimalInput(value: string) {
+  const normalized = String(value ?? "").trim().replace(",", ".");
+  if (!normalized) return 0;
+  const n = Number(normalized);
+  return Number.isFinite(n) ? n : 0;
+}
+
+type DraftMap = Record<string, string>;
+
 export default function ProgressiviReportTable({
   data,
+  reportHeaderId,
   downloadHref,
 }: {
   data: ProgressiviReportData;
+  reportHeaderId?: string | null;
   downloadHref?: string;
 }) {
+  const router = useRouter();
+
+  const [drafts, setDrafts] = useState<DraftMap>({});
+  const [savingKey, setSavingKey] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const canEdit = Boolean(reportHeaderId);
+
+  const initialDrafts = useMemo(() => {
+    const next: DraftMap = {};
+    for (const row of data.rows) {
+      next[`${row.item_code}__previous`] = toInputValue(row.previous.carico_non_registrato);
+      next[`${row.item_code}__current`] = toInputValue(row.current.carico_non_registrato);
+    }
+    return next;
+  }, [data.rows]);
+
+  useEffect(() => {
+    setDrafts(initialDrafts);
+  }, [initialDrafts]);
+
   function handlePrintPdf() {
     window.print();
   }
 
+  function setDraft(itemCode: string, mode: "previous" | "current", value: string) {
+    const key = `${itemCode}__${mode}`;
+    setDrafts((prev) => ({ ...prev, [key]: value }));
+  }
+
+  async function saveCarico(itemCode: string, mode: "previous" | "current") {
+    if (!reportHeaderId) return;
+
+    const key = `${itemCode}__${mode}`;
+    const rawValue = drafts[key] ?? "0";
+    const parsedValue = parseDecimalInput(rawValue);
+
+    const row = data.rows.find((r) => r.item_code === itemCode);
+    if (!row) return;
+
+    const currentStoredValue =
+      mode === "previous"
+        ? row.previous.carico_non_registrato
+        : row.current.carico_non_registrato;
+
+    if (parsedValue === currentStoredValue) {
+      setDrafts((prev) => ({ ...prev, [key]: toInputValue(parsedValue) }));
+      return;
+    }
+
+    setSavingKey(key);
+    setMsg(null);
+
+    try {
+      const res = await fetch("/api/inventories/progressivi/report/update-carico", {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          report_header_id: reportHeaderId,
+          item_code: itemCode,
+          mode,
+          value: parsedValue,
+        }),
+      });
+
+      const json = await res.json().catch(() => null);
+
+      if (!res.ok || !json?.ok) {
+        throw new Error(json?.error || "Errore salvataggio carico non registrato");
+      }
+
+      setDrafts((prev) => ({ ...prev, [key]: toInputValue(parsedValue) }));
+      router.refresh();
+    } catch (e: any) {
+      setMsg(e?.message || "Errore salvataggio carico non registrato");
+
+      // ripristina il valore originale visibile
+      setDrafts((prev) => ({
+        ...prev,
+        [key]: toInputValue(currentStoredValue),
+      }));
+    } finally {
+      setSavingKey(null);
+    }
+  }
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-4" data-report-header-id={reportHeaderId ?? ""}>
       <style jsx global>{`
         @media print {
           @page {
@@ -123,18 +225,35 @@ export default function ProgressiviReportTable({
         </div>
       </div>
 
+      {msg ? (
+        <div className="no-print rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+          {msg}
+        </div>
+      ) : null}
+
       <div className="print-card rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-800">
-        Nota logica: {data.assumptions.carico_non_registrato}
+        Nota logica:{" "}
+        {canEdit
+          ? "Il Carico non registrato è modificabile direttamente nel report. Il dato viene salvato e il report si ricalcola."
+          : data.assumptions.carico_non_registrato}
       </div>
 
       <div className="print-card print-table-wrap overflow-auto rounded-2xl border bg-white">
         <table className="print-table min-w-[1650px] w-full text-sm">
           <thead>
             <tr className="bg-gray-100">
-              <th rowSpan={2} className="border-b border-r p-3 text-left">Codice</th>
-              <th rowSpan={2} className="border-b border-r p-3 text-left">Descrizione</th>
-              <th rowSpan={2} className="border-b border-r p-3 text-left">UM</th>
-              <th rowSpan={2} className="border-b border-r p-3 text-left">Prezzo</th>
+              <th rowSpan={2} className="border-b border-r p-3 text-left">
+                Codice
+              </th>
+              <th rowSpan={2} className="border-b border-r p-3 text-left">
+                Descrizione
+              </th>
+              <th rowSpan={2} className="border-b border-r p-3 text-left">
+                UM
+              </th>
+              <th rowSpan={2} className="border-b border-r p-3 text-left">
+                Prezzo
+              </th>
 
               <th colSpan={5} className="border-b border-r p-3 text-center font-semibold">
                 {formatDateIT(data.previous_header?.inventory_date)}
@@ -170,17 +289,18 @@ export default function ProgressiviReportTable({
           <tbody>
             {data.rows.map((row) => {
               const isRecounted = Boolean((row as any).is_recounted);
+              const prevKey = `${row.item_code}__previous`;
+              const currKey = `${row.item_code}__current`;
+              const isSavingPrev = savingKey === prevKey;
+              const isSavingCurr = savingKey === currKey;
 
               return (
                 <tr
                   key={row.item_code}
-                  className={
-                    isRecounted
-                      ? "recount-row"
-                      : "odd:bg-white even:bg-gray-50"
-                  }
+                  className={isRecounted ? "recount-row" : "odd:bg-white even:bg-gray-50"}
                 >
                   <td className="border-b border-r p-3 font-mono">{row.item_code}</td>
+
                   <td className="border-b border-r p-3">
                     <div className="flex items-center gap-2">
                       <span>{row.description || "—"}</span>
@@ -191,23 +311,84 @@ export default function ProgressiviReportTable({
                       ) : null}
                     </div>
                   </td>
+
                   <td className="border-b border-r p-3">{row.um || "—"}</td>
-                  <td className="border-b border-r p-3 text-right">{formatEur(row.prezzo_vendita_eur)}</td>
+                  <td className="border-b border-r p-3 text-right">
+                    {formatEur(row.prezzo_vendita_eur)}
+                  </td>
 
-                  <td className="border-b border-r p-3 text-right">{formatNum(row.previous.inventario)}</td>
-                  <td className="border-b border-r p-3 text-right">{formatNum(row.previous.giacenza_da_gestionale)}</td>
-                  <td className="border-b border-r p-3 text-right">{formatNum(row.previous.carico_non_registrato)}</td>
-                  <td className="border-b border-r p-3 text-right font-medium">{formatNum(row.previous.giacenza)}</td>
-                  <td className="border-b border-r p-3 text-right">{formatEur(row.previous.valore_giacenza)}</td>
+                  <td className="border-b border-r p-3 text-right">
+                    {formatNum(row.previous.inventario)}
+                  </td>
+                  <td className="border-b border-r p-3 text-right">
+                    {formatNum(row.previous.giacenza_da_gestionale)}
+                  </td>
+                  <td className="border-b border-r p-2 text-right">
+                    <input
+                      type="number"
+                      step="0.001"
+                      inputMode="decimal"
+                      value={drafts[prevKey] ?? ""}
+                      disabled={!canEdit || isSavingPrev}
+                      onChange={(e) => setDraft(row.item_code, "previous", e.target.value)}
+                      onBlur={() => saveCarico(row.item_code, "previous")}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.currentTarget.blur();
+                        }
+                      }}
+                      className="no-print w-28 rounded-lg border bg-white px-2 py-1 text-right text-sm disabled:bg-gray-100"
+                    />
+                    <span className="hidden print:inline">
+                      {formatNum(row.previous.carico_non_registrato)}
+                    </span>
+                  </td>
+                  <td className="border-b border-r p-3 text-right font-medium">
+                    {formatNum(row.previous.giacenza)}
+                  </td>
+                  <td className="border-b border-r p-3 text-right">
+                    {formatEur(row.previous.valore_giacenza)}
+                  </td>
 
-                  <td className="border-b border-r p-3 text-right">{formatNum(row.current.inventario)}</td>
-                  <td className="border-b border-r p-3 text-right">{formatNum(row.current.giacenza_da_gestionale)}</td>
-                  <td className="border-b border-r p-3 text-right">{formatNum(row.current.carico_non_registrato)}</td>
-                  <td className="border-b border-r p-3 text-right font-medium">{formatNum(row.current.giacenza)}</td>
-                  <td className="border-b border-r p-3 text-right">{formatEur(row.current.valore_giacenza)}</td>
+                  <td className="border-b border-r p-3 text-right">
+                    {formatNum(row.current.inventario)}
+                  </td>
+                  <td className="border-b border-r p-3 text-right">
+                    {formatNum(row.current.giacenza_da_gestionale)}
+                  </td>
+                  <td className="border-b border-r p-2 text-right">
+                    <input
+                      type="number"
+                      step="0.001"
+                      inputMode="decimal"
+                      value={drafts[currKey] ?? ""}
+                      disabled={!canEdit || isSavingCurr}
+                      onChange={(e) => setDraft(row.item_code, "current", e.target.value)}
+                      onBlur={() => saveCarico(row.item_code, "current")}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.currentTarget.blur();
+                        }
+                      }}
+                      className="no-print w-28 rounded-lg border bg-white px-2 py-1 text-right text-sm disabled:bg-gray-100"
+                    />
+                    <span className="hidden print:inline">
+                      {formatNum(row.current.carico_non_registrato)}
+                    </span>
+                  </td>
+                  <td className="border-b border-r p-3 text-right font-medium">
+                    {formatNum(row.current.giacenza)}
+                  </td>
+                  <td className="border-b border-r p-3 text-right">
+                    {formatEur(row.current.valore_giacenza)}
+                  </td>
 
-                  <td className="border-b border-r p-3 text-right font-semibold">{formatNum(row.riscontro.differenza)}</td>
-                  <td className="border-b p-3 text-right font-semibold">{formatEur(row.riscontro.valore_differenza)}</td>
+                  <td className="border-b border-r p-3 text-right font-semibold">
+                    {formatNum(row.riscontro.differenza)}
+                  </td>
+                  <td className="border-b p-3 text-right font-semibold">
+                    {formatEur(row.riscontro.valore_differenza)}
+                  </td>
                 </tr>
               );
             })}
@@ -215,22 +396,48 @@ export default function ProgressiviReportTable({
 
           <tfoot>
             <tr className="bg-slate-100 font-semibold">
-              <td className="border-t border-r p-3" colSpan={4}>Totali</td>
+              <td className="border-t border-r p-3" colSpan={4}>
+                Totali
+              </td>
 
-              <td className="border-t border-r p-3 text-right">{formatNum(data.totals.previous.inventario)}</td>
-              <td className="border-t border-r p-3 text-right">{formatNum(data.totals.previous.giacenza_da_gestionale)}</td>
-              <td className="border-t border-r p-3 text-right">{formatNum(data.totals.previous.carico_non_registrato)}</td>
-              <td className="border-t border-r p-3 text-right">{formatNum(data.totals.previous.giacenza)}</td>
-              <td className="border-t border-r p-3 text-right">{formatEur(data.totals.previous.valore_giacenza)}</td>
+              <td className="border-t border-r p-3 text-right">
+                {formatNum(data.totals.previous.inventario)}
+              </td>
+              <td className="border-t border-r p-3 text-right">
+                {formatNum(data.totals.previous.giacenza_da_gestionale)}
+              </td>
+              <td className="border-t border-r p-3 text-right">
+                {formatNum(data.totals.previous.carico_non_registrato)}
+              </td>
+              <td className="border-t border-r p-3 text-right">
+                {formatNum(data.totals.previous.giacenza)}
+              </td>
+              <td className="border-t border-r p-3 text-right">
+                {formatEur(data.totals.previous.valore_giacenza)}
+              </td>
 
-              <td className="border-t border-r p-3 text-right">{formatNum(data.totals.current.inventario)}</td>
-              <td className="border-t border-r p-3 text-right">{formatNum(data.totals.current.giacenza_da_gestionale)}</td>
-              <td className="border-t border-r p-3 text-right">{formatNum(data.totals.current.carico_non_registrato)}</td>
-              <td className="border-t border-r p-3 text-right">{formatNum(data.totals.current.giacenza)}</td>
-              <td className="border-t border-r p-3 text-right">{formatEur(data.totals.current.valore_giacenza)}</td>
+              <td className="border-t border-r p-3 text-right">
+                {formatNum(data.totals.current.inventario)}
+              </td>
+              <td className="border-t border-r p-3 text-right">
+                {formatNum(data.totals.current.giacenza_da_gestionale)}
+              </td>
+              <td className="border-t border-r p-3 text-right">
+                {formatNum(data.totals.current.carico_non_registrato)}
+              </td>
+              <td className="border-t border-r p-3 text-right">
+                {formatNum(data.totals.current.giacenza)}
+              </td>
+              <td className="border-t border-r p-3 text-right">
+                {formatEur(data.totals.current.valore_giacenza)}
+              </td>
 
-              <td className="border-t border-r p-3 text-right">{formatNum(data.totals.riscontro.differenza)}</td>
-              <td className="border-t p-3 text-right">{formatEur(data.totals.riscontro.valore_differenza)}</td>
+              <td className="border-t border-r p-3 text-right">
+                {formatNum(data.totals.riscontro.differenza)}
+              </td>
+              <td className="border-t p-3 text-right">
+                {formatEur(data.totals.riscontro.valore_differenza)}
+              </td>
             </tr>
           </tfoot>
         </table>
