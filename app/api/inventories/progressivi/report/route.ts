@@ -202,7 +202,7 @@ export async function GET(req: Request) {
 
       excelRow.getCell(4).value = row.previous.inventario;
       excelRow.getCell(5).value = row.previous.giacenza_da_gestionale;
-      excelRow.getCell(6).value = 0;
+      excelRow.getCell(6).value = row.previous.carico_non_registrato;
       excelRow.getCell(7).value = {
         formula: `${prevInventarioCell}-${prevGestCell}-${prevCaricoCell}`,
       };
@@ -210,7 +210,7 @@ export async function GET(req: Request) {
 
       excelRow.getCell(9).value = row.current.inventario;
       excelRow.getCell(10).value = row.current.giacenza_da_gestionale;
-      excelRow.getCell(11).value = 0;
+      excelRow.getCell(11).value = row.current.carico_non_registrato;
       excelRow.getCell(12).value = {
         formula: `${currInventarioCell}-${currGestCell}-${currCaricoCell}`,
       };
