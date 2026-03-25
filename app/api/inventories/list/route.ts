@@ -21,7 +21,12 @@ const USER_TABLE_CANDIDATES = ["app_user", "app_users", "utenti", "users"];
 
 async function lookupPvIdFromUserTables(username: string): Promise<string | null> {
   for (const table of USER_TABLE_CANDIDATES) {
-    const { data, error } = await supabaseAdmin.from(table).select("pv_id").eq("username", username).maybeSingle();
+    const { data, error } = await supabaseAdmin
+      .from(table)
+      .select("pv_id")
+      .eq("username", username)
+      .maybeSingle();
+
     if (error) continue;
 
     const pv_id = (data as any)?.pv_id ?? null;
@@ -58,10 +63,10 @@ async function requirePvIdForPuntoVendita(username: string): Promise<string> {
 
 type InventoryRow = {
   pv_id: string;
-  category_id: string | null; // ✅ Rapido => NULL
+  category_id: string | null;
   subcategory_id: string | null;
-  rapid_session_id: string | null; // ✅ Rapido: distingue le sessioni
-  inventory_date: string; // YYYY-MM-DD
+  rapid_session_id: string | null;
+  inventory_date: string;
   item_id: string;
   qty: number | null;
   qty_ml?: number | null;
@@ -71,12 +76,12 @@ type InventoryRow = {
 };
 
 type InventoryHeaderRow = {
-  id: string; // ✅ SERVE PER DELETE SICURA
+  id: string;
   pv_id: string;
-  category_id: string | null; // ✅ Rapido => NULL
+  category_id: string | null;
   subcategory_id: string | null;
   rapid_session_id: string | null;
-  inventory_date: string; // YYYY-MM-DD
+  inventory_date: string;
   operatore: string | null;
   label: string | null;
   created_by_username?: string | null;
@@ -99,7 +104,6 @@ function makeKey(
   const cat = category_id ?? "__NULL__";
   const sub = subcategory_id ?? "__NULL__";
 
-  // ✅ Rapido: la chiave DEVE includere la sessione
   if (category_id === null) {
     const rs = (rapid_session_id || "").trim() || "__NOSESSION__";
     return `${pv_id}|${cat}|${sub}|${inventory_date}|${rs}`;
@@ -118,19 +122,11 @@ export async function GET(req: Request) {
 
     const url = new URL(req.url);
 
-    // ✅ distinzione fondamentale:
-    // - se category_id NON è presente -> nessun filtro
-    // - se category_id è presente ma vuoto -> Rapido (NULL)
-    // - se category_id è UUID -> filtro UUID
     const hasCategoryParam = url.searchParams.has("category_id");
     const category_qs_raw = url.searchParams.get("category_id");
     const categoryTrimmed = (category_qs_raw ?? "").trim();
     const categoryLower = categoryTrimmed.toLowerCase();
 
-    // ✅ supporto robusto:
-    // - assente => nessun filtro
-    // - "" oppure "null" => Rapido / NULL
-    // - UUID => filtro UUID
     const category_id_filter: string | null | undefined = !hasCategoryParam
       ? undefined
       : categoryTrimmed === "" || categoryLower === "null"
@@ -145,7 +141,6 @@ export async function GET(req: Request) {
 
     const limitRows = Math.min(Number(url.searchParams.get("limit") || 20000), 50000);
 
-    // validazioni
     if (category_id_filter !== undefined && category_id_filter !== null && !isUuid(category_id_filter)) {
       return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
     }
@@ -156,7 +151,6 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: false, error: "subcategory_id non valido" }, { status: 400 });
     }
 
-    // se chiedi subcategory devi avere category UUID (non Rapido e non "tutte")
     if (subcategory_id && (!hasCategoryParam || category_id_filter === null || category_id_filter === undefined)) {
       return NextResponse.json({ ok: false, error: "subcategory_id richiede anche category_id (UUID)" }, { status: 400 });
     }
@@ -171,33 +165,29 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: false, error: "Intervallo date non valido: 'Dal' è dopo 'Al'." }, { status: 400 });
     }
 
-    // enforcement PV
     let effectivePvId = pv_id_qs;
     if (session.role === "punto_vendita") {
       effectivePvId = await requirePvIdForPuntoVendita(session.username);
     }
 
-    // 1) righe inventories
     let q = supabaseAdmin
       .from("inventories")
-      .select("pv_id, category_id, subcategory_id, rapid_session_id, inventory_date, item_id, qty, qty_ml, qty_gr, created_by_username, created_at")
+      .select(
+        "pv_id, category_id, subcategory_id, rapid_session_id, inventory_date, item_id, qty, qty_ml, qty_gr, created_by_username, created_at"
+      )
       .order("inventory_date", { ascending: false })
       .limit(limitRows);
 
     if (effectivePvId) q = q.eq("pv_id", effectivePvId);
 
-        // ✅ PV: forza Rapido
     if (session.role === "punto_vendita") {
       q = q.is("category_id", null).is("subcategory_id", null);
     } else {
-      // Admin/Ammin: filtro categoria SOLO se parametro presente
       if (category_id_filter === null) q = q.is("category_id", null);
       else if (typeof category_id_filter === "string") q = q.eq("category_id", category_id_filter);
     }
-    // else undefined => nessun filtro
 
     if (subcategory_id) q = q.eq("subcategory_id", subcategory_id);
-
     if (dateFrom) q = q.gte("inventory_date", dateFrom);
     if (dateTo) q = q.lte("inventory_date", dateTo);
 
@@ -210,7 +200,6 @@ export async function GET(req: Request) {
 
     const invRows = (Array.isArray(data) ? data : []) as InventoryRow[];
 
-    // ✅ prezzi + volumi + peso_kg + um (per calcolo valore €)
     const itemIds = Array.from(new Set(invRows.map((r) => r.item_id).filter(Boolean)));
     const itemsMap = new Map<string, { prezzo: number; volume: number; peso_kg: number; um: string }>();
 
@@ -244,7 +233,7 @@ export async function GET(req: Request) {
       pv_id: string;
       category_id: string | null;
       subcategory_id: string | null;
-      rapid_session_id: string | null; // ✅ Rapido
+      rapid_session_id: string | null;
       inventory_date: string;
       created_by_username: string | null;
       created_at: string | null;
@@ -262,7 +251,6 @@ export async function GET(req: Request) {
       const qty_ml = Number((r as any).qty_ml ?? 0) || 0;
       const qty_gr = Number((r as any).qty_gr ?? 0) || 0;
 
-      // ✅ PV/Rapido: tengo anche righe a 0 (servono per "scansionati")
       if (session.role !== "punto_vendita") {
         if (qty <= 0 && qty_ml <= 0 && qty_gr <= 0) continue;
       }
@@ -281,7 +269,9 @@ export async function GET(req: Request) {
         else if (qty_gr > 0 && peso_kg > 0) {
           const grPerUnit = peso_kg * 1000;
           if (grPerUnit > 0) rowValue = (qty_gr / grPerUnit) * prezzo;
-        } else if (qty > 0) rowValue = qty * prezzo;
+        } else if (qty > 0) {
+          rowValue = qty * prezzo;
+        }
       }
 
       const key = makeKey(
@@ -326,14 +316,12 @@ export async function GET(req: Request) {
     const list = Array.from(groups.values());
     if (list.length === 0) return NextResponse.json({ ok: true, rows: [] });
 
-    // headers operatore + label + rapid_session_id + (✅ id header)
     let hq = supabaseAdmin
       .from("inventories_headers")
       .select("id, pv_id, category_id, subcategory_id, inventory_date, operatore, label, rapid_session_id, created_by_username, updated_at");
 
     if (effectivePvId) hq = hq.eq("pv_id", effectivePvId);
 
-        // ✅ PV: forza Rapido
     if (session.role === "punto_vendita") {
       hq = hq.is("category_id", null).is("subcategory_id", null);
     } else {
@@ -356,7 +344,7 @@ export async function GET(req: Request) {
     const headerMap = new Map<
       string,
       {
-        header_id: string | null;
+        inventory_header_id: string | null;
         operatore: string | null;
         label: string | null;
         rapid_session_id: string | null;
@@ -365,32 +353,37 @@ export async function GET(req: Request) {
     >();
 
     for (const h of headers) {
-  const k = makeKey(
-    h.pv_id,
-    h.category_id ?? null,
-    h.subcategory_id ?? null,
-    h.inventory_date,
-    (h as any).rapid_session_id ?? null
-  );
+      const k = makeKey(
+        h.pv_id,
+        h.category_id ?? null,
+        h.subcategory_id ?? null,
+        h.inventory_date,
+        h.rapid_session_id ?? null
+      );
 
-  headerMap.set(k, {
-  header_id: (h as any).id ?? null, // ✅ AGGIUNGI QUESTA RIGA
-  operatore: (h.operatore ?? "").trim() || null,
-  label: String(h.label ?? "").trim() || null,
-  rapid_session_id: String((h as any).rapid_session_id ?? "").trim() || null,
-  updated_at: (h as any).updated_at ?? null,
-});
-}
+      headerMap.set(k, {
+        inventory_header_id: h.id ?? null,
+        operatore: (h.operatore ?? "").trim() || null,
+        label: String(h.label ?? "").trim() || null,
+        rapid_session_id: String(h.rapid_session_id ?? "").trim() || null,
+        updated_at: h.updated_at ?? null,
+      });
+    }
 
-    // nomi PV/CAT/SUB
     const pvIds = Array.from(new Set(list.map((x) => x.pv_id)));
     const catIds = Array.from(new Set(list.map((x) => x.category_id).filter((x): x is string => !!x)));
     const subIds = Array.from(new Set(list.map((x) => x.subcategory_id).filter((x): x is string => !!x)));
 
     const [pvsRes, catsRes, subsRes] = await Promise.all([
-      pvIds.length ? supabaseAdmin.from("pvs").select("id, code, name").in("id", pvIds) : Promise.resolve({ data: [], error: null } as any),
-      catIds.length ? supabaseAdmin.from("categories").select("id, name").in("id", catIds) : Promise.resolve({ data: [], error: null } as any),
-      subIds.length ? supabaseAdmin.from("subcategories").select("id, name, category_id").in("id", subIds) : Promise.resolve({ data: [], error: null } as any),
+      pvIds.length
+        ? supabaseAdmin.from("pvs").select("id, code, name").in("id", pvIds)
+        : Promise.resolve({ data: [], error: null } as any),
+      catIds.length
+        ? supabaseAdmin.from("categories").select("id, name").in("id", catIds)
+        : Promise.resolve({ data: [], error: null } as any),
+      subIds.length
+        ? supabaseAdmin.from("subcategories").select("id, name, category_id").in("id", subIds)
+        : Promise.resolve({ data: [], error: null } as any),
     ]);
 
     if (pvsRes.error) return NextResponse.json({ ok: false, error: pvsRes.error.message }, { status: 500 });
@@ -406,7 +399,6 @@ export async function GET(req: Request) {
     const subMap = new Map<string, { name: string }>();
     (subsRes.data || []).forEach((s: any) => subMap.set(s.id, { name: s.name }));
 
-    // sort
     list.sort((a, b) => {
       if (a.inventory_date !== b.inventory_date) return a.inventory_date < b.inventory_date ? 1 : -1;
       const ap = pvMap.get(a.pv_id)?.code ?? "";
@@ -417,11 +409,12 @@ export async function GET(req: Request) {
     const out = list.map((g) => {
       const isRapid = g.category_id === null;
       const hm = headerMap.get(g.key) || null;
+      const inventory_header_id = hm?.inventory_header_id ?? null;
 
       return {
-        // ✅ nuovo: id header per delete sicura
-       header_id: hm?.header_id ?? null,
-       id: hm?.header_id ?? null, // ✅ AGGIUNGI QUESTA RIGA
+        inventory_header_id,
+        header_id: inventory_header_id,
+        id: inventory_header_id,
 
         key: g.key,
         pv_id: g.pv_id,
@@ -442,6 +435,7 @@ export async function GET(req: Request) {
         operatore: hm?.operatore ?? null,
         label: hm?.label ?? null,
         rapid_session_id: hm?.rapid_session_id ?? g.rapid_session_id ?? null,
+        header_missing: inventory_header_id === null,
       };
     });
 

@@ -241,6 +241,7 @@ export default function InventoryClient() {
 
   // ✅ lista “Scansionati”
   const [scannedIds, setScannedIds] = useState<string[]>([]);
+  const skipNextPvResetRef = useRef(false);
   const [highlightScannedId, setHighlightScannedId] = useState<string | null>(null);
   const [showAllScanned, setShowAllScanned] = useState(false);
 
@@ -430,6 +431,12 @@ export default function InventoryClient() {
 useEffect(() => {
   if (!pvId) return;
 
+  // 🔥 FIX: evita reset durante reopen da URL
+  if (skipNextPvResetRef.current) {
+    skipNextPvResetRef.current = false;
+    return;
+  }
+
   // reset totale come "Nuovo / Pulisci"
   setOperatore("");
   setCategoryNote("");
@@ -523,7 +530,10 @@ useEffect(() => {
       subcategoryId: isRapidUrl ? "" : undefined,
     };
 
-    if (pv) setPvId(pv);
+    if (pv) {
+      skipNextPvResetRef.current = true;
+      setPvId(pv);
+    }
     if (date && isIsoDate(date)) setInventoryDate(date);
     if (op) setOperatore(op);
     // eslint-disable-next-line react-hooks/exhaustive-deps

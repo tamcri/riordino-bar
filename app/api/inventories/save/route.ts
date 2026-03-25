@@ -371,7 +371,34 @@ export async function POST(req: Request) {
   const existingId = existingRow?.id ?? null;
   const existingCreatedBy = (existingRow?.created_by_username ?? null) as string | null;
 
-  const alreadyExists = !!existingId;
+  let existingRowsCount = 0;
+
+  if (existingId) {
+    let existingRowsExistsQ = supabaseAdmin
+      .from("inventories")
+      .select("item_id", { count: "exact", head: true })
+      .eq("pv_id", pv_id)
+      .eq("inventory_date", dateOrNull);
+
+    if (isRapid) existingRowsExistsQ = existingRowsExistsQ.eq("rapid_session_id", rapid_session_id);
+    else existingRowsExistsQ = existingRowsExistsQ.is("rapid_session_id", null);
+
+    if (category_id) existingRowsExistsQ = existingRowsExistsQ.eq("category_id", category_id);
+    else existingRowsExistsQ = existingRowsExistsQ.is("category_id", null);
+
+    if (subcategory_id) existingRowsExistsQ = existingRowsExistsQ.eq("subcategory_id", subcategory_id);
+    else existingRowsExistsQ = existingRowsExistsQ.is("subcategory_id", null);
+
+    const { count, error: existingRowsExistsErr } = await existingRowsExistsQ;
+    if (existingRowsExistsErr) {
+      return NextResponse.json({ ok: false, error: existingRowsExistsErr.message }, { status: 500 });
+    }
+
+    existingRowsCount = Number(count || 0);
+  }
+
+  const orphanHeaderExists = !!existingId && existingRowsCount === 0;
+  const alreadyExists = !!existingId && existingRowsCount > 0;
 
   if (
     alreadyExists &&
@@ -398,7 +425,16 @@ export async function POST(req: Request) {
       .eq("inventory_date", dateOrNull)
       .eq("label", label_norm);
 
-    if (alreadyExists && existingId) {
+    if (category_id) dupeQ = dupeQ.eq("category_id", category_id);
+    else dupeQ = dupeQ.is("category_id", null);
+
+    if (subcategory_id) dupeQ = dupeQ.eq("subcategory_id", subcategory_id);
+    else dupeQ = dupeQ.is("subcategory_id", null);
+
+    if (isRapid) dupeQ = dupeQ.eq("rapid_session_id", rapid_session_id);
+    else dupeQ = dupeQ.is("rapid_session_id", null);
+
+    if (existingId) {
       dupeQ = dupeQ.neq("id", existingId);
     }
 
@@ -411,14 +447,14 @@ export async function POST(req: Request) {
           ok: false,
           code: "LABEL_ALREADY_EXISTS",
           error:
-            "Esiste già un inventario con la stessa nota per questo PV e questa data. Cambia la nota e riprova.",
+            "Esiste già un inventario con la stessa nota per questo stesso contesto inventario. Cambia la nota e riprova.",
         },
         { status: 409 }
       );
     }
   }
 
-  if (!alreadyExists) {
+  if (!existingId) {
     const headerPayload = {
       pv_id,
       category_id,
@@ -445,13 +481,27 @@ export async function POST(req: Request) {
             ok: false,
             code: "LABEL_ALREADY_EXISTS",
             error:
-              "Esiste già un inventario con la stessa nota per questo PV e questa data. Cambia la nota e riprova.",
+              "Esiste già un inventario con la stessa nota per questo stesso contesto inventario. Cambia la nota e riprova.",
           },
           { status: 409 }
         );
       }
 
       return NextResponse.json({ ok: false, error: insErr.message }, { status: 500 });
+    }
+  } else if (orphanHeaderExists) {
+    const { error: updOrphanErr } = await supabaseAdmin
+      .from("inventories_headers")
+      .update({
+        operatore,
+        label: label_norm,
+        updated_at: new Date().toISOString(),
+      } as any)
+      .eq("id", existingId);
+
+    if (updOrphanErr) {
+      console.error("[inventories/save] orphan header update error:", updOrphanErr);
+      return NextResponse.json({ ok: false, error: updOrphanErr.message }, { status: 500 });
     }
   } else {
     if (!body.force_overwrite) {
@@ -906,8 +956,8 @@ export async function POST(req: Request) {
 
       try {
         if (!recountMode) {
-  invalidatedProgressiviSnapshots = await invalidateProgressiviSnapshots(existingId);
-}
+          invalidatedProgressiviSnapshots = await invalidateProgressiviSnapshots(existingId);
+        }
       } catch (e: any) {
         console.error("[inventories/save] progressivi snapshot invalidate error:", e);
         return NextResponse.json(
@@ -917,7 +967,7 @@ export async function POST(req: Request) {
       }
     }
 
-    if (!alreadyExists) {
+    if (!alreadyExists && !orphanHeaderExists) {
       return NextResponse.json(
         { ok: false, error: "Nessuna riga valida (tutte a 0)" },
         { status: 400 }
@@ -931,11 +981,12 @@ export async function POST(req: Request) {
       operatore,
       enforced_pv: session.role === "punto_vendita",
       overwritten: alreadyExists,
-      partial_merge: true,
+      partial_merge: alreadyExists,
       recount_mode: recountMode,
       recount_events_saved: recountMode ? recountEventsUpsertPayload.length : 0,
       invalidated_progressivi_snapshots: invalidatedProgressiviSnapshots,
       label: label_norm,
+      ...(orphanHeaderExists ? { recovered_orphan_header: true } : {}),
     });
   }
 
@@ -962,8 +1013,8 @@ export async function POST(req: Request) {
 
     try {
       if (!recountMode) {
-  invalidatedProgressiviSnapshots = await invalidateProgressiviSnapshots(existingId);
-}
+        invalidatedProgressiviSnapshots = await invalidateProgressiviSnapshots(existingId);
+      }
     } catch (e: any) {
       console.error("[inventories/save] progressivi snapshot invalidate error:", e);
       return NextResponse.json(
@@ -1006,6 +1057,7 @@ export async function POST(req: Request) {
     recount_events_saved: recountMode ? recountEventsUpsertPayload.length : 0,
     invalidated_progressivi_snapshots: invalidatedProgressiviSnapshots,
     label: label_norm,
+    ...(orphanHeaderExists ? { recovered_orphan_header: true } : {}),
     ...(deposit_sync ? { deposit_sync } : {}),
     ...(warning ? { warning } : {}),
   });

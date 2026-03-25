@@ -10,10 +10,12 @@ type Category = { id: string; name: string; slug?: string; is_active?: boolean }
 type Subcategory = { id: string; category_id: string; name: string; slug?: string; is_active?: boolean };
 
 type InventoryGroup = {
-  // ✅ spesso qui dentro c’è già l’id header oppure una chiave composta
   key: string;
 
-  // ✅ NUOVO: se /api/inventories/list restituisce id, lo usiamo per delete sicura
+  // ✅ id reale header inventario restituito dalla list API
+  inventory_header_id?: string | null;
+
+  // ✅ compat legacy
   id?: string | null;
   header_id?: string | null;
 
@@ -21,14 +23,13 @@ type InventoryGroup = {
   pv_code: string;
   pv_name: string;
 
-  // ✅ Rapido => null
   category_id: string | null;
   category_name: string;
 
   subcategory_id: string | null;
   subcategory_name: string;
 
-  inventory_date: string; // YYYY-MM-DD
+  inventory_date: string;
   created_by_username: string | null;
   created_at: string | null;
 
@@ -40,12 +41,10 @@ type InventoryGroup = {
   value_sum?: number;
 
   operatore?: string | null;
-
-  // ✅ serve per riaprire Rapido senza aprire "vuoto"
   rapid_session_id?: string | null;
-
-  // ✅ nota/etichetta
   label?: string | null;
+
+  header_missing?: boolean;
 };
 
 type InventoryLine = {
@@ -53,22 +52,11 @@ type InventoryLine = {
   item_id: string;
   code: string;
   description: string;
-
-  // ✅ PZ (bottiglie chiuse equivalenti se ML)
   qty: number;
-
-  // ✅ GR (peso aperto)
   qty_gr?: number;
-
-  // ✅ ML totale
   qty_ml?: number;
-
-  // ✅ volume per unità (se item ML)
   volume_ml_per_unit?: number | null;
-
-  // ✅ ML "aperto"
   ml_open?: number | null;
-
   prezzo_vendita_eur?: number | null;
 };
 
@@ -108,6 +96,16 @@ function isUuid(v: string | null | undefined) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(v).trim());
 }
 
+function getInventoryHeaderId(g: Partial<InventoryGroup> | null | undefined) {
+  if (!g) return "";
+  const candidate =
+    String(g.inventory_header_id || "").trim() ||
+    String(g.header_id || "").trim() ||
+    String(g.id || "").trim();
+
+  return isUuid(candidate) ? candidate : "";
+}
+
 async function fetchJsonSafe<T = any>(
   url: string,
   init?: RequestInit
@@ -135,9 +133,6 @@ async function fetchJsonSafe<T = any>(
   return { ok, data, status, rawText };
 }
 
-/** =========================
- *  Helpers querystring / formdata (UNICI)
- *  ========================= */
 function normStr(v: unknown): string {
   return String(v ?? "").trim();
 }
@@ -148,13 +143,11 @@ function setParam(p: URLSearchParams, key: string, value: string | null | undefi
   p.set(key, s);
 }
 
-/** Categoria: UUID oppure NULL (Rapido). In querystring usiamo "null" stringa per NULL */
 function setCategoryParam(p: URLSearchParams, category_id: string | null) {
   if (category_id === null) p.set("category_id", "null");
   else setParam(p, "category_id", category_id);
 }
 
-/** FormData categoria coerente con querystring */
 function appendCategoryFd(fd: FormData, category_id: string | null) {
   if (category_id === null) fd.append("category_id", "null");
   else {
@@ -163,7 +156,6 @@ function appendCategoryFd(fd: FormData, category_id: string | null) {
   }
 }
 
-/** Params per /api/inventories/rows (dettaglio) — coerenti e senza duplicati */
 function buildRowsParamsFromGroup(g: InventoryGroup) {
   const p = new URLSearchParams();
   p.set("pv_id", g.pv_id);
@@ -172,14 +164,11 @@ function buildRowsParamsFromGroup(g: InventoryGroup) {
   const isRapid = g.category_id === null;
 
   if (isRapid) {
-    // Rapido: category_id NULL + rapid_session_id obbligatoria
     p.set("category_id", "null");
 
     const rs = normStr(g.rapid_session_id);
     if (rs) p.set("rapid_session_id", rs);
-    // in rapido subcategory_id NON va passata (in DB è NULL)
   } else {
-    // Standard
     setCategoryParam(p, g.category_id);
     if (g.subcategory_id) setParam(p, "subcategory_id", g.subcategory_id);
   }
@@ -187,7 +176,6 @@ function buildRowsParamsFromGroup(g: InventoryGroup) {
   return p;
 }
 
-/** URL riapertura inventario (modifica / riconta) */
 function buildReopenUrl(g: InventoryGroup, role: string | null, reopenMode: "edit" | "recount" = "edit") {
   const p = new URLSearchParams();
   p.set("pv_id", g.pv_id);
@@ -196,7 +184,6 @@ function buildReopenUrl(g: InventoryGroup, role: string | null, reopenMode: "edi
   const isRapid = g.category_id === null;
 
   if (isRapid) {
-    // IMPORTANTISSIMO: per attivare il ramo Rapido server-side e per /rows
     p.set("category_id", "null");
     p.set("rapid", "1");
     p.set("mode", "rapid");
@@ -206,10 +193,8 @@ function buildReopenUrl(g: InventoryGroup, role: string | null, reopenMode: "edi
   } else {
     setCategoryParam(p, g.category_id);
     if (g.subcategory_id) setParam(p, "subcategory_id", g.subcategory_id);
-    // NON forzo mode=rapid per lo standard: niente stravolgimenti UX
   }
 
-  // operatore/label per prefill UI (e per non “sparire”)
   const op = normStr(g.operatore);
   if (op) p.set("operatore", op);
 
@@ -264,7 +249,6 @@ export default function InventoryHistoryClient() {
   const [compareMsg, setCompareMsg] = useState<string | null>(null);
   const [compareDownloadUrl, setCompareDownloadUrl] = useState<string | null>(null);
 
-  // ✅ MODAL PROGRESSIVI
   const [progressiviOpen, setProgressiviOpen] = useState(false);
   const [progressiviTarget, setProgressiviTarget] = useState<InventoryGroup | null>(null);
   const [progressiviFile, setProgressiviFile] = useState<File | null>(null);
@@ -287,7 +271,6 @@ export default function InventoryHistoryClient() {
     });
   }, [detail, searchDetail]);
 
-  // ✅ Articoli: conta righe con qty>0 oppure qty_ml>0 oppure qty_gr>0
   const detailArticoli = useMemo(() => {
     return detail.reduce((n, r: any) => {
       const q = Number(r.qty) || 0;
@@ -309,7 +292,6 @@ export default function InventoryHistoryClient() {
     }, 0);
   }, [detail]);
 
-  // ✅ Valore: se ML => (qty_ml/volume)*prezzo, altrimenti qty*prezzo
   const detailValueEur = useMemo(() => {
     return detail.reduce((sum, r) => {
       const p = Number(r.prezzo_vendita_eur);
@@ -395,8 +377,6 @@ export default function InventoryHistoryClient() {
         throw new Error("Intervallo date non valido: 'Dal' è dopo 'Al'.");
 
       if (effectiveMe.isPv) {
-        // ✅ PV lavora in modalità Rapido: nello storico filtriamo SOLO per date.
-        // (le categorie sono un concetto "standard" e qui non servono)
       } else {
         if (pvId) params.set("pv_id", pvId);
         if (categoryId) params.set("category_id", categoryId);
@@ -461,12 +441,11 @@ export default function InventoryHistoryClient() {
     }
 
     const params = new URLSearchParams();
+    const headerId = getInventoryHeaderId(g);
 
-    // ✅ nuovo: esporta singolo inventario
-    if (g.header_id) {
-      params.set("header_id", g.header_id);
+    if (headerId) {
+      params.set("header_id", headerId);
     } else {
-      // fallback vecchio (non dovrebbe più servire, ma meglio tenerlo)
       params.set("pv_id", g.pv_id);
       setCategoryParam(params, g.category_id);
       params.set("inventory_date", g.inventory_date);
@@ -476,7 +455,6 @@ export default function InventoryHistoryClient() {
     window.location.href = `/api/inventories/excel?${params.toString()}`;
   }
 
-  // ✅ NUOVO: scarica Report Progressivi (SOLO admin/amministrativo)
   function downloadReportProgressivi(g: InventoryGroup, effectiveMe: MeState) {
     if (!(effectiveMe.role === "admin" || effectiveMe.role === "amministrativo")) {
       setError("Non autorizzato.");
@@ -484,7 +462,9 @@ export default function InventoryHistoryClient() {
     }
 
     const qs = new URLSearchParams();
-    if (g.header_id || g.id) qs.set("header_id", g.header_id || g.id || "");
+    const headerId = getInventoryHeaderId(g);
+
+    if (headerId) qs.set("header_id", headerId);
     else {
       qs.set("pv_id", g.pv_id);
       qs.set("inventory_date", g.inventory_date);
@@ -574,15 +554,20 @@ export default function InventoryHistoryClient() {
     setProgressiviError(null);
     setProgressiviMsg(null);
 
-    // ✅ reset stato "primo inserimento"
     setProgressiviIsFirst(false);
     setProgressiviChecked(false);
 
-    // ✅ controlla se esistono già progressivi per PV + data
     (async () => {
       try {
+        const headerId = getInventoryHeaderId(g);
+        if (!headerId) {
+          setProgressiviError("ID inventario mancante: impossibile controllare lo stato progressivi.");
+          setProgressiviChecked(true);
+          return;
+        }
+
         const qs = new URLSearchParams();
-        qs.set("inventory_header_id", g.header_id || g.id || "");
+        qs.set("inventory_header_id", headerId);
 
         const res = await fetch(`/api/inventories/progressivi/status?${qs.toString()}`, {
           cache: "no-store",
@@ -625,64 +610,64 @@ export default function InventoryHistoryClient() {
   }
 
   async function startProgressiviUpload() {
-  if (!progressiviTarget) return;
+    if (!progressiviTarget) return;
 
-  if (!progressiviFile) {
-    setProgressiviError("Carica prima il file progressivi (.xls/.xlsx).");
-    return;
-  }
+    if (!progressiviFile) {
+      setProgressiviError("Carica prima il file progressivi (.xls/.xlsx).");
+      return;
+    }
 
-  // ✅ Se è il primo inserimento, chiedi conferma
-  if (progressiviIsFirst) {
-    const ok = window.confirm(
-      "Questo è il PRIMO caricamento Progressivi per questo PV.\n\n" +
-        "Non ti chiederò dati manuali: userò questo file come BASE.\n" +
-        "Dal prossimo inventario in poi calcolerò venduto periodo e ammanco.\n\n" +
-        "Vuoi procedere?"
-    );
-    if (!ok) return;
-  }
+    const headerId = getInventoryHeaderId(progressiviTarget);
+    if (!headerId) {
+      setProgressiviError("ID inventario mancante: impossibile associare i progressivi.");
+      return;
+    }
 
-  setProgressiviLoading(true);
-  setProgressiviError(null);
-  setProgressiviMsg(null);
+    if (progressiviIsFirst) {
+      const ok = window.confirm(
+        "Questo è il PRIMO caricamento Progressivi per questo PV.\n\n" +
+          "Non ti chiederò dati manuali: userò questo file come BASE.\n" +
+          "Dal prossimo inventario in poi calcolerò venduto periodo e ammanco.\n\n" +
+          "Vuoi procedere?"
+      );
+      if (!ok) return;
+    }
 
-  try {
-    const fd = new FormData();
-    fd.append("file", progressiviFile);
-    fd.append("pv_id", progressiviTarget.pv_id);
-    fd.append("inventory_date", progressiviTarget.inventory_date);
+    setProgressiviLoading(true);
+    setProgressiviError(null);
+    setProgressiviMsg(null);
 
-    // ✅ NUOVO: header_id (PRIMA COSA IMPORTANTE)
-    fd.append(
-      "inventory_header_id",
-      progressiviTarget.header_id || progressiviTarget.id || ""
-    );
-
-    const res = await fetch("/api/inventories/progressivi/upload", {
-      method: "POST",
-      body: fd,
-    });
-
-    const text = await res.text().catch(() => "");
-    let json: any = null;
     try {
-      json = text ? JSON.parse(text) : null;
-    } catch {
-      json = null;
-    }
+      const fd = new FormData();
+      fd.append("file", progressiviFile);
+      fd.append("pv_id", progressiviTarget.pv_id);
+      fd.append("inventory_date", progressiviTarget.inventory_date);
+      fd.append("inventory_header_id", headerId);
 
-    if (!res.ok || !json?.ok) {
-      throw new Error(json?.error || text || `Errore upload (HTTP ${res.status})`);
-    }
+      const res = await fetch("/api/inventories/progressivi/upload", {
+        method: "POST",
+        body: fd,
+      });
 
-    setProgressiviMsg(`Progressivi caricati. Righe importate: ${json.rows ?? "?"}`);
-  } catch (e: any) {
-    setProgressiviError(e?.message || "Errore upload progressivi");
-  } finally {
-    setProgressiviLoading(false);
+      const text = await res.text().catch(() => "");
+      let json: any = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        json = null;
+      }
+
+      if (!res.ok || !json?.ok) {
+        throw new Error(json?.error || text || `Errore upload (HTTP ${res.status})`);
+      }
+
+      setProgressiviMsg(`Progressivi caricati. Righe importate: ${json.rows ?? "?"}`);
+    } catch (e: any) {
+      setProgressiviError(e?.message || "Errore upload progressivi");
+    } finally {
+      setProgressiviLoading(false);
+    }
   }
-}
 
   const [actionsOpenKey, setActionsOpenKey] = useState<string | null>(null);
   const [menuPos, setMenuPos] = useState<MenuPos | null>(null);
@@ -767,12 +752,11 @@ export default function InventoryHistoryClient() {
   async function deleteInventory(g: InventoryGroup) {
     if (me.role !== "admin") return;
 
-    // ✅ header_id robusto: prima id/header_id, poi key se è UUID
-    const headerIdCandidate =
-      normStr((g as any).header_id) || normStr((g as any).id) || (isUuid(g.key) ? g.key : "");
-    if (!headerIdCandidate || !isUuid(headerIdCandidate)) {
+    const headerIdCandidate = getInventoryHeaderId(g);
+
+    if (!headerIdCandidate) {
       setError(
-        "Eliminazione bloccata: non trovo l'ID dell'inventario. Serve che /api/inventories/list restituisca 'id' (header) oppure che 'key' sia un UUID."
+        "Eliminazione bloccata: non trovo l'ID reale dell'inventario. Verifica che /api/inventories/list restituisca inventory_header_id."
       );
       return;
     }
@@ -789,7 +773,6 @@ export default function InventoryHistoryClient() {
     try {
       setError(null);
 
-      // ✅ NUOVO: delete SICURA per header_id
       const params = new URLSearchParams();
       params.set("header_id", headerIdCandidate);
 
@@ -807,7 +790,6 @@ export default function InventoryHistoryClient() {
         const looksHtml = (text || "").trim().startsWith("<!DOCTYPE") || (text || "").includes("<html");
         if (looksHtml) throw new Error("Errore eliminazione: endpoint /api/inventories/delete non trovato o risposta non valida.");
 
-        // messaggio più chiaro se arriva il blocco legacy (non dovrebbe più capitare)
         if (json?.code === "DELETE_AMBIGUOUS") {
           throw new Error(json?.error || "Eliminazione bloccata: inventario ambiguo. Aggiorna la pagina e riprova.");
         }
@@ -858,7 +840,6 @@ export default function InventoryHistoryClient() {
         setLoading(false);
       }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -871,7 +852,6 @@ export default function InventoryHistoryClient() {
         setError(e?.message || "Errore");
       }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [categoryId, me.role]);
 
   useEffect(() => {
@@ -883,12 +863,10 @@ export default function InventoryHistoryClient() {
         setError(e?.message || "Errore");
       }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pvId, categoryId, subcategoryId, dateFromISO, dateToISO, me.role]);
 
   return (
     <div className="space-y-4">
-      {/* Date (per tutti) */}
       <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
         <div>
           <label className="block text-sm font-medium mb-2">Dal</label>
@@ -912,7 +890,6 @@ export default function InventoryHistoryClient() {
         </div>
       </div>
 
-      {/* Admin/Ammin: filtri completi */}
       {!me.isPv && (
         <div className="rounded-2xl border bg-white p-4 grid grid-cols-1 md:grid-cols-3 gap-3">
           <div>
@@ -960,7 +937,6 @@ export default function InventoryHistoryClient() {
 
       {error && <p className="text-sm text-red-600">{error}</p>}
 
-      {/* lista inventari */}
       <div className="overflow-auto rounded-2xl border bg-white">
         <table className="w-full text-sm">
           <thead className="bg-gray-50">
@@ -1069,7 +1045,6 @@ export default function InventoryHistoryClient() {
 
               const canReopenBase = me.role === "admin" || me.role === "amministrativo" || me.role === "punto_vendita";
 
-              // ✅ admin può sempre riaprire/modificare
               const canReopenOwner =
                 me.role === "admin" ? true : !g.created_by_username || (me.username && g.created_by_username === me.username);
 
@@ -1093,8 +1068,6 @@ export default function InventoryHistoryClient() {
                             return;
                           }
 
-                          // ✅ Rapido: se manca rapid_session_id (inventari vecchi), NON blocco.
-                          // Avviso solo: potrebbe riaprire “vuoto” oppure prendere righe legacy (sessione NULL).
                           if (isRapid && !rs) {
                             const ok = window.confirm(
                               "Questo inventario è in modalità Rapido ma non ha rapid_session_id (vecchio inventario).\n" +
@@ -1154,7 +1127,6 @@ export default function InventoryHistoryClient() {
                     Excel
                   </button>
 
-                  {/* ✅ NUOVO: Report Progressivi (solo admin/amministrativo) */}
                   {canCompare && (
                     <button
                       className="text-left rounded-lg px-3 py-2 hover:bg-gray-50 text-sm"
@@ -1217,7 +1189,6 @@ export default function InventoryHistoryClient() {
           document.body
         )}
 
-      {/* dettaglio */}
       {selected && (
         <div className="rounded-2xl border bg-white p-4 space-y-3">
           <div className="flex items-start justify-between gap-3">
@@ -1323,7 +1294,6 @@ export default function InventoryHistoryClient() {
         </div>
       )}
 
-      {/* MODAL COMPARA */}
       {compareOpen && compareTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/40" onClick={closeCompare} />
@@ -1384,7 +1354,6 @@ export default function InventoryHistoryClient() {
         </div>
       )}
 
-      {/* MODAL PROGRESSIVI */}
       {progressiviOpen && progressiviTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/40" onClick={closeProgressivi} />
@@ -1441,7 +1410,6 @@ export default function InventoryHistoryClient() {
     </div>
   );
 }
-
 
 
 
