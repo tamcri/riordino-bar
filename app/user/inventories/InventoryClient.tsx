@@ -426,6 +426,46 @@ export default function InventoryClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ✅ RESET COMPLETO quando cambio PV
+useEffect(() => {
+  if (!pvId) return;
+
+  // reset totale come "Nuovo / Pulisci"
+  setOperatore("");
+  setCategoryNote("");
+
+  setSearch("");
+  setScannedIds([]);
+  setShowAllScanned(false);
+
+  setQtyPzMap({});
+  setQtyGrMap({});
+  setOpenMlMap({});
+  setTotalMlMap({});
+  setMlModeMap({});
+
+  setAddPzMap({});
+  setAddGrMap({});
+  setAddOpenMlMap({});
+  setAddTotalMlMap({});
+
+  setHighlightScannedId(null);
+  setFocusItemId(null);
+
+  // ✅ nuova sessione rapido (importantissimo)
+  const newSession = newRapidSessionId();
+  setRapidSessionId(newSession);
+
+  if (pvId && isIsoDate(inventoryDate)) {
+    writeRapidSessionToStorage(pvId, inventoryDate, newSession);
+  }
+
+  // ✅ evita che rientri roba vecchia
+  lastPrefillKeyRef.current = "";
+
+  // ✅ NON tocco items → verranno ricaricati automaticamente
+}, [pvId]);
+
   useEffect(() => {
     if (didInitFromUrlRef.current) return;
     didInitFromUrlRef.current = true;
