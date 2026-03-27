@@ -752,12 +752,14 @@ export async function POST(req: Request) {
 
   const incomingPreparedRows = Array.from(byItem.values());
 
-  let payload = incomingPreparedRows.filter(
-    (r: any) =>
-      (Number(r.qty) || 0) > 0 ||
-      (Number(r.qty_ml) || 0) > 0 ||
-      (Number(r.qty_gr) || 0) > 0
-  );
+  let payload = recountMode
+  ? incomingPreparedRows
+  : incomingPreparedRows.filter(
+      (r: any) =>
+        (Number(r.qty) || 0) > 0 ||
+        (Number(r.qty_ml) || 0) > 0 ||
+        (Number(r.qty_gr) || 0) > 0
+    );
 
   let recountEventsPayload: any[] = [];
   let recountEventsUpsertPayload: any[] = [];

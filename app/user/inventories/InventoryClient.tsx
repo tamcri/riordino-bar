@@ -1061,66 +1061,114 @@ useEffect(() => {
   }
 
   function setPz(itemId: string, v: string) {
-    const cleaned = onlyDigits(v);
-    setQtyPzMap((prev) => ({ ...prev, [itemId]: cleaned }));
-    setHighlightScannedId(itemId);
+  const cleaned = onlyDigits(v);
+  const nextPz = safeIntFromStr(cleaned);
 
-    // ✅ se reinserisco l'articolo non deve restare tra gli eliminati
-    setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
+  setQtyPzMap((prev) => ({ ...prev, [itemId]: cleaned }));
+  setHighlightScannedId(itemId);
 
-    const it = items.find((x) => x.id === itemId);
-    if (it) {
-      const nextPz = safeIntFromStr(cleaned);
-      ensureScannedPresence(itemId, isActiveWithOverrides(it, { pz: nextPz }));
-      if (isActiveWithOverrides(it, { pz: nextPz })) highlightAndMoveToTop(itemId);
+  const it = items.find((x) => x.id === itemId);
+
+  if (it) {
+    const wasActive = isActiveFromState(it);
+    const willBeActive = nextPz > 0;
+
+    // 👉 se era attivo e ora è 0 → diventa eliminato
+    if (wasActive && !willBeActive) {
+      setDeletedItemIds((prev) =>
+        prev.includes(itemId) ? prev : [...prev, itemId]
+      );
     }
+
+    // 👉 se torna >0 → lo riattivo
+    if (willBeActive) {
+      setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
+    }
+
+    ensureScannedPresence(itemId, willBeActive);
   }
+}
 
   function setGr(itemId: string, v: string) {
-    const cleaned = onlyDigits(v);
-    setQtyGrMap((prev) => ({ ...prev, [itemId]: cleaned }));
-    setHighlightScannedId(itemId);
+  const cleaned = onlyDigits(v);
+  const nextGr = safeIntFromStr(cleaned);
 
-    // ✅ se reinserisco l'articolo non deve restare tra gli eliminati
-    setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
+  setQtyGrMap((prev) => ({ ...prev, [itemId]: cleaned }));
+  setHighlightScannedId(itemId);
 
-    const it = items.find((x) => x.id === itemId);
-    if (it) {
-      const nextGr = safeIntFromStr(cleaned);
-      ensureScannedPresence(itemId, isActiveWithOverrides(it, { gr: nextGr }));
-      if (isActiveWithOverrides(it, { gr: nextGr })) highlightAndMoveToTop(itemId);
+  const it = items.find((x) => x.id === itemId);
+
+  if (it) {
+    const wasActive = isActiveFromState(it);
+    const willBeActive = nextGr > 0;
+
+    if (wasActive && !willBeActive) {
+      setDeletedItemIds((prev) =>
+        prev.includes(itemId) ? prev : [...prev, itemId]
+      );
     }
+
+    if (willBeActive) {
+      setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
+    }
+
+    ensureScannedPresence(itemId, willBeActive);
   }
+}
 
   function setOpenMl(itemId: string, v: string) {
-    const cleaned = onlyDigits(v);
-    setOpenMlMap((prev) => ({ ...prev, [itemId]: cleaned }));
-    setHighlightScannedId(itemId);
+  const cleaned = onlyDigits(v);
+  const nextMl = safeIntFromStr(cleaned);
 
-    // ✅ se reinserisco l'articolo non deve restare tra gli eliminati
-    setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
+  setOpenMlMap((prev) => ({ ...prev, [itemId]: cleaned }));
+  setHighlightScannedId(itemId);
 
-    const it = items.find((x) => x.id === itemId);
-    if (it) {
-      ensureScannedPresence(itemId, true);
-      highlightAndMoveToTop(itemId);
+  const it = items.find((x) => x.id === itemId);
+
+  if (it) {
+    const wasActive = isActiveFromState(it);
+    const willBeActive = nextMl > 0;
+
+    if (wasActive && !willBeActive) {
+      setDeletedItemIds((prev) =>
+        prev.includes(itemId) ? prev : [...prev, itemId]
+      );
     }
+
+    if (willBeActive) {
+      setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
+    }
+
+    ensureScannedPresence(itemId, willBeActive);
   }
+}
 
   function setTotalMl(itemId: string, v: string) {
-    const cleaned = onlyDigits(v);
-    setTotalMlMap((prev) => ({ ...prev, [itemId]: cleaned }));
-    setHighlightScannedId(itemId);
+  const cleaned = onlyDigits(v);
+  const nextMl = safeIntFromStr(cleaned);
 
-    // ✅ se reinserisco l'articolo non deve restare tra gli eliminati
-    setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
+  setTotalMlMap((prev) => ({ ...prev, [itemId]: cleaned }));
+  setHighlightScannedId(itemId);
 
-    const it = items.find((x) => x.id === itemId);
-    if (it) {
-      ensureScannedPresence(itemId, true);
-      highlightAndMoveToTop(itemId);
+  const it = items.find((x) => x.id === itemId);
+
+  if (it) {
+    const wasActive = isActiveFromState(it);
+    const willBeActive = nextMl > 0;
+
+    if (wasActive && !willBeActive) {
+      setDeletedItemIds((prev) =>
+        prev.includes(itemId) ? prev : [...prev, itemId]
+      );
     }
+
+    if (willBeActive) {
+      setDeletedItemIds((prev) => prev.filter((id) => id !== itemId));
+    }
+
+    ensureScannedPresence(itemId, willBeActive);
   }
+}
 
   function setMlMode(itemId: string, mode: MlInputMode) {
     setMlModeMap((prev) => ({ ...prev, [itemId]: mode }));
