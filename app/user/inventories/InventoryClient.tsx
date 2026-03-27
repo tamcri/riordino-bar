@@ -311,28 +311,21 @@ export default function InventoryClient() {
   }, [mlModeMap]);
 
   useEffect(() => {
-    // ✅ se sto riaprendo da storico con sessione in URL, NON tocco niente
-    if (rapidSessionFromUrlRef.current) return;
+  // ✅ se sto riaprendo da storico con sessione in URL, NON tocco niente
+  if (rapidSessionFromUrlRef.current) return;
 
-    if (!pvId) return;
-    if (!inventoryDate || !isIsoDate(inventoryDate)) return;
+  if (!pvId) return;
+  if (!inventoryDate || !isIsoDate(inventoryDate)) return;
 
-    const stored = readRapidSessionFromStorage(pvId, inventoryDate);
-
-    if (stored && stored !== rapidSessionId) {
-      // ✅ FONDAMENTALE: sblocco prefill/draft con la nuova sessione
-      lastPrefillKeyRef.current = "";
-
-      setRapidSessionId(stored);
-      return;
-    }
-
-    if (isUuid(rapidSessionId)) {
-      writeRapidSessionToStorage(pvId, inventoryDate, rapidSessionId);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pvId, inventoryDate, rapidSessionId]);
-
+  // ✅ Opzione A:
+  // non riuso mai la rapid_session_id da localStorage,
+  // altrimenti rischio di riprendere una vecchia sessione
+  // e il backend la vede come lo stesso inventario.
+  if (isUuid(rapidSessionId)) {
+    writeRapidSessionToStorage(pvId, inventoryDate, rapidSessionId);
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [pvId, inventoryDate, rapidSessionId]);
   // ✅ in RAPIDO calcolo “attivo” usando gli STATE (non i ref),
   // così la lista Scansionati si aggiorna immediatamente (senza lag/race)
   function isActiveFromState(it: Item) {
