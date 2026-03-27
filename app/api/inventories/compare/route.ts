@@ -57,14 +57,15 @@ export async function POST(req: Request) {
   }
 
   const file = form.get("file");
-  const pv_id = String(form.get("pv_id") ?? "").trim();
+const inventory_header_id = String(form.get("inventory_header_id") ?? "").trim();
+const pv_id = String(form.get("pv_id") ?? "").trim();
 
-  // ✅ Rapido: category_id può essere null (form: omesso, "", "null")
-  const category_id = normNullParam(form.get("category_id"));
-  // ✅ subcategory: "" / "null" / omesso => null
-  const subcategory_id = normNullParam(form.get("subcategory_id"));
+// ✅ Rapido: category_id può essere null (form: omesso, "", "null")
+const category_id = normNullParam(form.get("category_id"));
+// ✅ subcategory: "" / "null" / omesso => null
+const subcategory_id = normNullParam(form.get("subcategory_id"));
 
-  const inventory_date = String(form.get("inventory_date") ?? "").trim();
+const inventory_date = String(form.get("inventory_date") ?? "").trim();
 
   if (!(file instanceof File)) {
     return NextResponse.json(
@@ -72,6 +73,13 @@ export async function POST(req: Request) {
       { status: 400 }
     );
   }
+
+  if (inventory_header_id && !isUuid(inventory_header_id)) {
+  return NextResponse.json(
+    { ok: false, error: "inventory_header_id non valido" },
+    { status: 400 }
+  );
+}
 
   if (!isUuid(pv_id)) return NextResponse.json({ ok: false, error: "pv_id non valido" }, { status: 400 });
 
@@ -125,10 +133,27 @@ export async function POST(req: Request) {
 
   const pvLabel = pvRes.data ? `${pvRes.data.code} — ${pvRes.data.name}` : pv_id;
 
-  // 3) operatore dalla testata
+  // 3) testata inventario corretta: prima provo con inventory_header_id, altrimenti fallback legacy
+let currentHeader: any = null;
+
+if (inventory_header_id) {
+  const { data: headerById, error: headerByIdErr } = await supabaseAdmin
+    .from("inventories_headers")
+    .select("id, operatore, category_id, subcategory_id, rapid_session_id")
+    .eq("id", inventory_header_id)
+    .maybeSingle();
+
+  if (headerByIdErr) {
+    return NextResponse.json({ ok: false, error: headerByIdErr.message }, { status: 500 });
+  }
+
+  currentHeader = headerById ?? null;
+}
+
+if (!currentHeader) {
   let hq = supabaseAdmin
     .from("inventories_headers")
-    .select("operatore")
+    .select("id, operatore, category_id, subcategory_id, rapid_session_id")
     .eq("pv_id", pv_id)
     .eq("inventory_date", inventory_date);
 
@@ -138,10 +163,21 @@ export async function POST(req: Request) {
   if (subcategory_id) hq = hq.eq("subcategory_id", subcategory_id);
   else hq = hq.is("subcategory_id", null);
 
-  const { data: headers, error: headerErr } = await hq.order("id", { ascending: false }).limit(1);
-  if (headerErr) return NextResponse.json({ ok: false, error: headerErr.message }, { status: 500 });
+  const { data: headers, error: headerErr } = await hq.order("updated_at", { ascending: false }).limit(1);
+  if (headerErr) {
+    return NextResponse.json({ ok: false, error: headerErr.message }, { status: 500 });
+  }
 
-  const operatore = ((headers?.[0] as any)?.operatore || "").toString().trim() || "—";
+  currentHeader = (headers?.[0] as any) ?? null;
+}
+
+const operatore = String(currentHeader?.operatore ?? "").trim() || "—";
+
+// ✅ contesto reale dell'inventario selezionato
+const currentHeaderCategoryId = (currentHeader?.category_id ?? null) as string | null;
+const currentHeaderSubcategoryId = (currentHeader?.subcategory_id ?? null) as string | null;
+const currentHeaderRapidSessionId = (currentHeader?.rapid_session_id ?? null) as string | null;
+const currentHeaderIsRapid = currentHeaderCategoryId === null;
 
   // 4) righe inventario + join items (LEFT JOIN)
   // ✅ QUI aggiungo category/subcategory names dagli items, così poi inventoryCompare può creare fogli per gruppo.

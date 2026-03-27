@@ -515,11 +515,22 @@ export default function InventoryHistoryClient() {
 
     try {
       const fd = new FormData();
-      fd.append("file", compareFile);
-      fd.append("pv_id", compareTarget.pv_id);
-      appendCategoryFd(fd, compareTarget.category_id);
-      fd.append("inventory_date", compareTarget.inventory_date);
-      if (compareTarget.subcategory_id) fd.append("subcategory_id", compareTarget.subcategory_id);
+fd.append("file", compareFile);
+
+// ✅ aggiungi header_id se disponibile
+const headerId = getInventoryHeaderId(compareTarget);
+if (headerId) {
+  fd.append("inventory_header_id", headerId);
+}
+
+// ✅ questi DEVONO SEMPRE esserci
+fd.append("pv_id", compareTarget.pv_id);
+appendCategoryFd(fd, compareTarget.category_id);
+fd.append("inventory_date", compareTarget.inventory_date);
+
+if (compareTarget.subcategory_id) {
+  fd.append("subcategory_id", compareTarget.subcategory_id);
+}
 
       const res = await fetch("/api/inventories/compare", { method: "POST", body: fd });
 

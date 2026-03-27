@@ -422,17 +422,21 @@ export async function POST(req: Request) {
       .from("inventories_headers")
       .select("id")
       .eq("pv_id", pv_id)
-      .eq("inventory_date", dateOrNull)
-      .eq("label", label_norm);
+      .eq("inventory_date", dateOrNull);
 
-    if (category_id) dupeQ = dupeQ.eq("category_id", category_id);
-    else dupeQ = dupeQ.is("category_id", null);
+    if (!isRapid) {
+      dupeQ = dupeQ.eq("label", label_norm);
 
-    if (subcategory_id) dupeQ = dupeQ.eq("subcategory_id", subcategory_id);
-    else dupeQ = dupeQ.is("subcategory_id", null);
+      if (category_id) dupeQ = dupeQ.eq("category_id", category_id);
+      else dupeQ = dupeQ.is("category_id", null);
 
-    if (isRapid) dupeQ = dupeQ.eq("rapid_session_id", rapid_session_id);
-    else dupeQ = dupeQ.is("rapid_session_id", null);
+      if (subcategory_id) dupeQ = dupeQ.eq("subcategory_id", subcategory_id);
+      else dupeQ = dupeQ.is("subcategory_id", null);
+
+      dupeQ = dupeQ.is("rapid_session_id", null);
+    } else {
+      dupeQ = dupeQ.eq("rapid_session_id", rapid_session_id);
+    }
 
     if (existingId) {
       dupeQ = dupeQ.neq("id", existingId);
