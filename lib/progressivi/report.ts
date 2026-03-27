@@ -729,7 +729,7 @@ function snapshotRowToBlockRow(row: ProgressiviSnapshotRow): ProgressiviBlockRow
     description: row.description,
     um: row.um,
     prezzo_vendita_eur: round2(toNum(row.prezzo_vendita_eur)),
-    is_recounted: Boolean((row as any).is_recounted),
+    is_recounted: false,
     previous: {
       inventario: normalizeQty(toNum(row.previous_inventario)),
       giacenza_da_gestionale: normalizeQty(toExactDecimal(row.previous_gestionale)),
@@ -1018,15 +1018,7 @@ export async function getProgressiviReportData(
         logical_category_name: live.logicalCategory.resolvedCategoryName,
         created_by_username: null,
       },
-      rows: live.rows.map((row) =>
-        blockRowToSnapshotInput(
-          row,
-          recountedCurrentCodes.has(normCodeCompact(row.item_code)),
-          recountedCurrentCodes.has(normCodeCompact(row.item_code))
-            ? live.currentHeader.id
-            : null
-        )
-      ),
+      rows: live.rows.map((row) => blockRowToSnapshotInput(row, false, null)),
     });
 
     reportHeaderId = created.header.id;
@@ -1071,15 +1063,7 @@ export async function getProgressiviReportData(
           logical_category_name: live.logicalCategory.resolvedCategoryName,
           created_by_username: null,
         },
-        rows: live.rows.map((row) =>
-          blockRowToSnapshotInput(
-            row,
-            recountedCurrentCodes.has(normCodeCompact(row.item_code)),
-            recountedCurrentCodes.has(normCodeCompact(row.item_code))
-              ? live.currentHeader.id
-              : null
-          )
-        ),
+        rows: live.rows.map((row) => blockRowToSnapshotInput(row, false, null)),
       });
 
       reportHeaderId = recreated.header.id;
