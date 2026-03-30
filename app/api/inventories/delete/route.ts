@@ -16,7 +16,7 @@ function isIsoDate(v: string | null) {
   return /^\d{4}-\d{2}-\d{2}$/.test(v.trim());
 }
 
-// ✅ interpreta "" / "null" come NULL (Rapido: categoria = Nessuna/Tutte)
+// interpreta "" / "null" come NULL
 function normNullParam(v: string | null): string | null {
   const s = (v || "").trim();
   if (!s) return null;
@@ -27,45 +27,46 @@ function normNullParam(v: string | null): string | null {
 export async function DELETE(req: Request) {
   const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
 
-  // ✅ per sicurezza: elimina SOLO admin
   if (!session || session.role !== "admin") {
     return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
   }
 
   const url = new URL(req.url);
 
-  // ✅ NUOVO: elimina per header_id (consigliato)
   const header_id = (url.searchParams.get("header_id") || url.searchParams.get("id") || "").trim();
 
-  // ✅ legacy params (vecchia UI)
   const pv_id = (url.searchParams.get("pv_id") || "").trim();
   const category_id = normNullParam(url.searchParams.get("category_id"));
   const subcategory_id = normNullParam(url.searchParams.get("subcategory_id"));
   const inventory_date = (url.searchParams.get("inventory_date") || "").trim();
 
-  // =======================
-  // PATH 1 (NUOVO): header_id
-  // =======================
   if (header_id) {
     if (!isUuid(header_id)) {
       return NextResponse.json({ ok: false, error: "header_id non valido" }, { status: 400 });
     }
 
-    // 1) leggo header per sapere come cancellare anche le righe
     const { data: head, error: headErr } = await supabaseAdmin
       .from("inventories_headers")
       .select("id, pv_id, category_id, subcategory_id, inventory_date, rapid_session_id, label")
       .eq("id", header_id)
       .maybeSingle();
 
-    if (headErr) return NextResponse.json({ ok: false, error: headErr.message }, { status: 500 });
+    if (headErr) {
+      return NextResponse.json({ ok: false, error: headErr.message }, { status: 500 });
+    }
 
-    // ✅ IDempotente: se non esiste, per noi è già stato eliminato
     if (!head?.id) {
       return NextResponse.json({
         ok: true,
         already_deleted: true,
-        deleted: { inventories: 0, inventories_headers: 0 },
+        deleted: {
+          inventories: 0,
+          inventories_headers: 0,
+          inventory_recount_events: 0,
+          inventory_progressivi_rows: 0,
+          progressivi_report_rows: 0,
+          progressivi_report_headers: 0,
+        },
         deleted_header: { id: header_id, label: null },
       });
     }
@@ -77,11 +78,17 @@ export async function DELETE(req: Request) {
     const hrapid = (head as any).rapid_session_id as string | null;
 
     if (!isUuid(hpv) || !isIsoDate(hdate)) {
-      return NextResponse.json({ ok: false, error: "Header corrotto: pv_id/inventory_date non validi" }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: "Header corrotto: pv_id/inventory_date non validi" },
+        { status: 500 }
+      );
     }
 
-    // 2) elimina righe inventario (coerente con l’header trovato)
-    let delRowsQ = supabaseAdmin.from("inventories").delete().eq("pv_id", hpv).eq("inventory_date", hdate);
+    let delRowsQ = supabaseAdmin
+      .from("inventories")
+      .delete()
+      .eq("pv_id", hpv)
+      .eq("inventory_date", hdate);
 
     if (hcat) delRowsQ = delRowsQ.eq("category_id", hcat);
     else delRowsQ = delRowsQ.is("category_id", null);
@@ -89,32 +96,100 @@ export async function DELETE(req: Request) {
     if (hsub) delRowsQ = delRowsQ.eq("subcategory_id", hsub);
     else delRowsQ = delRowsQ.is("subcategory_id", null);
 
-    // Rapido: se c’è rapid_session_id lo uso, altrimenti deve essere NULL
     if (hrapid) delRowsQ = delRowsQ.eq("rapid_session_id", hrapid);
     else delRowsQ = delRowsQ.is("rapid_session_id", null);
 
-    // ✅ compat supabase: niente count/head
     const { data: delRowsData, error: delRowsErr } = await delRowsQ.select("id");
-    if (delRowsErr) return NextResponse.json({ ok: false, error: delRowsErr.message }, { status: 500 });
+    if (delRowsErr) {
+      return NextResponse.json({ ok: false, error: delRowsErr.message }, { status: 500 });
+    }
     const rowsDeleted = Array.isArray(delRowsData) ? delRowsData.length : 0;
 
-    // 3) elimina header (per id)
+    const { data: delRecountData, error: delRecountErr } = await supabaseAdmin
+      .from("inventory_recount_events")
+      .delete()
+      .eq("inventory_header_id", header_id)
+      .select("id");
+
+    if (delRecountErr) {
+      return NextResponse.json({ ok: false, error: delRecountErr.message }, { status: 500 });
+    }
+    const recountDeleted = Array.isArray(delRecountData) ? delRecountData.length : 0;
+
+    const { data: delProgressiviData, error: delProgressiviErr } = await supabaseAdmin
+      .from("inventory_progressivi_rows")
+      .delete()
+      .eq("inventory_header_id", header_id)
+      .select("id");
+
+    if (delProgressiviErr) {
+      return NextResponse.json({ ok: false, error: delProgressiviErr.message }, { status: 500 });
+    }
+    const progressiviDeleted = Array.isArray(delProgressiviData) ? delProgressiviData.length : 0;
+
+    const { data: reportHeadersData, error: reportHeadersErr } = await supabaseAdmin
+      .from("progressivi_report_headers")
+      .select("id")
+      .or(`current_header_id.eq.${header_id},previous_header_id.eq.${header_id}`);
+
+    if (reportHeadersErr) {
+      return NextResponse.json({ ok: false, error: reportHeadersErr.message }, { status: 500 });
+    }
+
+    const reportHeaderIds = Array.from(
+      new Set(
+        (reportHeadersData ?? [])
+          .map((row: any) => String(row?.id ?? "").trim())
+          .filter(Boolean)
+      )
+    );
+
+    let reportRowsDeleted = 0;
+    let reportHeadersDeleted = 0;
+
+    if (reportHeaderIds.length > 0) {
+      const { data: delReportRowsData, error: delReportRowsErr } = await supabaseAdmin
+        .from("progressivi_report_rows")
+        .delete()
+        .in("report_header_id", reportHeaderIds)
+        .select("id");
+
+      if (delReportRowsErr) {
+        return NextResponse.json({ ok: false, error: delReportRowsErr.message }, { status: 500 });
+      }
+      reportRowsDeleted = Array.isArray(delReportRowsData) ? delReportRowsData.length : 0;
+
+      const { data: delReportHeadersData, error: delReportHeadersErr } = await supabaseAdmin
+        .from("progressivi_report_headers")
+        .delete()
+        .in("id", reportHeaderIds)
+        .select("id");
+
+      if (delReportHeadersErr) {
+        return NextResponse.json({ ok: false, error: delReportHeadersErr.message }, { status: 500 });
+      }
+      reportHeadersDeleted = Array.isArray(delReportHeadersData) ? delReportHeadersData.length : 0;
+    }
+
     const { data: delHeadData, error: delHeadErr } = await supabaseAdmin
       .from("inventories_headers")
       .delete()
       .eq("id", header_id)
       .select("id");
 
-    if (delHeadErr) return NextResponse.json({ ok: false, error: delHeadErr.message }, { status: 500 });
+    if (delHeadErr) {
+      return NextResponse.json({ ok: false, error: delHeadErr.message }, { status: 500 });
+    }
     const headersDeleted = Array.isArray(delHeadData) ? delHeadData.length : 0;
 
-    // ✅ idempotente anche qui: se per race headersDeleted = 0, non è un errore “bloccante”
     const alreadyDeletedByRace = headersDeleted === 0;
 
-    const warning =
-      rowsDeleted === 0
-        ? "Header eliminato, ma non risultano righe inventario eliminate (dati storici/filtri non allineati)."
-        : null;
+    const warnings: string[] = [];
+    if (rowsDeleted === 0) {
+      warnings.push(
+        "Header eliminato, ma non risultano righe inventario eliminate (dati storici/filtri non allineati)."
+      );
+    }
 
     return NextResponse.json({
       ok: true,
@@ -122,20 +197,22 @@ export async function DELETE(req: Request) {
       deleted: {
         inventories: rowsDeleted,
         inventories_headers: headersDeleted,
+        inventory_recount_events: recountDeleted,
+        inventory_progressivi_rows: progressiviDeleted,
+        progressivi_report_rows: reportRowsDeleted,
+        progressivi_report_headers: reportHeadersDeleted,
       },
       deleted_header: {
         id: head.id,
         label: (head as any).label ?? null,
       },
-      ...(warning ? { warning } : {}),
+      ...(warnings.length > 0 ? { warning: warnings.join(" ") } : {}),
     });
   }
 
-  // =======================
-  // PATH 2 (LEGACY): vecchi parametri
-  // =======================
-  // SAFETY CHECK: se col vecchio filtro trovo >1 header, BLOCCO.
-  if (!isUuid(pv_id)) return NextResponse.json({ ok: false, error: "pv_id non valido" }, { status: 400 });
+  if (!isUuid(pv_id)) {
+    return NextResponse.json({ ok: false, error: "pv_id non valido" }, { status: 400 });
+  }
 
   if (category_id !== null && !isUuid(category_id)) {
     return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
@@ -165,16 +242,20 @@ export async function DELETE(req: Request) {
     supabaseAdmin.from("inventories_headers").select("id, label, rapid_session_id")
   ).limit(5);
 
-  if (headsErr) return NextResponse.json({ ok: false, error: headsErr.message }, { status: 500 });
+  if (headsErr) {
+    return NextResponse.json({ ok: false, error: headsErr.message }, { status: 500 });
+  }
 
   const countHeads = Array.isArray(heads) ? heads.length : 0;
 
   if (countHeads === 0) {
-    // ✅ anche qui: idempotente (non trovato = già eliminato)
     return NextResponse.json({
       ok: true,
       already_deleted: true,
-      deleted: { inventories: 0, inventories_headers: 0 },
+      deleted: {
+        inventories: 0,
+        inventories_headers: 0,
+      },
     });
   }
 
@@ -191,8 +272,10 @@ export async function DELETE(req: Request) {
     );
   }
 
-  // ✅ se legacy becca un inventario rapido “moderno”, usa rapid_session_id per cancellare bene le righe
-  const rapid_session_id = (heads?.[0] as any)?.rapid_session_id ? String((heads?.[0] as any)?.rapid_session_id).trim() : "";
+  const rapid_session_id =
+    (heads?.[0] as any)?.rapid_session_id
+      ? String((heads?.[0] as any)?.rapid_session_id).trim()
+      : "";
 
   let delRowsQ: any = baseFilter(supabaseAdmin.from("inventories").delete());
   if (rapid_session_id && isUuid(rapid_session_id)) {
@@ -202,12 +285,16 @@ export async function DELETE(req: Request) {
   }
 
   const { data: delRowsData, error: delRowsErr } = await delRowsQ.select("id");
-  if (delRowsErr) return NextResponse.json({ ok: false, error: delRowsErr.message }, { status: 500 });
+  if (delRowsErr) {
+    return NextResponse.json({ ok: false, error: delRowsErr.message }, { status: 500 });
+  }
   const rowsDeleted = Array.isArray(delRowsData) ? delRowsData.length : 0;
 
   const delHeadQ = baseFilter(supabaseAdmin.from("inventories_headers").delete());
   const { data: delHeadData, error: delHeadErr } = await delHeadQ.select("id");
-  if (delHeadErr) return NextResponse.json({ ok: false, error: delHeadErr.message }, { status: 500 });
+  if (delHeadErr) {
+    return NextResponse.json({ ok: false, error: delHeadErr.message }, { status: 500 });
+  }
   const headersDeleted = Array.isArray(delHeadData) ? delHeadData.length : 0;
 
   return NextResponse.json({

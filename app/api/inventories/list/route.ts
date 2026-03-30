@@ -406,38 +406,40 @@ export async function GET(req: Request) {
       return ap.localeCompare(bp);
     });
 
-    const out = list.map((g) => {
-      const isRapid = g.category_id === null;
-      const hm = headerMap.get(g.key) || null;
-      const inventory_header_id = hm?.inventory_header_id ?? null;
+    const out = list
+      .map((g) => {
+        const isRapid = g.category_id === null;
+        const hm = headerMap.get(g.key) || null;
+        const inventory_header_id = hm?.inventory_header_id ?? null;
 
-      return {
-        inventory_header_id,
-        header_id: inventory_header_id,
-        id: inventory_header_id,
+        return {
+          inventory_header_id,
+          header_id: inventory_header_id,
+          id: inventory_header_id,
 
-        key: g.key,
-        pv_id: g.pv_id,
-        pv_code: pvMap.get(g.pv_id)?.code ?? "",
-        pv_name: pvMap.get(g.pv_id)?.name ?? "",
-        category_id: g.category_id,
-        category_name: isRapid ? "Nessuna (Tutte)" : catMap.get(g.category_id!)?.name ?? "",
-        subcategory_id: g.subcategory_id,
-        subcategory_name: g.subcategory_id ? subMap.get(g.subcategory_id)?.name ?? "" : "",
-        inventory_date: g.inventory_date,
-        created_by_username: g.created_by_username,
-        updated_at: hm?.updated_at ?? null,
-        lines_count: g.lines_count,
-        qty_sum: g.qty_sum,
-        qty_ml_sum: g.qty_ml_sum,
-        qty_gr_sum: g.qty_gr_sum,
-        value_sum: g.value_sum,
-        operatore: hm?.operatore ?? null,
-        label: hm?.label ?? null,
-        rapid_session_id: hm?.rapid_session_id ?? g.rapid_session_id ?? null,
-        header_missing: inventory_header_id === null,
-      };
-    });
+          key: g.key,
+          pv_id: g.pv_id,
+          pv_code: pvMap.get(g.pv_id)?.code ?? "",
+          pv_name: pvMap.get(g.pv_id)?.name ?? "",
+          category_id: g.category_id,
+          category_name: isRapid ? "Nessuna (Tutte)" : catMap.get(g.category_id!)?.name ?? "",
+          subcategory_id: g.subcategory_id,
+          subcategory_name: g.subcategory_id ? subMap.get(g.subcategory_id)?.name ?? "" : "",
+          inventory_date: g.inventory_date,
+          created_by_username: g.created_by_username,
+          updated_at: hm?.updated_at ?? null,
+          lines_count: g.lines_count,
+          qty_sum: g.qty_sum,
+          qty_ml_sum: g.qty_ml_sum,
+          qty_gr_sum: g.qty_gr_sum,
+          value_sum: g.value_sum,
+          operatore: hm?.operatore ?? null,
+          label: hm?.label ?? null,
+          rapid_session_id: hm?.rapid_session_id ?? g.rapid_session_id ?? null,
+          header_missing: inventory_header_id === null,
+        };
+      })
+      .filter((row) => row.inventory_header_id !== null);
 
     return NextResponse.json({ ok: true, rows: out });
   } catch (e: any) {
