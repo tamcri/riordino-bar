@@ -345,6 +345,10 @@ export default function AdminPage() {
                 Riepiloghi Incassato
               </Link>
 
+              <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/admin/logista-excel">
+                Logista Excel
+              </Link>
+
               <div className="pt-3 border-t mt-2">
                 <p className="text-xs text-gray-500">
                   Tip: nel menu dell’area operativa aggiungeremo anche il tasto “Admin” per tornare qui.
