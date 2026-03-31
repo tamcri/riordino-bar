@@ -389,10 +389,7 @@ export default function RiepilogoIncassatoNewClient() {
     setSaving(true);
 
 try {
-  const finalStatus =
-    status === "completato" && totVersato !== null && totVersato > 0
-      ? "chiuso"
-      : status;
+  const finalStatus = status;
 
   const res = await fetch("/api/cash-summary/save", {
     method: "POST",
@@ -415,7 +412,7 @@ try {
       spese_extra: speseExtra ?? 0,
       versamento,
       da_versare: daVersare,
-      tot_versato: totVersato,
+      tot_versato: null,
       fondo_cassa_iniziale: fondoCassaIniziale,
       parziale_1: parziale1,
       parziale_2: parziale2,
@@ -641,13 +638,6 @@ try {
 
           <InputField label="Da Versare" value={daVersare} disabled />
 
-          <InputField
-            label="Tot. Versato"
-            value={totVersato}
-            inputValue={totVersatoInput}
-            setInputValue={setTotVersatoInput}
-            setValue={setTotVersato}
-          />
         </div>
       </div>
 

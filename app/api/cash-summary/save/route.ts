@@ -150,8 +150,9 @@ export async function POST(req: Request) {
 
     const requestedData = String(body.data ?? "").trim();
     const requestedOperatore = String(body.operatore ?? "").trim();
-    const rawTotVersato = toNumber(body.tot_versato);
-    const isClosingNow = rawTotVersato !== null && rawTotVersato > 0;
+    // BLOCCO TOTALE VERSATO LATO PV
+    const rawTotVersato = null;
+    const isClosingNow = false;
 
     let status = normalizeStatus(body.status, isClosingNow);
 
@@ -185,7 +186,7 @@ export async function POST(req: Request) {
     let spese_extra = toNumber(body.spese_extra) ?? 0;
     let versamento = toNumber(body.versamento);
     let da_versare = toNumber(body.da_versare);
-    let tot_versato = rawTotVersato;
+    let tot_versato = null;
     let fondo_cassa = toNumber(body.fondo_cassa);
     let parziale_1 = toNumber(body.parziale_1);
     let parziale_2 = toNumber(body.parziale_2);
