@@ -12,10 +12,10 @@ export async function buildLogistaExcel(rows: LogistaExcelRow[]): Promise<Buffer
 
   // Definizione colonne con spazi vuoti
   worksheet.columns = [
-    { header: "Riga", key: "riga", width: 12 },           // A
-    { header: "Cod. AAMS", key: "codice", width: 18 },    // B
-    { header: "", key: "empty1", width: 5 },              // C (vuota)
-    { header: "", key: "empty2", width: 5 },              // D (vuota)
+    { header: "Riga", key: "riga", width: 12 }, // A
+    { header: "Cod. AAMS", key: "codice", width: 18 }, // B
+    { header: "", key: "empty1", width: 5 }, // C (vuota)
+    { header: "", key: "empty2", width: 5 }, // D (vuota)
     { header: "Quantità(Kgc)", key: "quantita", width: 18 }, // E
   ];
 
@@ -24,10 +24,10 @@ export async function buildLogistaExcel(rows: LogistaExcelRow[]): Promise<Buffer
   headerRow.font = { bold: true };
   headerRow.alignment = { vertical: "middle", horizontal: "left" };
 
-  // Inserimento righe
-  for (const row of rows) {
+  // Inserimento righe con numerazione progressiva ricostruita
+  for (const [index, row] of rows.entries()) {
     worksheet.addRow({
-      riga: row.riga,
+      riga: String(index + 1),
       codice: row.codice,
       empty1: "",
       empty2: "",

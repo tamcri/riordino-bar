@@ -24,13 +24,24 @@ type ApiErrorResponse = {
 
 type ApiResponse = ApiSuccessResponse | ApiErrorResponse;
 
+function getRowKey(row: ParsedRow, index: number) {
+  return `${row.riga}__${row.codice}__${row.quantita}__${index}`;
+}
+
 export default function AdminLogistaExcelPage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [rows, setRows] = useState<ParsedRow[]>([]);
+  const [excludedRowKeys, setExcludedRowKeys] = useState<string[]>([]);
   const [msg, setMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [excelLoading, setExcelLoading] = useState(false);
+
+  const excludedRowKeySet = useMemo(() => new Set(excludedRowKeys), [excludedRowKeys]);
+
+  const exportableRows = useMemo(() => {
+    return rows.filter((row, index) => !excludedRowKeySet.has(getRowKey(row, index)));
+  }, [rows, excludedRowKeySet]);
 
   const selectedFileInfo = useMemo(() => {
     if (!selectedFile) return null;
@@ -53,6 +64,7 @@ export default function AdminLogistaExcelPage() {
 
   function resetResults() {
     setRows([]);
+    setExcludedRowKeys([]);
   }
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -113,13 +125,24 @@ export default function AdminLogistaExcelPage() {
         return;
       }
 
-      setRows(Array.isArray(json.rows) ? json.rows : []);
+      const nextRows = Array.isArray(json.rows) ? json.rows : [];
+      setRows(nextRows);
+      setExcludedRowKeys([]);
       setMsg(`PDF elaborato correttamente. Righe trovate: ${json.count}`);
     } catch {
       setErrorMsg("Errore di rete o server non raggiungibile.");
     } finally {
       setLoading(false);
     }
+  }
+
+  function handleExcludeRow(row: ParsedRow, index: number) {
+    const key = getRowKey(row, index);
+
+    setExcludedRowKeys((prev) => {
+      if (prev.includes(key)) return prev;
+      return [...prev, key];
+    });
   }
 
   async function handleDownloadExcel() {
@@ -130,15 +153,28 @@ export default function AdminLogistaExcelPage() {
       return;
     }
 
+    if (!rows.length) {
+      setErrorMsg("Prima analizza il PDF.");
+      return;
+    }
+
+    if (!exportableRows.length) {
+      setErrorMsg("Non ci sono righe esportabili. Hai escluso tutte le righe.");
+      return;
+    }
+
     setExcelLoading(true);
 
     try {
-      const formData = new FormData();
-      formData.append("file", selectedFile);
-
       const res = await fetch("/api/admin/logista-excel/export", {
         method: "POST",
-        body: formData,
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          filename: selectedFile.name,
+          rows: exportableRows,
+        }),
       });
 
       if (!res.ok) {
@@ -160,7 +196,7 @@ export default function AdminLogistaExcelPage() {
       a.click();
 
       window.URL.revokeObjectURL(url);
-      setMsg("Download Excel avviato.");
+      setMsg(`Download Excel avviato. Righe esportate: ${exportableRows.length}`);
     } catch {
       setErrorMsg("Errore di rete o server non raggiungibile.");
     } finally {
@@ -230,7 +266,7 @@ export default function AdminLogistaExcelPage() {
 
               <button
                 type="button"
-                disabled={!hasRows || excelLoading || loading}
+                disabled={!hasRows || excelLoading || loading || exportableRows.length === 0}
                 onClick={handleDownloadExcel}
                 className="rounded-xl bg-emerald-600 px-4 py-2 text-white hover:bg-emerald-700 disabled:opacity-60"
               >
@@ -266,16 +302,25 @@ export default function AdminLogistaExcelPage() {
         </section>
 
         <section className="rounded-2xl border bg-white p-5">
-          <div className="flex items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-lg font-semibold">Anteprima righe estratte</h2>
               <p className="text-sm text-gray-600 mt-1">
-                L&apos;Excel conterrà esattamente queste tre colonne: Riga, Cod. AAMS, Quantità(Kgc).
+                L&apos;Excel conterrà solo le righe non escluse e manterrà le colonne: Riga, Cod.
+                AAMS, Quantità(Kgc).
               </p>
             </div>
 
-            <div className="rounded-xl bg-gray-100 px-3 py-2 text-sm text-gray-700">
-              Righe: <span className="font-semibold">{rows.length}</span>
+            <div className="flex flex-wrap gap-2 text-sm">
+              <div className="rounded-xl bg-gray-100 px-3 py-2 text-gray-700">
+                Totali: <span className="font-semibold">{rows.length}</span>
+              </div>
+              <div className="rounded-xl bg-emerald-50 px-3 py-2 text-emerald-700">
+                Esportabili: <span className="font-semibold">{exportableRows.length}</span>
+              </div>
+              <div className="rounded-xl bg-amber-50 px-3 py-2 text-amber-700">
+                Escluse: <span className="font-semibold">{excludedRowKeys.length}</span>
+              </div>
             </div>
           </div>
 
@@ -289,18 +334,51 @@ export default function AdminLogistaExcelPage() {
                 <thead className="bg-gray-50">
                   <tr>
                     <th className="border-b px-4 py-3 text-left font-medium text-gray-700">Riga</th>
-                    <th className="border-b px-4 py-3 text-left font-medium text-gray-700">Cod. AAMS</th>
-                    <th className="border-b px-4 py-3 text-left font-medium text-gray-700">Quantità(Kgc)</th>
+                    <th className="border-b px-4 py-3 text-left font-medium text-gray-700">
+                      Cod. AAMS
+                    </th>
+                    <th className="border-b px-4 py-3 text-left font-medium text-gray-700">
+                      Quantità(Kgc)
+                    </th>
+                    <th className="border-b px-4 py-3 text-left font-medium text-gray-700">
+                      Azioni
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((row, index) => (
-                    <tr key={`${row.riga}-${row.codice}-${index}`} className="odd:bg-white even:bg-gray-50">
-                      <td className="border-b px-4 py-3 text-gray-800">{row.riga}</td>
-                      <td className="border-b px-4 py-3 text-gray-800">{row.codice}</td>
-                      <td className="border-b px-4 py-3 text-gray-800">{row.quantita}</td>
-                    </tr>
-                  ))}
+                  {rows.map((row, index) => {
+                    const rowKey = getRowKey(row, index);
+                    const isExcluded = excludedRowKeySet.has(rowKey);
+
+                    return (
+                      <tr
+                        key={rowKey}
+                        className={[
+                          "border-b",
+                          isExcluded ? "bg-amber-50 opacity-70" : index % 2 === 0 ? "bg-white" : "bg-gray-50",
+                        ].join(" ")}
+                      >
+                        <td className="px-4 py-3 text-gray-800">{row.riga}</td>
+                        <td className="px-4 py-3 text-gray-800">{row.codice}</td>
+                        <td className="px-4 py-3 text-gray-800">{row.quantita}</td>
+                        <td className="px-4 py-3">
+                          {isExcluded ? (
+                            <span className="inline-flex rounded-lg border border-amber-300 bg-amber-100 px-3 py-1 text-xs font-medium text-amber-800">
+                              Esclusa
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleExcludeRow(row, index)}
+                              className="rounded-lg border border-red-200 bg-red-50 px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-100"
+                            >
+                              Escludi
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -311,8 +389,8 @@ export default function AdminLogistaExcelPage() {
           <h2 className="text-lg font-semibold">Stato funzione</h2>
           <div className="mt-3 rounded-xl border border-dashed p-4 bg-gray-50">
             <p className="text-sm text-gray-700">
-              Flusso finale attivo: analisi PDF con anteprima e download Excel con intestazioni
-              Riga, Cod. AAMS, Quantità(Kgc).
+              Flusso finale attivo: analisi PDF con anteprima, esclusione manuale righe e download
+              Excel con intestazioni Riga, Cod. AAMS, Quantità(Kgc).
             </p>
           </div>
         </section>
