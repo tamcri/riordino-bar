@@ -8,9 +8,13 @@ type CreateRole = "amministrativo" | "punto_vendita";
 
 type PV = { id: string; code: string; name: string };
 type AppUser = { id: string; username: string; role: string; pv_id: string | null };
-
-// ✅ Timeline: categorie
 type Category = { id: string; name: string };
+
+type PvOrderListRow = {
+  id: string;
+  order_status: "DA_COMPLETARE" | "COMPLETO";
+  shipping_status: "NON_SPEDITO" | "PARZIALE" | "SPEDITO";
+};
 
 function todayISO() {
   const d = new Date();
@@ -20,10 +24,16 @@ function todayISO() {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+function firstDayOfMonthISO() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  return `${yyyy}-${mm}-01`;
+}
+
 export default function AdminPage() {
   const router = useRouter();
 
-  // --- crea utente ---
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [role, setRole] = useState<CreateRole>("amministrativo");
@@ -32,35 +42,36 @@ export default function AdminPage() {
   const [msg, setMsg] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // --- crea PV ---
   const [pvCode, setPvCode] = useState("");
   const [pvName, setPvName] = useState("");
   const [pvMsg, setPvMsg] = useState<string | null>(null);
   const [pvLoading, setPvLoading] = useState(false);
 
-  // --- dati dropdown (PV + utenti PV) ---
   const [pvs, setPvs] = useState<PV[]>([]);
   const [pvUsers, setPvUsers] = useState<AppUser[]>([]);
   const [dataMsg, setDataMsg] = useState<string | null>(null);
 
-  // --- assegna PV successivamente ---
   const [assignUserId, setAssignUserId] = useState<string>("");
   const [assignPvId, setAssignPvId] = useState<string>("");
   const [assignMsg, setAssignMsg] = useState<string | null>(null);
   const [assignLoading, setAssignLoading] = useState(false);
 
-  // ✅ Timeline Giacenze
   const [categories, setCategories] = useState<Category[]>([]);
   const [tlPvId, setTlPvId] = useState<string>("");
-  // ✅ "" = tutte, "__NULL__" = solo inventory.category_id NULL, uuid = categoria specifica
-  const [tlCategoryId, setTlCategoryId] = useState<string>(""); // default: Tutte
+  const [tlCategoryId, setTlCategoryId] = useState<string>("");
   const [tlDateFrom, setTlDateFrom] = useState<string>("");
   const [tlDateTo, setTlDateTo] = useState<string>(todayISO());
   const [tlMsg, setTlMsg] = useState<string | null>(null);
   const [tlLoading, setTlLoading] = useState(false);
   const [tlPdfLoading, setTlPdfLoading] = useState(false);
 
-  const selectedUser = useMemo(() => pvUsers.find((u) => u.id === assignUserId) || null, [pvUsers, assignUserId]);
+  const [orderAlertCount, setOrderAlertCount] = useState(0);
+  const [orderAlertLoading, setOrderAlertLoading] = useState(true);
+
+  const selectedUser = useMemo(
+    () => pvUsers.find((u) => u.id === assignUserId) || null,
+    [pvUsers, assignUserId]
+  );
 
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
@@ -70,7 +81,6 @@ export default function AdminPage() {
   async function loadPvsAndUsers() {
     setDataMsg(null);
     try {
-      // Lista PV
       const resPvs = await fetch("/api/pvs/list", { cache: "no-store" });
       const jsonPvs = await resPvs.json().catch(() => null);
 
@@ -80,13 +90,14 @@ export default function AdminPage() {
 
       if (!tlPvId && normalizedPvs?.[0]?.id) setTlPvId(normalizedPvs[0].id);
 
-      // Lista utenti PV
       const resUsers = await fetch("/api/users/list?role=punto_vendita", { cache: "no-store" });
       const jsonUsers = await resUsers.json().catch(() => null);
       if (resUsers.ok && jsonUsers?.users) setPvUsers(jsonUsers.users);
 
       if (!resPvs.ok || !resUsers.ok) {
-        setDataMsg("Nota: non riesco a caricare PV o utenti PV (controlla le route /api/pvs/list e /api/users/list).");
+        setDataMsg(
+          "Nota: non riesco a caricare PV o utenti PV (controlla le route /api/pvs/list e /api/users/list)."
+        );
       }
     } catch {
       setDataMsg("Errore caricamento dati (PV/utenti).");
@@ -100,16 +111,45 @@ export default function AdminPage() {
       const rows = (json?.rows ?? []) as any[];
       const normalized = Array.isArray(rows) ? rows : [];
       setCategories(normalized);
-
-      // ✅ NON setto più default su prima categoria: voglio lasciare "Tutte"
     } catch {
       // non blocca admin
+    }
+  }
+
+  async function loadOrdersAlert() {
+    setOrderAlertLoading(true);
+    try {
+      const params = new URLSearchParams();
+      params.set("from", firstDayOfMonthISO());
+      params.set("to", todayISO());
+
+      const res = await fetch(`/api/pv-orders/list?${params.toString()}`, {
+        cache: "no-store",
+      });
+      const json = await res.json().catch(() => null);
+
+      const rows = (json?.rows ?? []) as PvOrderListRow[];
+      if (!res.ok || !json?.ok || !Array.isArray(rows)) {
+        setOrderAlertCount(0);
+        return;
+      }
+
+      const count = rows.filter((row) => {
+        return row.order_status === "DA_COMPLETARE" || row.shipping_status !== "SPEDITO";
+      }).length;
+
+      setOrderAlertCount(count);
+    } catch {
+      setOrderAlertCount(0);
+    } finally {
+      setOrderAlertLoading(false);
     }
   }
 
   useEffect(() => {
     loadPvsAndUsers();
     loadCategories();
+    loadOrdersAlert();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -140,7 +180,9 @@ export default function AdminPage() {
 
       setUsername("");
       setPassword("");
-      setMsg(`Utente creato con successo (${role === "amministrativo" ? "Amministrativo" : "Punto Vendita"})`);
+      setMsg(
+        `Utente creato con successo (${role === "amministrativo" ? "Amministrativo" : "Punto Vendita"})`
+      );
       await loadPvsAndUsers();
     } finally {
       setLoading(false);
@@ -207,7 +249,6 @@ export default function AdminPage() {
     }
   }
 
-  // ✅ Timeline Excel download
   async function downloadTimelineExcel() {
     setTlMsg(null);
 
@@ -218,7 +259,7 @@ export default function AdminPage() {
     try {
       const params = new URLSearchParams();
       params.set("pv_id", tlPvId);
-      params.set("category_id", tlCategoryId); // "" | "__NULL__" | uuid
+      params.set("category_id", tlCategoryId);
       params.set("date_from", tlDateFrom);
       params.set("date_to", tlDateTo);
 
@@ -245,7 +286,6 @@ export default function AdminPage() {
     }
   }
 
-  // ✅ PDF Pivot (Δ)
   async function downloadTimelinePivotPdf() {
     setTlMsg(null);
 
@@ -256,7 +296,7 @@ export default function AdminPage() {
     try {
       const params = new URLSearchParams();
       params.set("pv_id", tlPvId);
-      params.set("category_id", tlCategoryId); // "" | "__NULL__" | uuid
+      params.set("category_id", tlCategoryId);
       params.set("date_from", tlDateFrom);
       params.set("date_to", tlDateTo);
 
@@ -296,6 +336,28 @@ export default function AdminPage() {
             Logout
           </button>
         </div>
+
+        {!orderAlertLoading && orderAlertCount > 0 && (
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-amber-900">
+                  Attenzione: ci sono ordini PV da gestire
+                </div>
+                <div className="text-sm text-amber-800 mt-1">
+                  Ordini aperti da controllare / completare / spedire: <b>{orderAlertCount}</b>
+                </div>
+              </div>
+
+              <Link
+                href="/admin/ordini-pv"
+                className="inline-flex rounded-xl border border-amber-300 bg-white px-4 py-2 text-sm hover:bg-amber-100"
+              >
+                Vai a Ordini PV
+              </Link>
+            </div>
+          </div>
+        )}
 
         {dataMsg && <div className="rounded-xl border bg-white p-3 text-sm text-gray-700">{dataMsg}</div>}
 
@@ -341,12 +403,42 @@ export default function AdminPage() {
                 Fornitori
               </Link>
 
+              <div className="pt-3 mt-4 border-t">
+               <div className="text-xs font-bold uppercase tracking-wide text-gray-1000">
+                Elisabetta Di Trocchio
+               </div>
+              </div>
+
               <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/admin/cash-summary">
                 Riepiloghi Incassato
               </Link>
 
+              <div className="pt-3 mt-4 border-t">
+               <div className="text-xs font-bold uppercase tracking-wide text-gray-1000">
+                Roberta Matruglio
+               </div>
+              </div>
+
               <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/admin/logista-excel">
                 Logista Excel
+              </Link>
+
+              <div className="pt-3 mt-4 border-t">
+               <div className="text-xs font-bold uppercase tracking-wide text-gray-1000">
+                Magazzino Centrale
+               </div>
+              </div>
+
+              <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/admin/warehouse-items">
+               Anagrafica Magazzino
+              </Link>
+
+              <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/admin/warehouse-deposit">
+              Deposito Centrale
+              </Link>
+
+              <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/admin/ordini-pv">
+                Ordini PV
               </Link>
 
               <div className="pt-3 border-t mt-2">
@@ -358,7 +450,6 @@ export default function AdminPage() {
           </section>
 
           <div className="lg:col-span-2 space-y-6">
-            {/* ✅ Timeline Giacenze */}
             <section className="rounded-2xl border bg-white p-4">
               <h2 className="text-lg font-semibold">Timeline Giacenze</h2>
               <p className="text-sm text-gray-600 mt-1">
@@ -431,7 +522,6 @@ export default function AdminPage() {
               </div>
             </section>
 
-            {/* crea utente */}
             <section className="rounded-2xl border bg-white p-4">
               <h2 className="text-lg font-semibold">Crea nuovo utente</h2>
 
@@ -471,7 +561,6 @@ export default function AdminPage() {
               </form>
             </section>
 
-            {/* crea PV */}
             <section className="rounded-2xl border bg-white p-4">
               <h2 className="text-lg font-semibold">Crea PV</h2>
               <p className="text-sm text-gray-600 mt-1">Inserisci un codice (es. A1) e un nome (es. Diversivo).</p>
@@ -490,7 +579,6 @@ export default function AdminPage() {
               </form>
             </section>
 
-            {/* assegna utente a PV */}
             <section className="rounded-2xl border bg-white p-4">
               <h2 className="text-lg font-semibold">Assegna utente a PV</h2>
               <p className="text-sm text-gray-600 mt-1">
