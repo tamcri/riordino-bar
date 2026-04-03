@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type InventoryInputRow = {
   id: string;
@@ -46,10 +46,6 @@ function formatQty(v: number | null | undefined) {
   return String(n).replace(".", ",");
 }
 
-function normalizeText(v: string | null | undefined) {
-  return String(v ?? "").trim().toLowerCase();
-}
-
 function hasCountedQty(v: string | null | undefined) {
   return String(v ?? "").trim() !== "";
 }
@@ -79,6 +75,7 @@ export default function WarehouseInventoryClient() {
 
   const [search, setSearch] = useState("");
   const [onlyCompiled, setOnlyCompiled] = useState(false);
+  const [showAllRows, setShowAllRows] = useState(false);
 
   const [rows, setRows] = useState<InventoryInputRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -86,6 +83,7 @@ export default function WarehouseInventoryClient() {
   const [confirmLoading, setConfirmLoading] = useState(false);
 
   const [searchRows, setSearchRows] = useState<InventoryInputRow[]>([]);
+  const [searchQtyMap, setSearchQtyMap] = useState<Record<string, string>>({});
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
 
@@ -94,8 +92,17 @@ export default function WarehouseInventoryClient() {
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const [activeRowId, setActiveRowId] = useState<string | null>(null);
+
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const qtyInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+
   const hasRows = rows.length > 0;
   const inPreview = previewRows !== null;
+
+  const [showAssignModal, setShowAssignModal] = useState(false);
+  const [assignSearch, setAssignSearch] = useState("");
+  const [assignResults, setAssignResults] = useState<InventoryInputRow[]>([]);
 
   const compiledCount = useMemo(() => {
     return rows.filter((row) => hasCountedQty(row.counted_qty)).length;
@@ -116,11 +123,16 @@ export default function WarehouseInventoryClient() {
         return bCompiled - aCompiled;
       }
 
-      return String(a.code).localeCompare(String(b.code), "it");
+      return 0;
     });
 
     return next;
   }, [rows, onlyCompiled]);
+
+  const visibleRows = useMemo(() => {
+    if (showAllRows) return filteredRows;
+    return filteredRows.slice(0, 10);
+  }, [filteredRows, showAllRows]);
 
   const canVerify = useMemo(() => {
     if (!inventoryDate.trim()) return false;
@@ -206,33 +218,92 @@ export default function WarehouseInventoryClient() {
     return () => window.clearTimeout(timer);
   }, [search, rows]);
 
+  useEffect(() => {
+  if (!showAssignModal) return;
+
+  const q = assignSearch.trim();
+
+  if (q.length < 3) {
+    setAssignResults([]);
+    return;
+  }
+
+  const timer = setTimeout(async () => {
+    try {
+      const params = new URLSearchParams();
+      params.set("q", q);
+
+      const res = await fetch(`/api/warehouse-inventory/search?${params}`);
+      const json = await res.json();
+
+      setAssignResults(json?.rows || []);
+    } catch {
+      setAssignResults([]);
+    }
+  }, 250);
+
+  return () => clearTimeout(timer);
+}, [assignSearch, showAssignModal]);
+
+  useEffect(() => {
+    if (!activeRowId) return;
+
+    const timer = window.setTimeout(() => {
+      const el = qtyInputRefs.current[activeRowId];
+      if (el) {
+        el.focus();
+        el.select();
+      }
+    }, 50);
+
+    return () => window.clearTimeout(timer);
+  }, [activeRowId, rows]);
+
   function addRowToInventory(row: InventoryInputRow) {
     setRows((prev) => {
-      const exists = prev.some(
+      const existingIndex = prev.findIndex(
         (item) => item.warehouse_item_id === row.warehouse_item_id
       );
 
-      if (exists) {
-        return prev.map((item) =>
-          item.warehouse_item_id === row.warehouse_item_id
-            ? {
-                ...item,
-                code: row.code,
-                description: row.description,
-                barcode: row.barcode,
-                um: row.um,
-                stock_qty: row.stock_qty,
-                is_active: row.is_active,
-              }
-            : item
+      if (existingIndex >= 0) {
+        const existing = prev[existingIndex];
+        const nextRow: InventoryInputRow = {
+          ...existing,
+          code: row.code,
+          description: row.description,
+          barcode: row.barcode,
+          um: row.um,
+          stock_qty: row.stock_qty,
+          is_active: row.is_active,
+        };
+
+        const withoutCurrent = prev.filter(
+          (item) => item.warehouse_item_id !== row.warehouse_item_id
         );
+
+        return [nextRow, ...withoutCurrent];
       }
 
-      return [...prev, row];
+      return [
+        {
+          ...row,
+          counted_qty: row.counted_qty ?? "",
+        },
+        ...prev,
+      ];
     });
 
-    setMsg(`Articolo ${row.code} aggiunto alla lista inventario.`);
+    setActiveRowId(row.warehouse_item_id);
+    setShowAllRows(false);
+    setSearch("");
+    setSearchRows([]);
+    setSearchError(null);
+    setMsg(null);
     setError(null);
+
+    window.setTimeout(() => {
+      searchInputRef.current?.focus();
+    }, 0);
   }
 
   function handleCountedQtyChange(warehouseItemId: string, value: string) {
@@ -257,6 +328,66 @@ export default function WarehouseInventoryClient() {
           : row
       )
     );
+  }
+
+  function setSearchQty(id: string, value: string) {
+  setSearchQtyMap((prev) => ({
+    ...prev,
+    [id]: value,
+  }));
+}
+
+  function confirmSearchRow(row: InventoryInputRow) {
+  const qty = (searchQtyMap[row.warehouse_item_id] || "").trim();
+
+  if (!qty) return;
+
+  setRows((prev) => {
+    const existingIndex = prev.findIndex(
+      (item) => item.warehouse_item_id === row.warehouse_item_id
+    );
+
+    if (existingIndex >= 0) {
+      const existing = prev[existingIndex];
+
+      const updated = {
+        ...existing,
+        counted_qty: qty,
+        stock_qty: row.stock_qty,
+      };
+
+      const others = prev.filter(
+        (item) => item.warehouse_item_id !== row.warehouse_item_id
+      );
+
+      return [updated, ...others];
+    }
+
+    return [
+      {
+        ...row,
+        counted_qty: qty,
+      },
+      ...prev,
+    ];
+  });
+
+  setSearch("");
+  setSearchRows([]);
+  setSearchQtyMap({});
+  setActiveRowId(null);
+
+  setTimeout(() => {
+    searchInputRef.current?.focus();
+  }, 0);
+}
+
+  function confirmFastEntry() {
+    setActiveRowId(null);
+    window.setTimeout(() => {
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    }, 0);
   }
 
   async function handleVerifyPreview() {
@@ -398,8 +529,10 @@ export default function WarehouseInventoryClient() {
       setSearch("");
       setSearchRows([]);
       setOnlyCompiled(false);
+      setShowAllRows(false);
       setNote("");
       setOperatore("");
+      setActiveRowId(null);
 
       setMsg(
         `Inventario confermato. Righe salvate: ${savedRows}. Ammanchi: ${shortageRows}. Eccedenze: ${excessRows}. Invariate: ${equalRows}.`
@@ -412,6 +545,36 @@ export default function WarehouseInventoryClient() {
       setConfirmLoading(false);
     }
   }
+
+  async function assignBarcodeToItem(item: InventoryInputRow) {
+  try {
+    const res = await fetch("/api/warehouse-items/assign-barcode", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        warehouse_item_id: item.warehouse_item_id,
+        barcode: search,
+      }),
+    });
+
+    const json = await res.json();
+
+    if (!json.ok) {
+      throw new Error(json.error);
+    }
+
+    setShowAssignModal(false);
+    setAssignSearch("");
+    setAssignResults([]);
+
+    setMsg("Barcode associato con successo.");
+
+  } catch (e: any) {
+    setError(e.message || "Errore associazione barcode");
+  }
+}
 
   async function handleLoadRows() {
     setMsg(null);
@@ -443,6 +606,7 @@ export default function WarehouseInventoryClient() {
 
       setRows(nextRows);
       setPreviewRows(null);
+      setShowAllRows(false);
       setMsg(`Articoli caricati: ${nextRows.length}`);
     } catch (e: any) {
       setRows([]);
@@ -528,6 +692,7 @@ export default function WarehouseInventoryClient() {
           <div className="mt-4">
             <label className="mb-2 block text-sm font-medium">Cerca articolo</label>
             <input
+              ref={searchInputRef}
               className="w-full rounded-xl border p-3"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -565,41 +730,60 @@ export default function WarehouseInventoryClient() {
                 </thead>
 
                 <tbody>
-                  {searchRows.length === 0 ? (
-                    <tr className="border-t">
-                      <td className="p-3 text-gray-500" colSpan={6}>
-                        Nessun articolo trovato.
-                      </td>
-                    </tr>
-                  ) : (
-                    searchRows.map((row) => {
-                      const alreadyAdded = rows.some(
-                        (item) => item.warehouse_item_id === row.warehouse_item_id
-                      );
+  {searchRows.length === 0 ? (
+  <tr className="border-t">
+    <td className="p-3 text-gray-500" colSpan={6}>
+      Nessun articolo trovato.
 
-                      return (
-                        <tr key={row.warehouse_item_id} className="border-t">
-                          <td className="p-3 font-medium">{row.code}</td>
-                          <td className="p-3">{row.description}</td>
-                          <td className="p-3 font-mono text-xs">
-                            {formatNullableText(row.barcode)}
-                          </td>
-                          <td className="p-3">{formatNullableText(row.um)}</td>
-                          <td className="p-3 text-right">{formatQty(row.stock_qty)}</td>
-                          <td className="p-3 text-right">
-                            <button
-                              type="button"
-                              className="rounded-xl border px-3 py-2 hover:bg-gray-50"
-                              onClick={() => addRowToInventory(row)}
-                            >
-                              {alreadyAdded ? "Aggiorna in lista" : "Aggiungi"}
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
+      {search.length >= 3 && (
+        <div className="mt-2">
+          <button
+            className="rounded-xl border px-3 py-2 hover:bg-gray-50"
+            onClick={() => setShowAssignModal(true)}
+          >
+            Associa barcode a articolo
+          </button>
+        </div>
+      )}
+    </td>
+  </tr>
+) : (
+    searchRows.map((row) => {
+      const qty = searchQtyMap[row.warehouse_item_id] || "";
+
+      return (
+        <tr key={row.warehouse_item_id} className="border-t">
+          <td className="p-3 font-medium">{row.code}</td>
+          <td className="p-3">{row.description}</td>
+          <td className="p-3 font-mono text-xs">
+            {formatNullableText(row.barcode)}
+          </td>
+          <td className="p-3">{formatNullableText(row.um)}</td>
+          <td className="p-3 text-right">{formatQty(row.stock_qty)}</td>
+
+          <td className="p-3 text-right">
+            <input
+              className="w-28 rounded-xl border p-2 text-right"
+              inputMode="decimal"
+              placeholder="Qtà"
+              value={qty}
+              onChange={(e) =>
+                setSearchQty(row.warehouse_item_id, e.target.value)
+              }
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  confirmSearchRow(row);
+                }
+              }}
+              autoFocus={searchRows.length === 1}
+            />
+          </td>
+        </tr>
+      );
+    })
+  )}
+</tbody>
               </table>
             </div>
           )}
@@ -612,16 +796,28 @@ export default function WarehouseInventoryClient() {
       {!inPreview && (
         <>
           <div className="rounded-2xl border bg-white p-4">
-            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
               <div>
                 <div className="text-lg font-semibold">Lista inventario</div>
                 <div className="text-sm text-gray-600">
-                  Gli articoli compilati vengono mostrati in alto e puoi filtrare solo quelli già lavorati.
+                  Per default vedi gli ultimi 10 articoli inseriti o aggiornati.
                 </div>
               </div>
 
-              <div className="text-sm text-gray-600">
-                Articoli in lista: <b>{rows.length}</b> · Compilati: <b>{compiledCount}</b>
+              <div className="flex flex-wrap items-center gap-3 text-sm text-gray-600">
+                <div>
+                  Articoli in lista: <b>{rows.length}</b> · Compilati: <b>{compiledCount}</b>
+                </div>
+
+                {filteredRows.length > 10 && (
+                  <button
+                    type="button"
+                    className="rounded-xl border px-3 py-2 hover:bg-gray-50"
+                    onClick={() => setShowAllRows((prev) => !prev)}
+                  >
+                    {showAllRows ? "Mostra ultimi 10" : "Tutti"}
+                  </button>
+                )}
               </div>
             </div>
 
@@ -668,7 +864,7 @@ export default function WarehouseInventoryClient() {
                   </tr>
                 )}
 
-                {!loading && hasRows && filteredRows.length === 0 && (
+                {!loading && hasRows && visibleRows.length === 0 && (
                   <tr className="border-t">
                     <td className="p-3 text-gray-500" colSpan={6}>
                       Nessun articolo trovato con i filtri attuali.
@@ -677,13 +873,20 @@ export default function WarehouseInventoryClient() {
                 )}
 
                 {!loading &&
-                  filteredRows.map((row) => {
+                  visibleRows.map((row) => {
                     const compiled = hasCountedQty(row.counted_qty);
+                    const isActive = row.warehouse_item_id === activeRowId;
 
                     return (
                       <tr
                         key={row.warehouse_item_id}
-                        className={`border-t ${compiled ? "bg-amber-50/40" : ""}`}
+                        className={`border-t ${
+                          isActive
+                            ? "bg-sky-50"
+                            : compiled
+                            ? "bg-amber-50/40"
+                            : ""
+                        }`}
                       >
                         <td className="p-3 font-medium">{row.code}</td>
                         <td className="p-3">{row.description}</td>
@@ -693,8 +896,15 @@ export default function WarehouseInventoryClient() {
                         <td className="p-3">
                           <div className="flex justify-end">
                             <input
+                              ref={(el) => {
+                                qtyInputRefs.current[row.warehouse_item_id] = el;
+                              }}
                               className={`w-32 rounded-xl border p-2 text-right ${
-                                compiled ? "border-amber-400 bg-white" : ""
+                                isActive
+                                  ? "border-sky-500 bg-white ring-2 ring-sky-100"
+                                  : compiled
+                                  ? "border-amber-400 bg-white"
+                                  : ""
                               }`}
                               inputMode="decimal"
                               placeholder="0"
@@ -702,6 +912,13 @@ export default function WarehouseInventoryClient() {
                               onChange={(e) =>
                                 handleCountedQtyChange(row.warehouse_item_id, e.target.value)
                               }
+                              onFocus={() => setActiveRowId(row.warehouse_item_id)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  confirmFastEntry();
+                                }
+                              }}
                               disabled={previewLoading || confirmLoading}
                             />
                           </div>
@@ -828,6 +1045,61 @@ export default function WarehouseInventoryClient() {
           </div>
         </>
       )}
+       {showAssignModal && (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="w-full max-w-lg rounded-2xl bg-white p-4">
+        <div className="text-lg font-semibold">Associa barcode</div>
+
+        <div className="mt-2 text-sm text-gray-600">
+          Barcode: <b>{search}</b>
+        </div>
+
+        <input
+          className="mt-4 w-full rounded-xl border p-3"
+          placeholder="Cerca articolo..."
+          value={assignSearch}
+          onChange={(e) => setAssignSearch(e.target.value)}
+        />
+
+        <div className="mt-4 max-h-64 overflow-auto border rounded-xl">
+          {assignResults.length === 0 ? (
+            <div className="p-3 text-sm text-gray-500">
+              Nessun risultato
+            </div>
+          ) : (
+            assignResults.map((row) => (
+              <div
+                key={row.warehouse_item_id}
+                className="flex justify-between border-b p-3"
+              >
+                <div>
+                  <div className="font-medium">{row.code}</div>
+                  <div className="text-xs text-gray-500">{row.description}</div>
+                </div>
+
+                <button
+                  className="rounded-xl border px-3 py-1"
+                  onClick={() => assignBarcodeToItem(row)}
+                >
+                  Associa
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+
+        <div className="mt-4 flex justify-end">
+          <button
+            className="rounded-xl border px-4 py-2"
+            onClick={() => setShowAssignModal(false)}
+          >
+            Chiudi
+          </button>
+        </div>
+      </div>
+    </div>
+  )}
+
     </div>
   );
 }
