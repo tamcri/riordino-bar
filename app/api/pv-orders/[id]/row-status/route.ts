@@ -17,6 +17,8 @@ type Body = {
   row_status?: string;
 };
 
+type RowStatus = "DA_ORDINARE" | "EVASO";
+
 export async function POST(req: Request, context: RouteContext) {
   try {
     const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
@@ -40,14 +42,15 @@ export async function POST(req: Request, context: RouteContext) {
       return NextResponse.json({ ok: false, error: "row_id non valido" }, { status: 400 });
     }
 
-    const row_status = String(body.row_status ?? "").trim().toUpperCase();
+    const row_status = String(body.row_status ?? "").trim().toUpperCase() as RowStatus;
     if (!isPvOrderRowStatus(row_status)) {
       return NextResponse.json({ ok: false, error: "Stato riga non valido" }, { status: 400 });
     }
 
+    // 🔴 QUI CAMBIA LA SELECT
     const { data: row, error: rowError } = await supabaseAdmin
       .from("pv_order_rows")
-      .select("id, order_id")
+      .select("id, order_id, row_status, warehouse_stock_deducted")
       .eq("id", row_id)
       .maybeSingle();
 
@@ -62,6 +65,25 @@ export async function POST(req: Request, context: RouteContext) {
     if (String((row as any).order_id) !== orderId) {
       return NextResponse.json(
         { ok: false, error: "La riga non appartiene all'ordine indicato" },
+        { status: 400 }
+      );
+    }
+
+    const currentStatus = String((row as any).row_status ?? "").toUpperCase();
+    const alreadyDeducted = Boolean((row as any).warehouse_stock_deducted);
+
+    // 🚨 BLOCCO CRITICO
+    if (
+      currentStatus === "EVASO" &&
+      row_status === "DA_ORDINARE" &&
+      alreadyDeducted === true
+    ) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            "Questa riga è già stata scaricata dal magazzino. Non può essere riportata a DA_ORDINARE.",
+        },
         { status: 400 }
       );
     }

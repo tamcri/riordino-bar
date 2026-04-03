@@ -404,9 +404,9 @@ export default function AdminPage() {
               </Link>
 
               <div className="pt-3 mt-4 border-t">
-               <div className="text-xs font-bold uppercase tracking-wide text-gray-1000">
-                Elisabetta Di Trocchio
-               </div>
+                <div className="text-xs font-bold uppercase tracking-wide text-gray-1000">
+                  Elisabetta Di Trocchio
+                </div>
               </div>
 
               <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/admin/cash-summary">
@@ -414,9 +414,9 @@ export default function AdminPage() {
               </Link>
 
               <div className="pt-3 mt-4 border-t">
-               <div className="text-xs font-bold uppercase tracking-wide text-gray-1000">
-                Roberta Matruglio
-               </div>
+                <div className="text-xs font-bold uppercase tracking-wide text-gray-1000">
+                  Roberta Matruglio
+                </div>
               </div>
 
               <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/admin/logista-excel">
@@ -424,17 +424,21 @@ export default function AdminPage() {
               </Link>
 
               <div className="pt-3 mt-4 border-t">
-               <div className="text-xs font-bold uppercase tracking-wide text-gray-1000">
-                Magazzino Centrale
-               </div>
+                <div className="text-xs font-bold uppercase tracking-wide text-gray-1000">
+                  Magazzino Centrale
+                </div>
               </div>
 
               <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/admin/warehouse-items">
-               Anagrafica Magazzino
+                Anagrafica Magazzino
               </Link>
 
               <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/admin/warehouse-deposit">
-              Deposito Centrale
+                Deposito Centrale
+              </Link>
+
+              <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/admin/warehouse-inventory">
+                Inventario Magazzino
               </Link>
 
               <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/admin/ordini-pv">
