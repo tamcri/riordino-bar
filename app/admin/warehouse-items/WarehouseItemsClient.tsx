@@ -9,6 +9,9 @@ type WarehouseItemRow = {
   barcode: string | null;
   um: string | null;
   prezzo_vendita_eur: number | null;
+  purchase_price: number | null;
+  vat_rate: number | null;
+  purchase_price_vat: number | null;
   peso_kg: number | null;
   volume_ml_per_unit: number | null;
   is_active: boolean;
@@ -20,6 +23,8 @@ type WarehouseItemForm = {
   barcode: string;
   um: string;
   prezzo_vendita_eur: string;
+  purchase_price: string;
+  vat_rate: string;
   peso_kg: string;
   volume_ml_per_unit: string;
   is_active: boolean;
@@ -57,7 +62,7 @@ function formatEuroIT(v: number | null | undefined) {
   const fixed = n.toFixed(2);
   const [intPart, decPart] = fixed.split(".");
   const intWithThousands = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
-  return `€ ${intWithThousands},${decPart}`;
+  return `€\u00A0${intWithThousands},${decPart}`;
 }
 
 function formatNullableText(v: string | null | undefined) {
@@ -69,7 +74,7 @@ function formatPesoKg(v: number | null | undefined) {
   if (v == null) return "—";
   const n = Number(v);
   if (!Number.isFinite(n) || n <= 0) return "—";
-  const s = n.toFixed(n < 0.1 ? 3 : n < 1 ? 2 : 1);
+  const s = n.toFixed(n < 0.1 ? 3 : n < 1 ? 2 : n < 10 ? 2 : 1);
   return s.replace(/\.?0+$/, "");
 }
 
@@ -80,6 +85,24 @@ function formatVolumeMl(v: number | null | undefined) {
   return String(Math.trunc(n));
 }
 
+function calcPurchasePriceVat(
+  purchasePrice: number | null | undefined,
+  vatRate: number | null | undefined
+) {
+  if (purchasePrice == null) return null;
+  const p = Number(purchasePrice);
+  const v = Number(vatRate ?? 0);
+  if (!Number.isFinite(p) || !Number.isFinite(v)) return null;
+  return p * (1 + v / 100);
+}
+
+function formatVatRate(v: number | null | undefined) {
+  if (v == null) return "—";
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "—";
+  return `${n.toFixed(n % 1 === 0 ? 0 : 2)}%`;
+}
+
 function emptyForm(): WarehouseItemForm {
   return {
     code: "",
@@ -87,6 +110,8 @@ function emptyForm(): WarehouseItemForm {
     barcode: "",
     um: "",
     prezzo_vendita_eur: "",
+    purchase_price: "",
+    vat_rate: "",
     peso_kg: "",
     volume_ml_per_unit: "",
     is_active: true,
@@ -151,7 +176,15 @@ export default function WarehouseItemsClient() {
         throw new Error(data?.error || rawText || `HTTP ${status}`);
       }
 
-      setRows(Array.isArray(data?.rows) ? data.rows : []);
+      const nextRows = Array.isArray(data?.rows) ? data.rows : [];
+      setRows(
+        nextRows.map((row: any) => ({
+          ...row,
+          purchase_price_vat:
+            row?.purchase_price_vat ??
+            calcPurchasePriceVat(row?.purchase_price, row?.vat_rate),
+        }))
+      );
     } catch (e: any) {
       setRows([]);
       setError(e?.message || "Errore caricamento");
@@ -187,6 +220,9 @@ export default function WarehouseItemsClient() {
       um: row.um ?? "",
       prezzo_vendita_eur:
         row.prezzo_vendita_eur == null ? "" : String(row.prezzo_vendita_eur),
+      purchase_price:
+        row.purchase_price == null ? "" : String(row.purchase_price),
+      vat_rate: row.vat_rate == null ? "" : String(row.vat_rate),
       peso_kg: row.peso_kg == null ? "" : String(row.peso_kg),
       volume_ml_per_unit:
         row.volume_ml_per_unit == null ? "" : String(row.volume_ml_per_unit),
@@ -243,6 +279,8 @@ export default function WarehouseItemsClient() {
         barcode: form.barcode,
         um: form.um,
         prezzo_vendita_eur: form.prezzo_vendita_eur,
+        purchase_price: form.purchase_price,
+        vat_rate: form.vat_rate,
         peso_kg: form.peso_kg,
         volume_ml_per_unit: form.volume_ml_per_unit,
         is_active: form.is_active,
@@ -269,7 +307,9 @@ export default function WarehouseItemsClient() {
       }
 
       setMsg(
-        editingId ? "Articolo aggiornato correttamente." : "Articolo creato correttamente."
+        editingId
+          ? "Articolo aggiornato correttamente."
+          : "Articolo creato correttamente."
       );
 
       closeModal();
@@ -304,7 +344,9 @@ export default function WarehouseItemsClient() {
       }
 
       setMsg(
-        `Articolo ${row.code} ${row.is_active ? "disattivato" : "attivato"} correttamente.`
+        `Articolo ${row.code} ${
+          row.is_active ? "disattivato" : "attivato"
+        } correttamente.`
       );
 
       await loadRows();
@@ -417,7 +459,9 @@ export default function WarehouseItemsClient() {
             <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="text-lg font-semibold">
-                  {editingId ? "Modifica articolo magazzino" : "Nuovo articolo magazzino"}
+                  {editingId
+                    ? "Modifica articolo magazzino"
+                    : "Nuovo articolo magazzino"}
                 </div>
                 <div className="text-sm text-gray-600">
                   Anagrafica separata dal sistema articoli generale.
@@ -455,7 +499,9 @@ export default function WarehouseItemsClient() {
               </div>
 
               <div className="md:col-span-2">
-                <label className="mb-2 block text-sm font-medium">Descrizione</label>
+                <label className="mb-2 block text-sm font-medium">
+                  Descrizione
+                </label>
                 <input
                   className="w-full rounded-xl border p-3"
                   value={form.description}
@@ -475,18 +521,62 @@ export default function WarehouseItemsClient() {
               </div>
 
               <div>
-                <label className="mb-2 block text-sm font-medium">Prezzo vendita</label>
+                <label className="mb-2 block text-sm font-medium">
+                  Prezzo vendita
+                </label>
                 <input
                   className="w-full rounded-xl border p-3"
                   inputMode="decimal"
                   value={form.prezzo_vendita_eur}
-                  onChange={(e) => updateForm("prezzo_vendita_eur", e.target.value)}
+                  onChange={(e) =>
+                    updateForm("prezzo_vendita_eur", e.target.value)
+                  }
                   placeholder="Es. 1,50"
                 />
               </div>
 
               <div>
-                <label className="mb-2 block text-sm font-medium">Peso (kg)</label>
+                <label className="mb-2 block text-sm font-medium">
+                  Prezzo A. Imp
+                </label>
+                <input
+                  className="w-full rounded-xl border p-3"
+                  inputMode="decimal"
+                  value={form.purchase_price}
+                  onChange={(e) => updateForm("purchase_price", e.target.value)}
+                  placeholder="Es. 0,80"
+                />
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-medium">IVA (%)</label>
+                <input
+                  className="w-full rounded-xl border p-3"
+                  inputMode="decimal"
+                  value={form.vat_rate}
+                  onChange={(e) => updateForm("vat_rate", e.target.value)}
+                  placeholder="Es. 22"
+                />
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-medium">
+                  Prezzo A. Netto
+                </label>
+                <div className="w-full rounded-xl border bg-gray-50 p-3 text-sm text-gray-700">
+                  {formatEuroIT(
+                    calcPurchasePriceVat(
+                      form.purchase_price === "" ? null : Number(String(form.purchase_price).replace(",", ".")),
+                      form.vat_rate === "" ? null : Number(String(form.vat_rate).replace(",", "."))
+                    )
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-medium">
+                  Peso (kg)
+                </label>
                 <input
                   className="w-full rounded-xl border p-3"
                   inputMode="decimal"
@@ -497,12 +587,16 @@ export default function WarehouseItemsClient() {
               </div>
 
               <div>
-                <label className="mb-2 block text-sm font-medium">ML per unità</label>
+                <label className="mb-2 block text-sm font-medium">
+                  ML per unità
+                </label>
                 <input
                   className="w-full rounded-xl border p-3"
                   inputMode="numeric"
                   value={form.volume_ml_per_unit}
-                  onChange={(e) => updateForm("volume_ml_per_unit", e.target.value)}
+                  onChange={(e) =>
+                    updateForm("volume_ml_per_unit", e.target.value)
+                  }
                   placeholder="Es. 700, 750, 1000"
                 />
               </div>
@@ -545,7 +639,8 @@ export default function WarehouseItemsClient() {
               <div>
                 <div className="text-lg font-semibold">Preview import Excel</div>
                 <div className="text-sm text-gray-600">
-                  Verifica righe valide, duplicate e non valide prima dell&apos;import definitivo.
+                  Verifica righe valide, duplicate e non valide prima
+                  dell&apos;import definitivo.
                 </div>
               </div>
 
@@ -560,21 +655,27 @@ export default function WarehouseItemsClient() {
 
             <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-4">
               <div className="rounded-xl border bg-emerald-50 p-3">
-                <div className="text-xs font-medium text-emerald-700">Valide</div>
+                <div className="text-xs font-medium text-emerald-700">
+                  Valide
+                </div>
                 <div className="mt-1 text-xl font-semibold text-emerald-900">
                   {previewData.valid}
                 </div>
               </div>
 
               <div className="rounded-xl border bg-amber-50 p-3">
-                <div className="text-xs font-medium text-amber-700">Duplicate</div>
+                <div className="text-xs font-medium text-amber-700">
+                  Duplicate
+                </div>
                 <div className="mt-1 text-xl font-semibold text-amber-900">
                   {previewData.duplicates}
                 </div>
               </div>
 
               <div className="rounded-xl border bg-rose-50 p-3">
-                <div className="text-xs font-medium text-rose-700">Non valide</div>
+                <div className="text-xs font-medium text-rose-700">
+                  Non valide
+                </div>
                 <div className="mt-1 text-xl font-semibold text-rose-900">
                   {previewData.invalid}
                 </div>
@@ -588,11 +689,11 @@ export default function WarehouseItemsClient() {
               </div>
             </div>
 
-            <div className="mt-4 overflow-auto rounded-2xl border bg-white max-h-[50vh]">
+            <div className="mt-4 max-h-[50vh] overflow-auto rounded-2xl border bg-white">
               <table className="w-full text-sm">
-                <thead className="bg-gray-50 sticky top-0">
+                <thead className="sticky top-0 bg-gray-50">
                   <tr>
-                    <th className="p-3 text-left w-16">Riga</th>
+                    <th className="w-16 p-3 text-left">Riga</th>
                     <th className="p-3 text-left">Stato</th>
                     <th className="p-3 text-left">Codice</th>
                     <th className="p-3 text-left">Descrizione</th>
@@ -622,7 +723,10 @@ export default function WarehouseItemsClient() {
                         : "Non valida";
 
                     return (
-                      <tr key={`${row.row_number}-${row.code}`} className={`border-t ${rowClass}`}>
+                      <tr
+                        key={`${row.row_number}-${row.code}`}
+                        className={`border-t ${rowClass}`}
+                      >
                         <td className="p-3">{row.row_number}</td>
                         <td className="p-3 font-medium">{statusLabel}</td>
                         <td className="p-3 font-medium">{row.code || "—"}</td>
@@ -634,7 +738,9 @@ export default function WarehouseItemsClient() {
                         <td className="p-3 text-right">
                           {formatEuroIT(row.prezzo_vendita_eur)}
                         </td>
-                        <td className="p-3 text-right">{formatPesoKg(row.peso_kg)}</td>
+                        <td className="p-3 text-right">
+                          {formatPesoKg(row.peso_kg)}
+                        </td>
                         <td className="p-3 text-right">
                           {formatVolumeMl(row.volume_ml_per_unit)}
                         </td>
@@ -693,7 +799,11 @@ export default function WarehouseItemsClient() {
               }}
               disabled={previewLoading || importing}
             >
-              {previewLoading ? "Preview..." : importing ? "Import in corso..." : "Importa Excel"}
+              {previewLoading
+                ? "Preview..."
+                : importing
+                ? "Import in corso..."
+                : "Importa Excel"}
             </button>
 
             <button
@@ -740,21 +850,24 @@ export default function WarehouseItemsClient() {
           <thead className="bg-gray-50">
             <tr>
               <th className="p-3 text-left">Codice</th>
-              <th className="p-3 text-left w-[28%]">Descrizione</th>
-              <th className="p-3 text-left w-44">Barcode</th>
-              <th className="p-3 text-left w-20">UM</th>
-              <th className="p-3 text-right w-32">Prezzo</th>
-              <th className="p-3 text-right w-24">Peso kg</th>
-              <th className="p-3 text-right w-24">ML</th>
-              <th className="p-3 text-left w-20">Attivo</th>
-              <th className="p-3 text-right w-40"></th>
+              <th className="w-[28%] p-3 text-left">Descrizione</th>
+              <th className="w-44 p-3 text-left">Barcode</th>
+              <th className="w-20 p-3 text-left">UM</th>
+              <th className="w-32 p-3 text-right">Prezzo</th>
+              <th className="w-32 p-3 text-right">Prezzo A. Imp</th>
+              <th className="w-24 p-3 text-right">IVA %</th>
+              <th className="w-32 p-3 text-right">Prezzo A. Net</th>
+              <th className="w-24 p-3 text-right">Peso kg</th>
+              <th className="w-24 p-3 text-right">ML</th>
+              <th className="w-20 p-3 text-left">Attivo</th>
+              <th className="w-40 p-3 text-right"></th>
             </tr>
           </thead>
 
           <tbody>
             {loading && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={9}>
+                <td className="p-3 text-gray-500" colSpan={12}>
                   Caricamento...
                 </td>
               </tr>
@@ -762,7 +875,7 @@ export default function WarehouseItemsClient() {
 
             {!loading && rows.length === 0 && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={9}>
+                <td className="p-3 text-gray-500" colSpan={12}>
                   Nessun articolo magazzino trovato.
                 </td>
               </tr>
@@ -772,11 +885,27 @@ export default function WarehouseItemsClient() {
               <tr key={row.id} className="border-t">
                 <td className="p-3 font-medium">{row.code}</td>
                 <td className="p-3">{row.description}</td>
-                <td className="p-3 font-mono text-xs">{formatNullableText(row.barcode)}</td>
+                <td className="p-3 font-mono text-xs">
+                  {formatNullableText(row.barcode)}
+                </td>
                 <td className="p-3">{formatNullableText(row.um)}</td>
-                <td className="p-3 text-right">{formatEuroIT(row.prezzo_vendita_eur)}</td>
+                <td className="p-3 text-right">
+                  {formatEuroIT(row.prezzo_vendita_eur)}
+                </td>
+                <td className="p-3 text-right">
+                  {formatEuroIT(row.purchase_price)}
+                </td>
+                <td className="p-3 text-right">{formatVatRate(row.vat_rate)}</td>
+                <td className="p-3 text-right">
+                  {formatEuroIT(
+                    row.purchase_price_vat ??
+                      calcPurchasePriceVat(row.purchase_price, row.vat_rate)
+                  )}
+                </td>
                 <td className="p-3 text-right">{formatPesoKg(row.peso_kg)}</td>
-                <td className="p-3 text-right">{formatVolumeMl(row.volume_ml_per_unit)}</td>
+                <td className="p-3 text-right">
+                  {formatVolumeMl(row.volume_ml_per_unit)}
+                </td>
                 <td className="p-3">{row.is_active ? "Sì" : "No"}</td>
                 <td className="p-3 text-right">
                   <div className="flex items-center justify-end gap-2">

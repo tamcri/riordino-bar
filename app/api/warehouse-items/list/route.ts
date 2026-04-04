@@ -10,6 +10,24 @@ function norm(v: unknown) {
   return String(v ?? "").trim();
 }
 
+function toNumberSafe(v: any): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  return n;
+}
+
+function calcPriceVat(price: number | null, vat: number | null) {
+  const p = toNumberSafe(price);
+  const v = toNumberSafe(vat);
+
+  if (p == null) return null;
+
+  const vatPerc = v ?? 0;
+
+  return p * (1 + vatPerc / 100);
+}
+
 export async function GET(req: Request) {
   const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
 
@@ -24,7 +42,7 @@ export async function GET(req: Request) {
     const { searchParams } = new URL(req.url);
 
     const q = norm(searchParams.get("q"));
-    const active = norm(searchParams.get("active")); // "1" | "0" | "all"
+    const active = norm(searchParams.get("active"));
 
     let query = supabaseAdmin
       .from("warehouse_items")
@@ -35,6 +53,8 @@ export async function GET(req: Request) {
         barcode,
         um,
         prezzo_vendita_eur,
+        purchase_price,
+        vat_rate,
         peso_kg,
         volume_ml_per_unit,
         is_active,
@@ -64,9 +84,21 @@ export async function GET(req: Request) {
       );
     }
 
+    const rows = (data || []).map((r: any) => {
+      const purchase_price = toNumberSafe(r.purchase_price);
+      const vat_rate = toNumberSafe(r.vat_rate);
+
+      return {
+        ...r,
+        purchase_price,
+        vat_rate,
+        purchase_price_vat: calcPriceVat(purchase_price, vat_rate),
+      };
+    });
+
     return NextResponse.json({
       ok: true,
-      rows: Array.isArray(data) ? data : [],
+      rows,
     });
   } catch (e: any) {
     return NextResponse.json(

@@ -437,6 +437,15 @@ export default function AdminPage() {
                 Deposito Centrale
               </Link>
 
+              <Link
+  href="/admin/warehouse-value"
+  className="rounded-2xl border p-4 hover:bg-gray-50 block"
+>
+  <div className="font-regular">Valore Magazzino</div>
+  <div className="text-sm text-gray-500">
+  </div>
+</Link>
+
               <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/admin/warehouse-inventory">
                 Inventario Magazzino
               </Link>

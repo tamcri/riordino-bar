@@ -56,12 +56,17 @@ export async function PATCH(req: Request) {
     const barcode = body?.barcode;
     const um = body?.um;
     const prezzo_vendita_eur = body?.prezzo_vendita_eur;
+    const purchase_price = body?.purchase_price;
+    const vat_rate = body?.vat_rate;
     const peso_kg = body?.peso_kg;
     const volume_ml_per_unit = body?.volume_ml_per_unit;
     const is_active = body?.is_active;
 
     if (!id || !isUuid(id)) {
-      return NextResponse.json({ ok: false, error: "ID non valido" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "ID non valido" },
+        { status: 400 }
+      );
     }
 
     const { data: current, error: curErr } = await supabaseAdmin
@@ -71,7 +76,10 @@ export async function PATCH(req: Request) {
       .maybeSingle();
 
     if (curErr) {
-      return NextResponse.json({ ok: false, error: curErr.message }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: curErr.message },
+        { status: 500 }
+      );
     }
 
     if (!current) {
@@ -85,6 +93,7 @@ export async function PATCH(req: Request) {
       updated_at: new Date().toISOString(),
     };
 
+    // CODICE
     if (code !== undefined) {
       const nextCode = String(code ?? "").trim();
       if (!nextCode) {
@@ -103,7 +112,10 @@ export async function PATCH(req: Request) {
           .limit(1);
 
         if (dupErr) {
-          return NextResponse.json({ ok: false, error: dupErr.message }, { status: 500 });
+          return NextResponse.json(
+            { ok: false, error: dupErr.message },
+            { status: 500 }
+          );
         }
 
         if (Array.isArray(dup) && dup.length > 0) {
@@ -117,6 +129,7 @@ export async function PATCH(req: Request) {
       }
     }
 
+    // DESCRIZIONE
     if (description !== undefined) {
       const nextDescription = String(description ?? "").trim();
       if (!nextDescription) {
@@ -128,22 +141,36 @@ export async function PATCH(req: Request) {
       patch.description = nextDescription;
     }
 
+    // ATTIVO
     if (typeof is_active === "boolean") {
       patch.is_active = is_active;
     }
 
+    // BARCODE
     const nextBarcode = toNullableText(barcode);
     if (nextBarcode !== undefined) patch.barcode = nextBarcode;
 
+    // UM
     const nextUm = toNullableText(um);
     if (nextUm !== undefined) patch.um = nextUm;
 
+    // PREZZO VENDITA
     const nextPrezzo = toNullableNumber(prezzo_vendita_eur);
     if (nextPrezzo !== undefined) patch.prezzo_vendita_eur = nextPrezzo;
 
+    // 👉 PREZZO ACQUISTO (NUOVO)
+    const nextPurchase = toNullableNumber(purchase_price);
+    if (nextPurchase !== undefined) patch.purchase_price = nextPurchase;
+
+    // 🔥 IVA
+    const nextVat = toNullableNumber(vat_rate);
+    if (nextVat !== undefined) patch.vat_rate = nextVat;
+
+    // PESO
     const nextPeso = toNullableNumber(peso_kg);
     if (nextPeso !== undefined) patch.peso_kg = nextPeso;
 
+    // VOLUME
     const nextVol = toNullableInt(volume_ml_per_unit);
     if (nextVol !== undefined) {
       patch.volume_ml_per_unit = nextVol && nextVol > 0 ? nextVol : null;
@@ -155,7 +182,10 @@ export async function PATCH(req: Request) {
       .eq("id", id);
 
     if (error) {
-      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: error.message },
+        { status: 500 }
+      );
     }
 
     return NextResponse.json({ ok: true });

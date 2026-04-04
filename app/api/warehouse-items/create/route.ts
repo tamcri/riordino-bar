@@ -41,14 +41,20 @@ export async function POST(req: Request) {
     const description = norm(body?.description);
 
     if (!code) {
-      return NextResponse.json({ ok: false, error: "Codice obbligatorio" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "Codice obbligatorio" },
+        { status: 400 }
+      );
     }
 
     if (!description) {
-      return NextResponse.json({ ok: false, error: "Descrizione obbligatoria" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "Descrizione obbligatoria" },
+        { status: 400 }
+      );
     }
 
-    // 1) check codice univoco
+    // check duplicati
     const { data: dup, error: dupErr } = await supabaseAdmin
       .from("warehouse_items")
       .select("id")
@@ -56,10 +62,13 @@ export async function POST(req: Request) {
       .limit(1);
 
     if (dupErr) {
-      return NextResponse.json({ ok: false, error: dupErr.message }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: dupErr.message },
+        { status: 500 }
+      );
     }
 
-    if (Array.isArray(dup) && dup.length > 0) {
+    if (dup?.length) {
       return NextResponse.json(
         { ok: false, error: `Codice "${code}" già esistente.` },
         { status: 409 }
@@ -69,19 +78,23 @@ export async function POST(req: Request) {
     const now = new Date().toISOString();
 
     const payload = {
-      code,
-      description,
-      barcode: norm(body?.barcode) || null,
-      um: norm(body?.um) || null,
-      prezzo_vendita_eur: toNullableNumber(body?.prezzo_vendita_eur),
-      peso_kg: toNullableNumber(body?.peso_kg),
-      volume_ml_per_unit: toNullableInt(body?.volume_ml_per_unit),
-      is_active: body?.is_active !== false,
-      created_at: now,
-      updated_at: now,
-    };
+  code,
+  description,
+  barcode: norm(body?.barcode) || null,
+  um: norm(body?.um) || null,
+  prezzo_vendita_eur: toNullableNumber(body?.prezzo_vendita_eur),
+  purchase_price: toNullableNumber(body?.purchase_price),
 
-    // 2) crea articolo magazzino e recupera id
+  // 🔥 AGGIUNGI SOLO QUESTO
+  vat_rate: toNullableNumber(body?.vat_rate),
+
+  peso_kg: toNullableNumber(body?.peso_kg),
+  volume_ml_per_unit: toNullableInt(body?.volume_ml_per_unit),
+  is_active: body?.is_active !== false,
+  created_at: now,
+  updated_at: now,
+};
+
     const { data: createdItem, error: insertItemError } = await supabaseAdmin
       .from("warehouse_items")
       .insert(payload)
@@ -89,72 +102,35 @@ export async function POST(req: Request) {
       .single();
 
     if (insertItemError) {
-      return NextResponse.json({ ok: false, error: insertItemError.message }, { status: 500 });
-    }
-
-    const warehouseItemId = String((createdItem as any)?.id ?? "").trim();
-    if (!warehouseItemId) {
       return NextResponse.json(
-        { ok: false, error: "Articolo creato ma ID mancante" },
+        { ok: false, error: insertItemError.message },
         { status: 500 }
       );
     }
 
-    // 3) trova il PV magazzino centrale
-    const { data: centralPv, error: centralPvError } = await supabaseAdmin
+    const warehouseItemId = String(createdItem?.id ?? "");
+
+    const { data: centralPv } = await supabaseAdmin
       .from("pvs")
       .select("id")
       .eq("is_central_warehouse", true)
       .maybeSingle();
 
-    if (centralPvError) {
-      return NextResponse.json({ ok: false, error: centralPvError.message }, { status: 500 });
-    }
-
-    if (!centralPv) {
-      return NextResponse.json(
-        { ok: false, error: "Articolo creato ma magazzino centrale non configurato" },
-        { status: 400 }
-      );
-    }
-
-    // 4) trova il deposito centrale
-    const { data: centralDeposit, error: centralDepositError } = await supabaseAdmin
+    const { data: centralDeposit } = await supabaseAdmin
       .from("deposits")
       .select("id")
-      .eq("pv_id", (centralPv as any).id)
+      .eq("pv_id", centralPv?.id)
       .eq("code", "DEP-CENTRALE")
       .maybeSingle();
 
-    if (centralDepositError) {
-      return NextResponse.json({ ok: false, error: centralDepositError.message }, { status: 500 });
-    }
-
-    if (!centralDeposit) {
-      return NextResponse.json(
-        { ok: false, error: "Articolo creato ma deposito centrale non trovato" },
-        { status: 400 }
-      );
-    }
-
-    // 5) inserisce automaticamente nel deposito centrale con qty 0
-    const { error: depositInsertError } = await supabaseAdmin
-      .from("warehouse_deposit_items")
-      .insert({
-        deposit_id: (centralDeposit as any).id,
-        warehouse_item_id: warehouseItemId,
-        stock_qty: 0,
-        is_active: true,
-        created_at: now,
-        updated_at: now,
-      });
-
-    if (depositInsertError) {
-      return NextResponse.json(
-        { ok: false, error: depositInsertError.message },
-        { status: 500 }
-      );
-    }
+    await supabaseAdmin.from("warehouse_deposit_items").insert({
+      deposit_id: centralDeposit?.id,
+      warehouse_item_id: warehouseItemId,
+      stock_qty: 0,
+      is_active: true,
+      created_at: now,
+      updated_at: now,
+    });
 
     return NextResponse.json({ ok: true });
   } catch (e: any) {
