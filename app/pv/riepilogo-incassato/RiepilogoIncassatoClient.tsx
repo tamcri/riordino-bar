@@ -1,9 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
 type SummaryStatus = "bozza" | "completato" | "chiuso";
+type PeriodPresetKey =
+  | "current_month"
+  | "last_month"
+  | "last_30_days"
+  | "current_year"
+  | "all";
 
 type PvCashSummaryRow = {
   id: string;
@@ -118,6 +124,51 @@ function statusBadge(status: SummaryStatus) {
   }
 }
 
+function getTodayDateOnly() {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+}
+
+function getDateOnlyFromString(value: string) {
+  const [year, month, day] = String(value ?? "").split("-").map(Number);
+
+  if (!year || !month || !day) return null;
+
+  return new Date(year, month - 1, day);
+}
+
+function getPeriodPresetRange(preset: PeriodPresetKey) {
+  const today = getTodayDateOnly();
+
+  switch (preset) {
+    case "current_month": {
+      const start = new Date(today.getFullYear(), today.getMonth(), 1);
+      return { start, end: today };
+    }
+
+    case "last_month": {
+      const start = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+      const end = new Date(today.getFullYear(), today.getMonth(), 0);
+      return { start, end };
+    }
+
+    case "last_30_days": {
+      const start = new Date(today);
+      start.setDate(start.getDate() - 29);
+      return { start, end: today };
+    }
+
+    case "current_year": {
+      const start = new Date(today.getFullYear(), 0, 1);
+      return { start, end: today };
+    }
+
+    case "all":
+    default:
+      return { start: null, end: null };
+  }
+}
+
 export default function RiepilogoIncassatoClient() {
   const router = useRouter();
 
@@ -127,6 +178,8 @@ export default function RiepilogoIncassatoClient() {
   const [notificationsLoading, setNotificationsLoading] = useState(true);
   const [markingReadId, setMarkingReadId] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  const [activePeriodPreset, setActivePeriodPreset] =
+    useState<PeriodPresetKey>("current_month");
 
   async function loadRows() {
     setLoading(true);
@@ -208,6 +261,20 @@ export default function RiepilogoIncassatoClient() {
     loadRows();
     loadNotifications();
   }, []);
+
+  const filteredRows = useMemo(() => {
+    if (activePeriodPreset === "all") return rows;
+
+    const { start, end } = getPeriodPresetRange(activePeriodPreset);
+
+    if (!start || !end) return rows;
+
+    return rows.filter((row) => {
+      const rowDate = getDateOnlyFromString(row.data);
+      if (!rowDate) return false;
+      return rowDate >= start && rowDate <= end;
+    });
+  }, [rows, activePeriodPreset]);
 
   return (
     <div className="space-y-6">
@@ -307,15 +374,83 @@ export default function RiepilogoIncassatoClient() {
           </button>
         </div>
 
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setActivePeriodPreset("current_month")}
+              className={`rounded-full border px-3 py-2 text-sm transition ${
+                activePeriodPreset === "current_month"
+                  ? "border-slate-900 bg-slate-900 text-white"
+                  : "border-gray-300 bg-white text-slate-700 hover:bg-gray-50"
+              }`}
+            >
+              Mese corrente
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActivePeriodPreset("last_month")}
+              className={`rounded-full border px-3 py-2 text-sm transition ${
+                activePeriodPreset === "last_month"
+                  ? "border-slate-900 bg-slate-900 text-white"
+                  : "border-gray-300 bg-white text-slate-700 hover:bg-gray-50"
+              }`}
+            >
+              Mese scorso
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActivePeriodPreset("last_30_days")}
+              className={`rounded-full border px-3 py-2 text-sm transition ${
+                activePeriodPreset === "last_30_days"
+                  ? "border-slate-900 bg-slate-900 text-white"
+                  : "border-gray-300 bg-white text-slate-700 hover:bg-gray-50"
+              }`}
+            >
+              Ultimi 30 giorni
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActivePeriodPreset("current_year")}
+              className={`rounded-full border px-3 py-2 text-sm transition ${
+                activePeriodPreset === "current_year"
+                  ? "border-slate-900 bg-slate-900 text-white"
+                  : "border-gray-300 bg-white text-slate-700 hover:bg-gray-50"
+              }`}
+            >
+              Anno corrente
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActivePeriodPreset("all")}
+              className={`rounded-full border px-3 py-2 text-sm transition ${
+                activePeriodPreset === "all"
+                  ? "border-slate-900 bg-slate-900 text-white"
+                  : "border-gray-300 bg-white text-slate-700 hover:bg-gray-50"
+              }`}
+            >
+              Tutto
+            </button>
+          </div>
+
+          <div className="rounded-xl border bg-slate-50 px-3 py-2 text-sm text-slate-700">
+            Righe visualizzate: <span className="font-semibold">{filteredRows.length}</span>
+          </div>
+        </div>
+
         {loading && <div className="text-sm text-gray-500">Caricamento...</div>}
 
-        {!loading && rows.length === 0 && (
+        {!loading && filteredRows.length === 0 && (
           <div className="text-sm text-gray-500">
             Nessun riepilogo presente.
           </div>
         )}
 
-        {!loading && rows.length > 0 && (
+        {!loading && filteredRows.length > 0 && (
           <div className="overflow-x-auto">
             <table className="w-full border text-sm">
               <thead className="bg-slate-100">
@@ -330,7 +465,7 @@ export default function RiepilogoIncassatoClient() {
               </thead>
 
               <tbody>
-                {rows.map((row) => {
+                {filteredRows.map((row) => {
                   const status = normalizeStatus(row);
                   const isClosed = status === "chiuso";
 

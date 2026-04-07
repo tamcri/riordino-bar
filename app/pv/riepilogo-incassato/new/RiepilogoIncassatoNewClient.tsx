@@ -111,7 +111,6 @@ export default function RiepilogoIncassatoNewClient() {
 
   const [pos, setPos] = useState<number | null>(null);
   const [speseExtra, setSpeseExtra] = useState<number | null>(null);
-  const [totVersato, setTotVersato] = useState<number | null>(null);
   const [fondoCassa, setFondoCassa] = useState<number | null>(null);
 
   const [fondoCassaIniziale, setFondoCassaIniziale] = useState<number | null>(null);
@@ -143,7 +142,6 @@ export default function RiepilogoIncassatoNewClient() {
   const [venditaTabacchiInput, setVenditaTabacchiInput] = useState("");
   const [posInput, setPosInput] = useState("");
   const [speseExtraInput, setSpeseExtraInput] = useState("");
-  const [totVersatoInput, setTotVersatoInput] = useState("");
   const [fondoCassaInput, setFondoCassaInput] = useState("");
   const [parziale1Input, setParziale1Input] = useState("");
   const [parziale2Input, setParziale2Input] = useState("");
@@ -166,9 +164,7 @@ export default function RiepilogoIncassatoNewClient() {
 
   const versamento = roundMoney(totale - n(pos) - n(speseExtra));
 
-  const daVersare = roundMoney(
-    totVersato === null || totVersato === 0 ? versamento : versamento - n(totVersato)
-  );
+  const daVersare = versamento;
 
   const deltaFondoCassaPercent = useMemo(() => {
     return computeDeltaPercent(fondoCassaIniziale, fondoCassa);
@@ -388,40 +384,40 @@ export default function RiepilogoIncassatoNewClient() {
 
     setSaving(true);
 
-try {
-  const finalStatus = status;
+    try {
+      const finalStatus = status;
 
-  const res = await fetch("/api/cash-summary/save", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      data,
-      operatore: operatore.trim(),
-      incasso_totale: incassoTotale,
-      pagamento_fornitori: pagamentoFornitori,
-      gv_pagati: gvPagati,
-      lis_plus: lisPlus,
-      mooney,
-      totale_esistenza_cassa: totaleEsistenzaCassa,
-      vendita_gv: venditaGV,
-      vendita_tabacchi: venditaTabacchi,
-      totale,
-      pos,
-      spese_extra: speseExtra ?? 0,
-      versamento,
-      da_versare: daVersare,
-      tot_versato: null,
-      fondo_cassa_iniziale: fondoCassaIniziale,
-      parziale_1: parziale1,
-      parziale_2: parziale2,
-      parziale_3: parziale3,
-      fondo_cassa: fondoCassa,
-      status: finalStatus,
-      fornitori: supplierPayments,
-    }),
-  });
+      const res = await fetch("/api/cash-summary/save", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          data,
+          operatore: operatore.trim(),
+          incasso_totale: incassoTotale,
+          pagamento_fornitori: pagamentoFornitori,
+          gv_pagati: gvPagati,
+          lis_plus: lisPlus,
+          mooney,
+          totale_esistenza_cassa: totaleEsistenzaCassa,
+          vendita_gv: venditaGV,
+          vendita_tabacchi: venditaTabacchi,
+          totale,
+          pos,
+          spese_extra: speseExtra ?? 0,
+          versamento,
+          da_versare: daVersare,
+          tot_versato: null,
+          fondo_cassa_iniziale: fondoCassaIniziale,
+          parziale_1: parziale1,
+          parziale_2: parziale2,
+          parziale_3: parziale3,
+          fondo_cassa: fondoCassa,
+          status: finalStatus,
+          fornitori: supplierPayments,
+        }),
+      });
 
       const json = await res.json().catch(() => null);
 
@@ -637,7 +633,6 @@ try {
           <InputField label="Versamento" value={versamento} disabled />
 
           <InputField label="Da Versare" value={daVersare} disabled />
-
         </div>
       </div>
 

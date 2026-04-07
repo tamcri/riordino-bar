@@ -155,7 +155,6 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
   const [venditaTabacchi, setVenditaTabacchi] = useState<number | null>(null);
   const [pos, setPos] = useState<number | null>(null);
   const [speseExtra, setSpeseExtra] = useState<number | null>(null);
-  const [totVersato, setTotVersato] = useState<number | null>(null);
   const [fondoCassaIniziale, setFondoCassaIniziale] = useState<number | null>(null);
   const [parziale1, setParziale1] = useState<number | null>(null);
   const [parziale2, setParziale2] = useState<number | null>(null);
@@ -181,7 +180,6 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
   const searchRequestIdRef = useRef(0);
 
   const canEditMainFields = !viewMode && !isClosed && status === "bozza";
-  const canEditTotVersato = !viewMode && !isClosed && status !== "bozza";
 
   const pagamentoFornitori = useMemo(
     () => roundMoney(supplierPayments.reduce((sum, s) => sum + s.amount, 0)),
@@ -194,12 +192,7 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
 
   const totale = roundMoney(totaleEsistenzaCassa + n(venditaGV) + n(venditaTabacchi));
   const versamento = roundMoney(totale - n(pos) - n(speseExtra));
-
-  const daVersare = roundMoney(
-    totVersato === null || totVersato === 0
-      ? versamento
-      : versamento - n(totVersato)
-  );
+  const daVersare = versamento;
 
   const deltaFondoCassaPercent = useMemo(() => {
     return computeDeltaPercent(fondoCassaIniziale, fondoCassa);
@@ -383,7 +376,6 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
       setVenditaTabacchi(s.vendita_tabacchi ?? null);
       setPos(s.pos ?? null);
       setSpeseExtra(s.spese_extra ?? null);
-      setTotVersato(s.tot_versato ?? null);
       setFondoCassaIniziale(s.fondo_cassa_iniziale ?? null);
       setParziale1(s.parziale_1 ?? null);
       setParziale2(s.parziale_2 ?? null);
@@ -449,7 +441,7 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
           spese_extra: speseExtra ?? 0,
           versamento,
           da_versare: daVersare,
-          tot_versato: totVersato,
+          tot_versato: null,
           fondo_cassa_iniziale: fondoCassaIniziale,
           parziale_1: parziale1,
           parziale_2: parziale2,
@@ -468,64 +460,6 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
       }
 
       alert(nextStatus === "bozza" ? "Bozza salvata" : "Riepilogo completato");
-      router.push("/pv/riepilogo-incassato");
-    } catch {
-      alert("Errore di rete");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function salvaTotVersato() {
-    if (isClosed) return;
-    if (totVersato === null) {
-      alert("Tot. Versato obbligatorio");
-      return;
-    }
-
-    setSaving(true);
-
-    try {
-      const res = await fetch("/api/cash-summary/save", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          data,
-          operatore,
-          incasso_totale: incassoTotale,
-          pagamento_fornitori: pagamentoFornitori,
-          gv_pagati: gvPagati,
-          lis_plus: lisPlus,
-          mooney,
-          totale_esistenza_cassa: totaleEsistenzaCassa,
-          vendita_gv: venditaGV,
-          vendita_tabacchi: venditaTabacchi,
-          totale,
-          pos,
-          spese_extra: speseExtra ?? 0,
-          versamento,
-          da_versare: daVersare,
-          tot_versato: totVersato,
-          fondo_cassa_iniziale: fondoCassaIniziale,
-          parziale_1: parziale1,
-          parziale_2: parziale2,
-          parziale_3: parziale3,
-          fondo_cassa: fondoCassa,
-          status,
-          fornitori: supplierPayments,
-        }),
-      });
-
-      const json = await res.json().catch(() => null);
-
-      if (!res.ok) {
-        alert(json?.error || "Errore nel salvataggio");
-        return;
-      }
-
-      alert("Tot. Versato salvato");
       router.push("/pv/riepilogo-incassato");
     } catch {
       alert("Errore di rete");
@@ -678,12 +612,6 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
           <EditableNumberField label="Prelievo" value={speseExtra} setValue={setSpeseExtra} disabled={!canEditMainFields} />
           <ReadOnlyField label="Versamento" value={formatEuro(versamento)} />
           <ReadOnlyField label="Da Versare" value={formatEuro(daVersare)} />
-          <EditableNumberField
-            label="Tot. Versato"
-            value={totVersato}
-            setValue={setTotVersato}
-            disabled={!canEditTotVersato}
-          />
         </div>
       </div>
 
@@ -700,40 +628,25 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
         </div>
       </div>
 
-      {!viewMode && !isClosed && (
+      {!viewMode && !isClosed && status === "bozza" && (
         <div className="flex justify-end gap-3">
-          {status === "bozza" && (
-            <>
-              <button
-                onClick={() => submitWithStatus("bozza")}
-                disabled={saving}
-                className="rounded-lg border px-6 py-3 font-semibold hover:bg-gray-50 disabled:opacity-50"
-                type="button"
-              >
-                {saving ? "Salvo..." : "Salva Bozza"}
-              </button>
+          <button
+            onClick={() => submitWithStatus("bozza")}
+            disabled={saving}
+            className="rounded-lg border px-6 py-3 font-semibold hover:bg-gray-50 disabled:opacity-50"
+            type="button"
+          >
+            {saving ? "Salvo..." : "Salva Bozza"}
+          </button>
 
-              <button
-                onClick={() => submitWithStatus("completato")}
-                disabled={saving}
-                className="rounded-lg bg-blue-600 px-6 py-3 font-semibold text-white disabled:opacity-50"
-                type="button"
-              >
-                {saving ? "Salvo..." : "Completa"}
-              </button>
-            </>
-          )}
-
-          {status === "completato" && (
-            <button
-              onClick={salvaTotVersato}
-              disabled={saving}
-              className="rounded-lg bg-green-600 px-6 py-3 font-semibold text-white disabled:opacity-50"
-              type="button"
-            >
-              {saving ? "Salvo..." : "Salva Tot. Versato"}
-            </button>
-          )}
+          <button
+            onClick={() => submitWithStatus("completato")}
+            disabled={saving}
+            className="rounded-lg bg-blue-600 px-6 py-3 font-semibold text-white disabled:opacity-50"
+            type="button"
+          >
+            {saving ? "Salvo..." : "Completa"}
+          </button>
         </div>
       )}
 

@@ -86,6 +86,15 @@ type ComparisonSeriesMeta = {
   color: string;
 };
 
+type PeriodPresetKey =
+  | "current_month"
+  | "last_month"
+  | "last_30_days"
+  | "current_year"
+  | "all";
+
+type AdminStatusFilter = "all" | "open" | "closed";
+
 const METRIC_OPTIONS: MetricOption[] = [
   { key: "incasso_totale", label: "Incasso Totale" },
   { key: "gv_pagati", label: "Pagati G&V" },
@@ -125,6 +134,53 @@ function todayISO() {
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const dd = String(d.getDate()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd}`;
+}
+
+function firstDayOfCurrentMonthISO() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  return `${yyyy}-${mm}-01`;
+}
+
+function getPeriodPresetDates(preset: PeriodPresetKey) {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+  const toIso = (date: Date) => {
+    const yyyy = date.getFullYear();
+    const mm = String(date.getMonth() + 1).padStart(2, "0");
+    const dd = String(date.getDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  };
+
+  switch (preset) {
+    case "current_month": {
+      const from = new Date(today.getFullYear(), today.getMonth(), 1);
+      return { dateFrom: toIso(from), dateTo: toIso(today) };
+    }
+
+    case "last_month": {
+      const from = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+      const to = new Date(today.getFullYear(), today.getMonth(), 0);
+      return { dateFrom: toIso(from), dateTo: toIso(to) };
+    }
+
+    case "last_30_days": {
+      const from = new Date(today);
+      from.setDate(from.getDate() - 29);
+      return { dateFrom: toIso(from), dateTo: toIso(today) };
+    }
+
+    case "current_year": {
+      const from = new Date(today.getFullYear(), 0, 1);
+      return { dateFrom: toIso(from), dateTo: toIso(today) };
+    }
+
+    case "all":
+    default:
+      return { dateFrom: "", dateTo: toIso(today) };
+  }
 }
 
 function n(v: unknown) {
@@ -326,7 +382,16 @@ function fallbackColorFromString(value: string) {
   return PV_COMPARE_LINE_COLORS[Math.abs(hash) % PV_COMPARE_LINE_COLORS.length];
 }
 
-function drawKpiBox(pdf: jsPDF, x: number, y: number, w: number, h: number, title: string, value: string, note?: string) {
+function drawKpiBox(
+  pdf: jsPDF,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  title: string,
+  value: string,
+  note?: string
+) {
   pdf.setDrawColor(203, 213, 225);
   pdf.setFillColor(248, 250, 252);
   pdf.roundedRect(x, y, w, h, 2, 2, "FD");
@@ -363,7 +428,6 @@ function drawSimpleLineChart(
   pdf.setDrawColor(203, 213, 225);
   pdf.setFillColor(255, 255, 255);
   pdf.roundedRect(x, y, w, h, 2, 2, "FD");
-
 
   if (rows.length === 0) {
     pdf.setFont("helvetica", "normal");
@@ -421,8 +485,11 @@ export default function CashSummaryAdminClient() {
 
   const [pvs, setPvs] = useState<PV[]>([]);
   const [pvId, setPvId] = useState("");
-  const [dateFrom, setDateFrom] = useState("");
+  const [dateFrom, setDateFrom] = useState(firstDayOfCurrentMonthISO());
   const [dateTo, setDateTo] = useState(todayISO());
+  const [activePeriodPreset, setActivePeriodPreset] =
+    useState<PeriodPresetKey | "">("current_month");
+  const [statusFilter, setStatusFilter] = useState<AdminStatusFilter>("all");
 
   const [rows, setRows] = useState<RawRow[]>([]);
   const [checksBySummary, setChecksBySummary] = useState<Record<string, MetricChecksMap>>({});
@@ -475,16 +542,24 @@ export default function CashSummaryAdminClient() {
     }
   }
 
-  async function loadRows() {
+  async function loadRows(overrides?: {
+    pvId?: string;
+    dateFrom?: string;
+    dateTo?: string;
+  }) {
     setLoading(true);
     setMsg(null);
 
     try {
       const params = new URLSearchParams();
 
-      if (pvId) params.set("pv_id", pvId);
-      if (dateFrom) params.set("date_from", dateFrom);
-      if (dateTo) params.set("date_to", dateTo);
+      const effectivePvId = overrides?.pvId ?? pvId;
+      const effectiveDateFrom = overrides?.dateFrom ?? dateFrom;
+      const effectiveDateTo = overrides?.dateTo ?? dateTo;
+
+      if (effectivePvId) params.set("pv_id", effectivePvId);
+      if (effectiveDateFrom) params.set("date_from", effectiveDateFrom);
+      if (effectiveDateTo) params.set("date_to", effectiveDateTo);
 
       const res = await fetch(`/api/cash-summary/list?${params.toString()}`, {
         cache: "no-store",
@@ -734,6 +809,18 @@ export default function CashSummaryAdminClient() {
     );
   }
 
+  async function applyPeriodPreset(preset: PeriodPresetKey) {
+    const nextDates = getPeriodPresetDates(preset);
+    setActivePeriodPreset(preset);
+    setDateFrom(nextDates.dateFrom);
+    setDateTo(nextDates.dateTo);
+    await loadRows({
+      pvId,
+      dateFrom: nextDates.dateFrom,
+      dateTo: nextDates.dateTo,
+    });
+  }
+
   async function saveDetailCheck(summaryId: string, metricKey: MetricKey, status: CheckState | null) {
     const savingKey = `${summaryId}:${metricKey}`;
     setDetailSavingKey(savingKey);
@@ -875,6 +962,14 @@ export default function CashSummaryAdminClient() {
     });
   }, [rows, saldoInizialeByPv, checksBySummary]);
 
+  const filteredComputedRows = useMemo(() => {
+    if (statusFilter === "all") return computedRows;
+    if (statusFilter === "open") {
+      return computedRows.filter((row) => !row.is_closed);
+    }
+    return computedRows.filter((row) => row.is_closed);
+  }, [computedRows, statusFilter]);
+
   const chartData = useMemo(() => {
     const grouped = new Map<
       string,
@@ -885,7 +980,7 @@ export default function CashSummaryAdminClient() {
       }
     >();
 
-    const sorted = [...computedRows].sort((a, b) => a.data.localeCompare(b.data));
+    const sorted = [...filteredComputedRows].sort((a, b) => a.data.localeCompare(b.data));
 
     sorted.forEach((row) => {
       const value = metricValue(row, metric);
@@ -917,7 +1012,7 @@ export default function CashSummaryAdminClient() {
       total,
       average: avg,
     };
-  }, [computedRows, metric]);
+  }, [filteredComputedRows, metric]);
 
   const bestRow = useMemo(() => {
     if (chartData.rows.length === 0) return null;
@@ -932,7 +1027,7 @@ export default function CashSummaryAdminClient() {
   const latestFilteredPvRow = useMemo(() => {
     if (!pvId) return null;
 
-    const filtered = computedRows.filter((row) => row.pv_id === pvId);
+    const filtered = filteredComputedRows.filter((row) => row.pv_id === pvId);
     if (filtered.length === 0) return null;
 
     const sorted = [...filtered].sort((a, b) => {
@@ -941,7 +1036,7 @@ export default function CashSummaryAdminClient() {
     });
 
     return sorted[0];
-  }, [computedRows, pvId]);
+  }, [filteredComputedRows, pvId]);
 
   const fondoCassaPercent = useMemo(() => {
     if (!pvId) return null;
@@ -950,10 +1045,10 @@ export default function CashSummaryAdminClient() {
   }, [pvId, chartFondoInitialValue, latestFilteredPvRow]);
 
   const compareByPv = useMemo(() => {
-    const filteredRows =
+    const baseRows =
       selectedComparePvIds.length > 0
-        ? computedRows.filter((row) => selectedComparePvIds.includes(row.pv_id))
-        : computedRows;
+        ? filteredComputedRows.filter((row) => selectedComparePvIds.includes(row.pv_id))
+        : filteredComputedRows;
 
     const map = new Map<
       string,
@@ -965,7 +1060,7 @@ export default function CashSummaryAdminClient() {
       }
     >();
 
-    filteredRows.forEach((row) => {
+    baseRows.forEach((row) => {
       const value = metricValue(row, metric);
 
       const prev = map.get(row.pv_id) ?? {
@@ -980,17 +1075,17 @@ export default function CashSummaryAdminClient() {
     });
 
     return Array.from(map.values()).sort((a, b) => b.total - a.total);
-  }, [computedRows, metric, selectedComparePvIds]);
+  }, [filteredComputedRows, metric, selectedComparePvIds]);
 
   const comparisonChartData = useMemo(() => {
-    const filteredRows =
+    const baseRows =
       selectedComparePvIds.length > 0
-        ? computedRows.filter((row) => selectedComparePvIds.includes(row.pv_id))
-        : computedRows;
+        ? filteredComputedRows.filter((row) => selectedComparePvIds.includes(row.pv_id))
+        : filteredComputedRows;
 
     const grouped = new Map<string, Record<string, number | string>>();
 
-    filteredRows
+    baseRows
       .slice()
       .sort((a, b) => a.data.localeCompare(b.data))
       .forEach((row) => {
@@ -1018,7 +1113,7 @@ export default function CashSummaryAdminClient() {
       rows,
       series,
     };
-  }, [compareByPv, compareColorByPvId, computedRows, metric, selectedComparePvIds]);
+  }, [compareByPv, compareColorByPvId, filteredComputedRows, metric, selectedComparePvIds]);
 
   const comparisonSeriesMap = useMemo(() => {
     const map: Record<string, ComparisonSeriesMeta> = {};
@@ -1029,7 +1124,7 @@ export default function CashSummaryAdminClient() {
   }, [comparisonChartData.series]);
 
   const detailRows = useMemo(() => {
-    return [...computedRows]
+    return [...filteredComputedRows]
       .sort((a, b) => a.data.localeCompare(b.data))
       .map((row) => ({
         id: row.id,
@@ -1039,7 +1134,7 @@ export default function CashSummaryAdminClient() {
         value: metricValue(row, metric),
         status: row.metric_checks[metric] ?? null,
       }));
-  }, [computedRows, metric]);
+  }, [filteredComputedRows, metric]);
 
   const filteredDetailRows = useMemo(() => {
     if (detailFilter === "check") {
@@ -1062,7 +1157,7 @@ export default function CashSummaryAdminClient() {
       mooney: 0,
     };
 
-    for (const row of computedRows) {
+    for (const row of filteredComputedRows) {
       for (const metricOption of METRIC_OPTIONS) {
         if (row.metric_checks[metricOption.key] === "check") {
           counts[metricOption.key] += 1;
@@ -1071,11 +1166,11 @@ export default function CashSummaryAdminClient() {
     }
 
     return counts;
-  }, [computedRows]);
+  }, [filteredComputedRows]);
 
-    function handleGenerateDataReport() {
+  function handleGenerateDataReport() {
     try {
-      const rowsForReport = computedRows.map((row) => ({
+      const rowsForReport = filteredComputedRows.map((row) => ({
         data: row.data,
         pv_label: row.pv_label,
         operatore: row.operatore,
@@ -1109,9 +1204,9 @@ export default function CashSummaryAdminClient() {
     }
   }
 
-    function handleGenerateExcelReport() {
+  function handleGenerateExcelReport() {
     try {
-      const rowsForReport = computedRows.map((row) => ({
+      const rowsForReport = filteredComputedRows.map((row) => ({
         data: String(row.data ?? ""),
         pv_label: String(row.pv_label ?? ""),
         operatore: String(row.operatore ?? ""),
@@ -1207,7 +1302,15 @@ export default function CashSummaryAdminClient() {
       const gap = 4;
       const boxWidth = (contentWidth - gap) / 2;
       drawKpiBox(pdf, margin, y, boxWidth, 22, "Totale periodo", formatEuro(chartData.total));
-      drawKpiBox(pdf, margin + boxWidth + gap, y, boxWidth, 22, "Media giornaliera", formatEuro(chartData.average));
+      drawKpiBox(
+        pdf,
+        margin + boxWidth + gap,
+        y,
+        boxWidth,
+        22,
+        "Media giornaliera",
+        formatEuro(chartData.average)
+      );
       y += 26;
       drawKpiBox(
         pdf,
@@ -1331,26 +1434,22 @@ export default function CashSummaryAdminClient() {
         },
       });
 
-      const fileMetric = metricLabel(metric).toLowerCase().replace(/\s+/g, "-");
-      
-const pvCode = selectedPvRow?.code || "Tutti";
+      const pvCode = selectedPvRow?.code || "Tutti";
 
-const metricLabelMap: Record<string, string> = {
-  incasso_totale: "IncassoTotale",
-  vendita_tabacchi: "Tabacchi",
-  vendita_gv: "GrattaEVinci",
-  lis_plus: "LIS",
-  mooney: "Mooney",
-  gv_pagati: "PagatiGV",
-};
+      const metricLabelMap: Record<string, string> = {
+        incasso_totale: "IncassoTotale",
+        vendita_tabacchi: "Tabacchi",
+        vendita_gv: "GrattaEVinci",
+        lis_plus: "LIS",
+        mooney: "Mooney",
+        gv_pagati: "PagatiGV",
+      };
 
-const metricName = metricLabelMap[metric] || metric;
+      const metricName = metricLabelMap[metric] || metric;
+      const safePv = pvCode.replace(/\s+/g, "").replace(/[^\w\-]/g, "");
+      const fileName = `Report-Analitico-${safePv}-${metricName}.pdf`;
 
-const safePv = pvCode.replace(/\s+/g, "").replace(/[^\w\-]/g, "");
-
-const fileName = `Report-Analitico-${safePv}-${metricName}.pdf`;
-
-pdf.save(fileName);
+      pdf.save(fileName);
       setMsg("Report generato correttamente.");
     } catch (error) {
       console.error("REPORT PDF ERROR:", error);
@@ -1540,7 +1639,10 @@ pdf.save(fileName);
               type="date"
               className="w-full rounded-xl border bg-white p-3"
               value={dateFrom}
-              onChange={(e) => setDateFrom(e.target.value)}
+              onChange={(e) => {
+                setDateFrom(e.target.value);
+                setActivePeriodPreset("");
+              }}
             />
           </div>
 
@@ -1550,7 +1652,10 @@ pdf.save(fileName);
               type="date"
               className="w-full rounded-xl border bg-white p-3"
               value={dateTo}
-              onChange={(e) => setDateTo(e.target.value)}
+              onChange={(e) => {
+                setDateTo(e.target.value);
+                setActivePeriodPreset("");
+              }}
             />
           </div>
 
@@ -1585,21 +1690,21 @@ pdf.save(fileName);
             )}
 
             <button
-            type="button"
-            onClick={handleGenerateDataReport}
-            title="Dati completi per tutte le metriche"
-            className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50"
+              type="button"
+              onClick={handleGenerateDataReport}
+              title="Dati completi per tutte le metriche"
+              className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50"
             >
-            REPORT COMPLETO
+              REPORT COMPLETO
             </button>
 
             <button
-            type="button"
-            onClick={handleGenerateExcelReport}
-           title="Esporta in Excel tutti i dati del report completo"
-           className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50"
+              type="button"
+              onClick={handleGenerateExcelReport}
+              title="Esporta in Excel tutti i dati del report completo"
+              className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50"
             >
-           EXPORT EXCEL
+              EXPORT EXCEL
             </button>
 
             <button
@@ -1992,10 +2097,94 @@ pdf.save(fileName);
       </section>
 
       <section className="rounded-2xl border bg-white p-4">
-        <h2 className="text-lg font-semibold">Storico Riepiloghi</h2>
-        <p className="mt-1 text-sm text-gray-600">
-          Il progressivo usa il saldo iniziale del PV e continua automaticamente nel tempo.
-        </p>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold">Storico Riepiloghi</h2>
+            <p className="mt-1 text-sm text-gray-600">
+              Il progressivo usa il saldo iniziale del PV e continua automaticamente nel tempo.
+            </p>
+          </div>
+
+          <div className="rounded-xl border bg-slate-50 px-3 py-2 text-sm text-slate-700">
+            Righe visualizzate: <span className="font-semibold">{filteredComputedRows.length}</span>
+          </div>
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => applyPeriodPreset("current_month")}
+              className={`rounded-full border px-3 py-2 text-sm transition ${
+                activePeriodPreset === "current_month"
+                  ? "border-slate-900 bg-slate-900 text-white"
+                  : "border-gray-300 bg-white text-slate-700 hover:bg-gray-50"
+              }`}
+            >
+              Mese corrente
+            </button>
+
+            <button
+              type="button"
+              onClick={() => applyPeriodPreset("last_month")}
+              className={`rounded-full border px-3 py-2 text-sm transition ${
+                activePeriodPreset === "last_month"
+                  ? "border-slate-900 bg-slate-900 text-white"
+                  : "border-gray-300 bg-white text-slate-700 hover:bg-gray-50"
+              }`}
+            >
+              Mese scorso
+            </button>
+
+            <button
+              type="button"
+              onClick={() => applyPeriodPreset("last_30_days")}
+              className={`rounded-full border px-3 py-2 text-sm transition ${
+                activePeriodPreset === "last_30_days"
+                  ? "border-slate-900 bg-slate-900 text-white"
+                  : "border-gray-300 bg-white text-slate-700 hover:bg-gray-50"
+              }`}
+            >
+              Ultimi 30 giorni
+            </button>
+
+            <button
+              type="button"
+              onClick={() => applyPeriodPreset("current_year")}
+              className={`rounded-full border px-3 py-2 text-sm transition ${
+                activePeriodPreset === "current_year"
+                  ? "border-slate-900 bg-slate-900 text-white"
+                  : "border-gray-300 bg-white text-slate-700 hover:bg-gray-50"
+              }`}
+            >
+              Anno corrente
+            </button>
+
+            <button
+              type="button"
+              onClick={() => applyPeriodPreset("all")}
+              className={`rounded-full border px-3 py-2 text-sm transition ${
+                activePeriodPreset === "all"
+                  ? "border-slate-900 bg-slate-900 text-white"
+                  : "border-gray-300 bg-white text-slate-700 hover:bg-gray-50"
+              }`}
+            >
+              Tutto
+            </button>
+          </div>
+
+          <div className="w-full md:w-56">
+            <select
+              className="w-full rounded-xl border bg-white p-3"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value as AdminStatusFilter)}
+            >
+              <option value="all">Tutti</option>
+              <option value="open">Aperti</option>
+              <option value="closed">Chiusi</option>
+            </select>
+          </div>
+        </div>
 
         <div className="mt-4 overflow-x-auto">
           <table className="w-full border text-sm">
@@ -2016,7 +2205,7 @@ pdf.save(fileName);
             </thead>
 
             <tbody>
-              {computedRows.map((row) => (
+              {filteredComputedRows.map((row) => (
                 <tr key={row.id} className="border-t">
                   <td className="p-2">{row.data}</td>
                   <td className="p-2">{row.pv_label}</td>
@@ -2061,7 +2250,7 @@ pdf.save(fileName);
                 </tr>
               ))}
 
-              {!loading && computedRows.length === 0 && (
+              {!loading && filteredComputedRows.length === 0 && (
                 <tr className="border-t">
                   <td className="p-3 text-gray-500" colSpan={11}>
                     Nessun riepilogo trovato.
