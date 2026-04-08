@@ -631,8 +631,6 @@ export default function RiepilogoIncassatoNewClient() {
           />
 
           <InputField label="Versamento" value={versamento} disabled />
-
-          <InputField label="Da Versare" value={daVersare} disabled />
         </div>
       </div>
 

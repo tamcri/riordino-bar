@@ -611,7 +611,6 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
           <EditableNumberField label="POS" value={pos} setValue={setPos} disabled={!canEditMainFields} />
           <EditableNumberField label="Prelievo" value={speseExtra} setValue={setSpeseExtra} disabled={!canEditMainFields} />
           <ReadOnlyField label="Versamento" value={formatEuro(versamento)} />
-          <ReadOnlyField label="Da Versare" value={formatEuro(daVersare)} />
         </div>
       </div>
 

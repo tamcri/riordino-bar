@@ -18,6 +18,17 @@ type BalanceStartRow = {
   saldo_iniziale?: number | null;
 };
 
+type SummaryAggRow = {
+  pv_id?: string | null;
+  data?: string | null;
+  da_versare?: number | null;
+};
+
+function n(value: unknown) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : 0;
+}
+
 export async function GET(req: Request) {
   try {
     const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
@@ -79,9 +90,6 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
     }
 
-    let saldo_iniziale_by_pv: Record<string, number> = {};
-    let balance_start_date_by_pv: Record<string, string> = {};
-
     const rows = Array.isArray(data) ? data : [];
 
     const pvIdsFromRows = Array.from(
@@ -90,7 +98,10 @@ export async function GET(req: Request) {
 
     const pvIdsToLoad = pv_id ? [pv_id] : pvIdsFromRows;
 
-    const firstSummaryDateByPv = rows.reduce((acc: Record<string, string>, row: any) => {
+    let saldo_iniziale_by_pv: Record<string, number> = {};
+    let balance_start_date_by_pv: Record<string, string> = {};
+
+    const firstFilteredDateByPv = rows.reduce((acc: Record<string, string>, row: any) => {
       const key = String(row?.pv_id ?? "").trim();
       const rowDate = String(row?.data ?? "").trim();
 
@@ -129,22 +140,55 @@ export async function GET(req: Request) {
         {}
       );
 
+      let rowsBeforeFilterByPv: Record<string, number> = {};
+
+      if (date_from) {
+        const { data: preFilterRows, error: preFilterErr } = await supabaseAdmin
+          .from("pv_cash_summaries")
+          .select("pv_id, data, da_versare")
+          .in("pv_id", pvIdsToLoad)
+          .lt("data", date_from)
+          .order("data", { ascending: true });
+
+        if (preFilterErr) {
+          return NextResponse.json({ ok: false, error: preFilterErr.message }, { status: 500 });
+        }
+
+        rowsBeforeFilterByPv = (preFilterRows ?? []).reduce(
+          (acc: Record<string, number>, row: SummaryAggRow) => {
+            const key = String(row?.pv_id ?? "").trim();
+            if (!key) return acc;
+
+            acc[key] = n(acc[key]) + n(row?.da_versare);
+            return acc;
+          },
+          {}
+        );
+      } else {
+        rowsBeforeFilterByPv = {};
+      }
+
       for (const currentPvId of pvIdsToLoad) {
         const pvKey = String(currentPvId ?? "").trim();
         if (!pvKey) continue;
 
         const rowsForPv = groupedByPv[pvKey] ?? [];
-        if (rowsForPv.length === 0) continue;
+        if (rowsForPv.length === 0) {
+          saldo_iniziale_by_pv[pvKey] = n(rowsBeforeFilterByPv[pvKey]);
+          continue;
+        }
 
-        const firstSummaryDate = firstSummaryDateByPv[pvKey] ?? "";
+        const firstFilteredDate =
+          firstFilteredDateByPv[pvKey] || date_from || "";
+
         let selectedRow: BalanceStartRow | null = null;
 
-        if (firstSummaryDate) {
+        if (firstFilteredDate) {
           for (const row of rowsForPv) {
             const startDate = String(row?.start_date ?? "").trim();
             if (!startDate) continue;
 
-            if (startDate <= firstSummaryDate) {
+            if (startDate <= firstFilteredDate) {
               selectedRow = row;
             }
           }
@@ -154,9 +198,10 @@ export async function GET(req: Request) {
           selectedRow = rowsForPv[rowsForPv.length - 1] ?? null;
         }
 
-        if (!selectedRow) continue;
+        const baseSaldo = selectedRow ? n(selectedRow.saldo_iniziale) : 0;
+        const cumulativeBeforeFilter = n(rowsBeforeFilterByPv[pvKey]);
 
-        saldo_iniziale_by_pv[pvKey] = Number(selectedRow?.saldo_iniziale ?? 0) || 0;
+        saldo_iniziale_by_pv[pvKey] = baseSaldo + cumulativeBeforeFilter;
         balance_start_date_by_pv[pvKey] = String(selectedRow?.start_date ?? "").trim();
       }
     }

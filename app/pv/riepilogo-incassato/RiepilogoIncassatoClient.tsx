@@ -458,7 +458,6 @@ export default function RiepilogoIncassatoClient() {
                   <th className="p-2 text-left">Data</th>
                   <th className="p-2 text-left">Operatore</th>
                   <th className="p-2 text-right">Totale</th>
-                  <th className="p-2 text-right">Da Versare</th>
                   <th className="p-2 text-center">Stato</th>
                   <th className="p-2 text-center">Azioni</th>
                 </tr>
@@ -474,7 +473,6 @@ export default function RiepilogoIncassatoClient() {
                       <td className="p-2">{row.data}</td>
                       <td className="p-2">{row.operatore}</td>
                       <td className="p-2 text-right">{formatEuro(row.totale)}</td>
-                      <td className="p-2 text-right">{formatEuro(row.da_versare)}</td>
 
                       <td className="p-2 text-center">{statusBadge(status)}</td>
 
