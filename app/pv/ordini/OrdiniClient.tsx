@@ -80,6 +80,7 @@ export default function OrdiniClient() {
   const [searching, setSearching] = useState(false);
   const [searchRes, setSearchRes] = useState<Item[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [showAll, setShowAll] = useState(false);
 
   const [rows, setRows] = useState<OrderRowDraft[]>([]);
 
@@ -142,6 +143,10 @@ export default function OrdiniClient() {
     setError(null);
     setMsg(null);
 
+    if (showAll) {
+      return;
+    }
+
     if (s.length < 3) {
       setSearchRes([]);
       setSearching(false);
@@ -155,7 +160,7 @@ export default function OrdiniClient() {
 
       try {
         const { ok, data, status, rawText } = await fetchJsonSafe<any>(
-         `/api/warehouse-items/search?q=${encodeURIComponent(s)}`
+          `/api/warehouse-items/search?q=${encodeURIComponent(s)}`
         );
 
         if (currentSeq !== searchSeqRef.current) return;
@@ -177,7 +182,41 @@ export default function OrdiniClient() {
     }, 250);
 
     return () => window.clearTimeout(timer);
-  }, [q]);
+  }, [q, showAll]);
+
+  async function toggleShowAll() {
+    setError(null);
+    setMsg(null);
+
+    if (showAll) {
+      setShowAll(false);
+      setShowSuggestions(false);
+      setSearchRes([]);
+      return;
+    }
+
+    setSearching(true);
+
+    try {
+      const { ok, data, status, rawText } = await fetchJsonSafe<any>(
+        "/api/warehouse-items/search?all=1"
+      );
+
+      if (!ok) throw new Error(data?.error || rawText || `HTTP ${status}`);
+
+      const found = Array.isArray(data.rows) ? data.rows : [];
+      setShowAll(true);
+      setSearchRes(found);
+      setShowSuggestions(true);
+    } catch (e: any) {
+      setSearchRes([]);
+      setShowSuggestions(false);
+      setShowAll(false);
+      setError(e?.message || "Errore");
+    } finally {
+      setSearching(false);
+    }
+  }
 
   function addItem(it: Item) {
     setRows((prev) => {
@@ -188,6 +227,7 @@ export default function OrdiniClient() {
     setQ("");
     setSearchRes([]);
     setShowSuggestions(false);
+    setShowAll(false);
     setError(null);
     setMsg(null);
   }
@@ -250,6 +290,7 @@ export default function OrdiniClient() {
       setSearchRes([]);
       setQ("");
       setShowSuggestions(false);
+      setShowAll(false);
     } catch (e: any) {
       setError(e?.message || "Errore");
     } finally {
@@ -294,31 +335,59 @@ export default function OrdiniClient() {
       <div className="rounded-2xl border bg-white p-4" ref={searchWrapRef}>
         <label className="block text-sm font-medium mb-2">Cerca articolo</label>
 
-        <div className="relative">
+        <div className="flex flex-col gap-2 md:flex-row md:items-center">
           <input
             className="w-full rounded-xl border p-3 bg-white"
             value={q}
-            onChange={(e) => setQ(e.target.value)}
+            onChange={(e) => {
+              setQ(e.target.value);
+              if (showAll) {
+                setShowAll(false);
+                setSearchRes([]);
+                setShowSuggestions(false);
+              }
+            }}
             onFocus={() => {
-              if (q.trim().length >= 3) setShowSuggestions(true);
+              if (showAll) {
+                setShowSuggestions(true);
+              } else if (q.trim().length >= 3) {
+                setShowSuggestions(true);
+              }
             }}
             placeholder="Scrivi almeno 3 lettere: codice, descrizione o barcode"
           />
 
+          <button
+            type="button"
+            className="rounded-xl border px-4 py-3 hover:bg-gray-50 whitespace-nowrap"
+            onClick={toggleShowAll}
+            disabled={searching}
+          >
+            {showAll ? "Chiudi lista" : "Tutti"}
+          </button>
+        </div>
+
+        <div className="relative">
           {searching && (
-            <div className="mt-2 text-xs text-gray-500">Ricerca in corso...</div>
+            <div className="mt-2 text-xs text-gray-500">
+              {showAll ? "Caricamento lista completa..." : "Ricerca in corso..."}
+            </div>
           )}
 
-          {q.trim().length > 0 && q.trim().length < 3 && (
+          {!showAll && q.trim().length > 0 && q.trim().length < 3 && (
             <div className="mt-2 text-xs text-gray-500">
               Scrivi almeno 3 lettere per vedere i suggerimenti.
             </div>
           )}
 
-          {showSuggestions && q.trim().length >= 3 && (
+          {showSuggestions && (showAll || q.trim().length >= 3) && (
             <div className="mt-2 rounded-2xl border bg-white shadow-sm overflow-hidden">
               {searchRes.length === 0 ? (
-                <div className="p-3 text-sm text-gray-500">Nessun articolo trovato.</div>
+                <div className="p-3 text-sm text-gray-500">
+                  {showAll
+                    ? "Nessun articolo disponibile."
+                    : "Nessun articolo trovato."}
+                </div>
               ) : (
                 <div className="max-h-80 overflow-y-auto">
                   {searchRes.map((it) => (
@@ -328,11 +397,23 @@ export default function OrdiniClient() {
                       onClick={() => addItem(it)}
                       className="w-full text-left px-4 py-3 border-b last:border-b-0 hover:bg-gray-50"
                     >
-                      <div className="text-sm font-semibold">{it.code}</div>
-                      <div className="text-xs text-gray-600">{it.description}</div>
-                      {it.barcode ? (
-                        <div className="text-[11px] text-gray-400 mt-1">Barcode: {it.barcode}</div>
-                      ) : null}
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="text-sm font-semibold">{it.code}</div>
+                          <div className="text-xs text-gray-600">{it.description}</div>
+                          {it.barcode ? (
+                            <div className="text-[11px] text-gray-400 mt-1">
+                              Barcode: {it.barcode}
+                            </div>
+                          ) : null}
+                        </div>
+
+                        {it.um ? (
+                          <div className="shrink-0 text-[11px] text-gray-400">
+                            {it.um}
+                          </div>
+                        ) : null}
+                      </div>
                     </button>
                   ))}
                 </div>

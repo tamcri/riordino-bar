@@ -57,6 +57,7 @@ export async function GET(req: Request) {
         vat_rate,
         peso_kg,
         volume_ml_per_unit,
+        min_stock_alert,
         is_active,
         created_at,
         updated_at

@@ -13,15 +13,19 @@ export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
     const q = norm(searchParams.get("q"));
+    const all = searchParams.get("all") === "1";
 
-    if (!q || q.length < 2) {
+    if (!all && (!q || q.length < 2)) {
       return NextResponse.json({ ok: true, rows: [] });
     }
 
     const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
 
     if (!session) {
-      return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
+      return NextResponse.json(
+        { ok: false, error: "Non autorizzato" },
+        { status: 401 }
+      );
     }
 
     const { data: centralPv, error: pvErr } = await supabaseAdmin
@@ -31,7 +35,10 @@ export async function GET(req: Request) {
       .maybeSingle();
 
     if (pvErr) {
-      return NextResponse.json({ ok: false, error: pvErr.message }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: pvErr.message },
+        { status: 500 }
+      );
     }
 
     if (!centralPv) {
@@ -50,7 +57,10 @@ export async function GET(req: Request) {
       .maybeSingle();
 
     if (depErr) {
-      return NextResponse.json({ ok: false, error: depErr.message }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: depErr.message },
+        { status: 500 }
+      );
     }
 
     if (!deposit) {
@@ -81,47 +91,62 @@ export async function GET(req: Request) {
       .eq("deposit_id", deposit.id)
       .eq("is_active", true)
       .eq("warehouse_items.is_active", true)
-      .limit(200);
+      .limit(all ? 500 : 200);
 
     if (error) {
-      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: error.message },
+        { status: 500 }
+      );
     }
 
     const isBarcode = /^\d{8,}$/.test(q);
     const qLower = q.toLowerCase();
 
-    const rows = (Array.isArray(data) ? data : [])
-      .map((r: any) => {
-        const it = r?.warehouse_items;
-        if (!it) return null;
+    let rows = (Array.isArray(data) ? data : [])
+  .map((r: any) => {
+    const it = r?.warehouse_items;
+    if (!it) return null;
 
-        return {
-          id: norm(it.id),
-          code: norm(it.code),
-          description: norm(it.description),
-          barcode: norm(it.barcode) || null,
-          prezzo_vendita_eur: Number(it.prezzo_vendita_eur ?? 0) || 0,
-          um: norm(it.um) || null,
-          stock_qty: Number(r?.stock_qty ?? 0) || 0,
-        };
-      })
-      .filter(Boolean)
-      .filter((it: any) => {
-        if (isBarcode) {
-          return norm(it.barcode) === q;
-        }
+    return {
+      id: norm(it.id),
+      code: norm(it.code),
+      description: norm(it.description),
+      barcode: norm(it.barcode) || null,
+      prezzo_vendita_eur: Number(it.prezzo_vendita_eur ?? 0) || 0,
+      um: norm(it.um) || null,
+      stock_qty: Number(r?.stock_qty ?? 0) || 0,
+    };
+  })
+  .filter(Boolean)
+  .filter((it: any) => {
+    if (all) return true;
 
-        const code = norm(it.code).toLowerCase();
-        const description = norm(it.description).toLowerCase();
-        const barcode = norm(it.barcode).toLowerCase();
+    const isBarcode = /^\d{8,}$/.test(q);
+    const qLower = q.toLowerCase();
 
-        return (
-          code.includes(qLower) ||
-          description.includes(qLower) ||
-          barcode.includes(qLower)
-        );
-      })
-      .slice(0, 20);
+    if (isBarcode) {
+      return norm(it.barcode) === q;
+    }
+
+    const code = norm(it.code).toLowerCase();
+    const description = norm(it.description).toLowerCase();
+    const barcode = norm(it.barcode).toLowerCase();
+
+    return (
+      code.includes(qLower) ||
+      description.includes(qLower) ||
+      barcode.includes(qLower)
+    );
+  });
+
+// 👉 ORDINE QUI (sicuro al 100%)
+rows.sort((a: any, b: any) => {
+  return a.code.localeCompare(b.code, "it", { sensitivity: "base" });
+});
+
+// 👉 LIMITE
+rows = rows.slice(0, all ? 500 : 20);
 
     return NextResponse.json({ ok: true, rows });
   } catch (err: any) {

@@ -9,6 +9,8 @@ type WarehouseDepositRow = {
   description: string;
   um: string | null;
   stock_qty: number;
+  min_stock_alert: number | null;
+  is_under_min: boolean;
   is_active: boolean;
 };
 
@@ -27,6 +29,13 @@ function formatQty(v: number | null | undefined) {
   const n = Number(v);
   if (!Number.isFinite(n)) return "0";
   return String(n).replace(".", ",");
+}
+
+function formatMinStockAlert(v: number | null | undefined) {
+  if (v == null) return "—";
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "—";
+  return String(Math.max(0, Math.trunc(n)));
 }
 
 async function fetchJsonSafe<T = any>(
@@ -119,106 +128,106 @@ export default function WarehouseDepositClient() {
   }
 
   async function saveNewRow() {
-  setMsg(null);
-  setError(null);
+    setMsg(null);
+    setError(null);
 
-  if (!addForm.warehouse_item_id.trim()) {
-    setError("Selezione articolo obbligatoria.");
-    return;
-  }
-
-  setSaving(true);
-
-  try {
-    const res = await fetch("/api/warehouse-deposit/add", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        warehouse_item_id: addForm.warehouse_item_id,
-        stock_qty: addForm.stock_qty,
-      }),
-    });
-
-    const data = await res.json();
-
-    if (!res.ok || !data?.ok) {
-      throw new Error(data?.error || "Errore inserimento");
+    if (!addForm.warehouse_item_id.trim()) {
+      setError("Selezione articolo obbligatoria.");
+      return;
     }
 
-    setMsg("Articolo aggiunto al deposito.");
+    setSaving(true);
 
-    closeAddModal();
-    await loadRows();
-  } catch (e: any) {
-    setError(e?.message || "Errore salvataggio");
-  } finally {
-    setSaving(false);
+    try {
+      const res = await fetch("/api/warehouse-deposit/add", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          warehouse_item_id: addForm.warehouse_item_id,
+          stock_qty: addForm.stock_qty,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || "Errore inserimento");
+      }
+
+      setMsg("Articolo aggiunto al deposito.");
+
+      closeAddModal();
+      await loadRows();
+    } catch (e: any) {
+      setError(e?.message || "Errore salvataggio");
+    } finally {
+      setSaving(false);
+    }
   }
-}
 
   async function toggleActive(row: WarehouseDepositRow) {
-  setMsg(null);
-  setError(null);
+    setMsg(null);
+    setError(null);
 
-  try {
-    const res = await fetch("/api/warehouse-deposit/update", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        id: row.id,
-        is_active: !row.is_active,
-      }),
-    });
+    try {
+      const res = await fetch("/api/warehouse-deposit/update", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: row.id,
+          is_active: !row.is_active,
+        }),
+      });
 
-    const data = await res.json();
+      const data = await res.json();
 
-    if (!res.ok || !data?.ok) {
-      throw new Error(data?.error || "Errore aggiornamento");
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || "Errore aggiornamento");
+      }
+
+      setMsg(
+        `Articolo ${row.code} ${row.is_active ? "disattivato" : "attivato"}`
+      );
+
+      await loadRows();
+    } catch (e: any) {
+      setError(e?.message || "Errore aggiornamento");
     }
-
-    setMsg(
-      `Articolo ${row.code} ${row.is_active ? "disattivato" : "attivato"}`
-    );
-
-    await loadRows();
-  } catch (e: any) {
-    setError(e?.message || "Errore aggiornamento");
   }
-}
 
   async function changeQty(row: WarehouseDepositRow) {
-  const value = prompt("Nuova quantità:", String(row.stock_qty ?? 0));
+    const value = prompt("Nuova quantità:", String(row.stock_qty ?? 0));
 
-  if (value === null) return;
+    if (value === null) return;
 
-  setMsg(null);
-  setError(null);
+    setMsg(null);
+    setError(null);
 
-  try {
-    const res = await fetch("/api/warehouse-deposit/update", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        id: row.id,
-        stock_qty: value,
-      }),
-    });
+    try {
+      const res = await fetch("/api/warehouse-deposit/update", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: row.id,
+          stock_qty: value,
+        }),
+      });
 
-    const data = await res.json();
+      const data = await res.json();
 
-    if (!res.ok || !data?.ok) {
-      throw new Error(data?.error || "Errore aggiornamento quantità");
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || "Errore aggiornamento quantità");
+      }
+
+      setMsg(`Quantità aggiornata per ${row.code}`);
+
+      await loadRows();
+    } catch (e: any) {
+      setError(e?.message || "Errore aggiornamento");
     }
-
-    setMsg(`Quantità aggiornata per ${row.code}`);
-
-    await loadRows();
-  } catch (e: any) {
-    setError(e?.message || "Errore aggiornamento");
   }
-}
 
   return (
     <div className="space-y-4">
@@ -233,7 +242,9 @@ export default function WarehouseDepositClient() {
           >
             <div className="flex items-start justify-between gap-3">
               <div>
-                <div className="text-lg font-semibold">Aggiungi articolo al deposito</div>
+                <div className="text-lg font-semibold">
+                  Aggiungi articolo al deposito
+                </div>
                 <div className="text-sm text-gray-600">
                   Deposito del magazzino centrale.
                 </div>
@@ -267,7 +278,9 @@ export default function WarehouseDepositClient() {
               </div>
 
               <div>
-                <label className="mb-2 block text-sm font-medium">Quantità iniziale</label>
+                <label className="mb-2 block text-sm font-medium">
+                  Quantità iniziale
+                </label>
                 <input
                   className="w-full rounded-xl border p-3"
                   value={addForm.stock_qty}
@@ -299,7 +312,9 @@ export default function WarehouseDepositClient() {
       <div className="rounded-2xl border bg-white p-4">
         <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
           <div>
-            <div className="text-lg font-semibold">Articoli presenti nel deposito</div>
+            <div className="text-lg font-semibold">
+              Articoli presenti nel deposito
+            </div>
             <div className="text-sm text-gray-600">
               Gestione articoli realmente presenti nel deposito centrale.
             </div>
@@ -348,9 +363,11 @@ export default function WarehouseDepositClient() {
           <thead className="bg-gray-50">
             <tr>
               <th className="p-3 text-left">Codice</th>
-              <th className="p-3 text-left w-[34%]">Descrizione</th>
+              <th className="p-3 text-left w-[30%]">Descrizione</th>
               <th className="p-3 text-left w-20">UM</th>
               <th className="p-3 text-right w-28">Qtà</th>
+              <th className="p-3 text-right w-28">Soglia</th>
+              <th className="p-3 text-left w-40">Riordino</th>
               <th className="p-3 text-left w-20">Attivo</th>
               <th className="p-3 text-right w-56"></th>
             </tr>
@@ -359,7 +376,7 @@ export default function WarehouseDepositClient() {
           <tbody>
             {loading && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={6}>
+                <td className="p-3 text-gray-500" colSpan={8}>
                   Caricamento...
                 </td>
               </tr>
@@ -367,37 +384,62 @@ export default function WarehouseDepositClient() {
 
             {!loading && rows.length === 0 && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={6}>
+                <td className="p-3 text-gray-500" colSpan={8}>
                   Nessun articolo presente nel deposito.
                 </td>
               </tr>
             )}
 
-            {rows.map((row) => (
-              <tr key={row.id} className="border-t">
-                <td className="p-3 font-medium">{row.code}</td>
-                <td className="p-3">{row.description}</td>
-                <td className="p-3">{formatNullableText(row.um)}</td>
-                <td className="p-3 text-right">{formatQty(row.stock_qty)}</td>
-                <td className="p-3">{row.is_active ? "Sì" : "No"}</td>
-                <td className="p-3 text-right">
-                  <div className="flex items-center justify-end gap-2">
-                    <button
-                      className="rounded-xl border px-3 py-2 hover:bg-gray-50"
-                      onClick={() => changeQty(row)}
-                    >
-                      Modifica quantità
-                    </button>
-                    <button
-                      className="rounded-xl border px-3 py-2 hover:bg-gray-50"
-                      onClick={() => toggleActive(row)}
-                    >
-                      {row.is_active ? "Disattiva" : "Attiva"}
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            ))}
+            {rows.map((row) => {
+              const underMin = row.is_under_min === true;
+
+              return (
+                <tr
+                  key={row.id}
+                  className={`border-t ${underMin ? "bg-red-50" : ""}`}
+                >
+                  <td className="p-3 font-medium">{row.code}</td>
+                  <td className="p-3">{row.description}</td>
+                  <td className="p-3">{formatNullableText(row.um)}</td>
+                  <td
+                    className={`p-3 text-right ${
+                      underMin ? "font-semibold text-red-700" : ""
+                    }`}
+                  >
+                    {formatQty(row.stock_qty)}
+                  </td>
+                  <td className="p-3 text-right">
+                    {formatMinStockAlert(row.min_stock_alert)}
+                  </td>
+                  <td className="p-3">
+                    {underMin ? (
+                      <span className="inline-flex rounded-full bg-red-100 px-2.5 py-1 text-xs font-semibold text-red-700">
+                        Da riordinare
+                      </span>
+                    ) : (
+                      <span className="text-gray-400">—</span>
+                    )}
+                  </td>
+                  <td className="p-3">{row.is_active ? "Sì" : "No"}</td>
+                  <td className="p-3 text-right">
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        className="rounded-xl border px-3 py-2 hover:bg-gray-50"
+                        onClick={() => changeQty(row)}
+                      >
+                        Modifica quantità
+                      </button>
+                      <button
+                        className="rounded-xl border px-3 py-2 hover:bg-gray-50"
+                        onClick={() => toggleActive(row)}
+                      >
+                        {row.is_active ? "Disattiva" : "Attiva"}
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>

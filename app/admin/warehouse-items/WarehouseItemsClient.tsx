@@ -14,6 +14,7 @@ type WarehouseItemRow = {
   purchase_price_vat: number | null;
   peso_kg: number | null;
   volume_ml_per_unit: number | null;
+  min_stock_alert: number | null;
   is_active: boolean;
 };
 
@@ -27,6 +28,7 @@ type WarehouseItemForm = {
   vat_rate: string;
   peso_kg: string;
   volume_ml_per_unit: string;
+  min_stock_alert: string;
   is_active: boolean;
 };
 
@@ -85,6 +87,13 @@ function formatVolumeMl(v: number | null | undefined) {
   return String(Math.trunc(n));
 }
 
+function formatMinStockAlert(v: number | null | undefined) {
+  if (v == null) return "—";
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "—";
+  return String(Math.max(0, Math.trunc(n)));
+}
+
 function calcPurchasePriceVat(
   purchasePrice: number | null | undefined,
   vatRate: number | null | undefined
@@ -114,6 +123,7 @@ function emptyForm(): WarehouseItemForm {
     vat_rate: "",
     peso_kg: "",
     volume_ml_per_unit: "",
+    min_stock_alert: "",
     is_active: true,
   };
 }
@@ -226,6 +236,8 @@ export default function WarehouseItemsClient() {
       peso_kg: row.peso_kg == null ? "" : String(row.peso_kg),
       volume_ml_per_unit:
         row.volume_ml_per_unit == null ? "" : String(row.volume_ml_per_unit),
+      min_stock_alert:
+        row.min_stock_alert == null ? "" : String(row.min_stock_alert),
       is_active: row.is_active,
     });
     setModalOpen(true);
@@ -283,6 +295,7 @@ export default function WarehouseItemsClient() {
         vat_rate: form.vat_rate,
         peso_kg: form.peso_kg,
         volume_ml_per_unit: form.volume_ml_per_unit,
+        min_stock_alert: form.min_stock_alert,
         is_active: form.is_active,
       };
 
@@ -566,8 +579,12 @@ export default function WarehouseItemsClient() {
                 <div className="w-full rounded-xl border bg-gray-50 p-3 text-sm text-gray-700">
                   {formatEuroIT(
                     calcPurchasePriceVat(
-                      form.purchase_price === "" ? null : Number(String(form.purchase_price).replace(",", ".")),
-                      form.vat_rate === "" ? null : Number(String(form.vat_rate).replace(",", "."))
+                      form.purchase_price === ""
+                        ? null
+                        : Number(String(form.purchase_price).replace(",", ".")),
+                      form.vat_rate === ""
+                        ? null
+                        : Number(String(form.vat_rate).replace(",", "."))
                     )
                   )}
                 </div>
@@ -598,6 +615,21 @@ export default function WarehouseItemsClient() {
                     updateForm("volume_ml_per_unit", e.target.value)
                   }
                   placeholder="Es. 700, 750, 1000"
+                />
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-medium">
+                  Soglia minima riordino
+                </label>
+                <input
+                  className="w-full rounded-xl border p-3"
+                  inputMode="numeric"
+                  value={form.min_stock_alert}
+                  onChange={(e) =>
+                    updateForm("min_stock_alert", e.target.value)
+                  }
+                  placeholder="Es. 10"
                 />
               </div>
 
@@ -859,6 +891,7 @@ export default function WarehouseItemsClient() {
               <th className="w-32 p-3 text-right">Prezzo A. Net</th>
               <th className="w-24 p-3 text-right">Peso kg</th>
               <th className="w-24 p-3 text-right">ML</th>
+              <th className="w-24 p-3 text-right">Soglia</th>
               <th className="w-20 p-3 text-left">Attivo</th>
               <th className="w-40 p-3 text-right"></th>
             </tr>
@@ -867,7 +900,7 @@ export default function WarehouseItemsClient() {
           <tbody>
             {loading && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={12}>
+                <td className="p-3 text-gray-500" colSpan={13}>
                   Caricamento...
                 </td>
               </tr>
@@ -875,7 +908,7 @@ export default function WarehouseItemsClient() {
 
             {!loading && rows.length === 0 && (
               <tr className="border-t">
-                <td className="p-3 text-gray-500" colSpan={12}>
+                <td className="p-3 text-gray-500" colSpan={13}>
                   Nessun articolo magazzino trovato.
                 </td>
               </tr>
@@ -905,6 +938,9 @@ export default function WarehouseItemsClient() {
                 <td className="p-3 text-right">{formatPesoKg(row.peso_kg)}</td>
                 <td className="p-3 text-right">
                   {formatVolumeMl(row.volume_ml_per_unit)}
+                </td>
+                <td className="p-3 text-right">
+                  {formatMinStockAlert(row.min_stock_alert)}
                 </td>
                 <td className="p-3">{row.is_active ? "Sì" : "No"}</td>
                 <td className="p-3 text-right">

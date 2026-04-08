@@ -24,7 +24,6 @@ export async function GET(req: Request) {
     const q = norm(searchParams.get("q")).toLowerCase();
     const active = norm(searchParams.get("active"));
 
-    // 1️⃣ trova PV magazzino centrale
     const { data: pv, error: pvErr } = await supabaseAdmin
       .from("pvs")
       .select("id")
@@ -42,7 +41,6 @@ export async function GET(req: Request) {
       );
     }
 
-    // 2️⃣ trova deposito
     const { data: deposit, error: depErr } = await supabaseAdmin
       .from("deposits")
       .select("id")
@@ -61,7 +59,6 @@ export async function GET(req: Request) {
       );
     }
 
-    // 3️⃣ query base (senza ricerca)
     let query = supabaseAdmin
       .from("warehouse_deposit_items")
       .select(`
@@ -72,7 +69,8 @@ export async function GET(req: Request) {
         warehouse_items (
           code,
           description,
-          um
+          um,
+          min_stock_alert
         )
       `)
       .eq("deposit_id", deposit.id)
@@ -93,17 +91,23 @@ export async function GET(req: Request) {
       );
     }
 
-    let rows = (Array.isArray(data) ? data : []).map((r: any) => ({
-      id: r.id,
-      warehouse_item_id: r.warehouse_item_id,
-      code: r.warehouse_items?.code ?? "",
-      description: r.warehouse_items?.description ?? "",
-      um: r.warehouse_items?.um ?? null,
-      stock_qty: r.stock_qty ?? 0,
-      is_active: r.is_active ?? true,
-    }));
+    let rows = (Array.isArray(data) ? data : []).map((r: any) => {
+      const min = r.warehouse_items?.min_stock_alert ?? null;
+      const stock = r.stock_qty ?? 0;
 
-    // 🔥 filtro ricerca in memoria
+      return {
+        id: r.id,
+        warehouse_item_id: r.warehouse_item_id,
+        code: r.warehouse_items?.code ?? "",
+        description: r.warehouse_items?.description ?? "",
+        um: r.warehouse_items?.um ?? null,
+        stock_qty: stock,
+        min_stock_alert: min,
+        is_under_min: min != null && stock <= min,
+        is_active: r.is_active ?? true,
+      };
+    });
+
     if (q && q.length >= 2) {
       rows = rows.filter((r) => {
         return (
