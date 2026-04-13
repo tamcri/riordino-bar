@@ -8,6 +8,7 @@ export type CashSummaryExcelReportRow = {
   gv_pagati: number;
   lis_plus: number;
   mooney: number;
+  pos: number;
   vendita_gv: number;
   vendita_tabacchi: number;
   saldo_giorno: number;
@@ -100,6 +101,7 @@ export function generateCashSummaryExcelReport({
     vendita_gv: sumBy(sortedRows, (r) => r.vendita_gv),
     lis_plus: sumBy(sortedRows, (r) => r.lis_plus),
     mooney: sumBy(sortedRows, (r) => r.mooney),
+    pos: sumBy(sortedRows, (r) => r.pos),
   };
 
   // =========================
@@ -116,6 +118,7 @@ export function generateCashSummaryExcelReport({
     "G&V",
     "LIS+",
     "Mooney",
+    "Pos",
   ]];
 
   const body = sortedRows.map((r) => [
@@ -128,6 +131,7 @@ export function generateCashSummaryExcelReport({
     r.vendita_gv,
     r.lis_plus,
     r.mooney,
+    r.pos,
   ]);
 
   const totalsRow = [[
@@ -140,6 +144,7 @@ export function generateCashSummaryExcelReport({
     totals.vendita_gv,
     totals.lis_plus,
     totals.mooney,
+    totals.pos,
   ]];
 
   const ws = XLSX.utils.aoa_to_sheet([...header, ...body, ...totalsRow]);
@@ -154,14 +159,15 @@ export function generateCashSummaryExcelReport({
     { wch: 14 }, // G&V
     { wch: 12 }, // LIS+
     { wch: 12 }, // Mooney
+    { wch: 12 }, // Pos
   ];
 
   applyStyles(
     ws,
     0,
     body.length + 1,
-    ["A", "B", "C", "D", "E", "F", "G", "H", "I"],
-    ["D", "E", "F", "G", "H", "I"]
+    ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"],
+    ["D", "E", "F", "G", "H", "I", "J"]
   );
 
   // =========================
@@ -178,6 +184,7 @@ export function generateCashSummaryExcelReport({
       vendita_gv: number;
       lis_plus: number;
       mooney: number;
+      pos: number;
     }
   >();
 
@@ -190,6 +197,7 @@ export function generateCashSummaryExcelReport({
       vendita_gv: 0,
       lis_plus: 0,
       mooney: 0,
+      pos: 0,
     };
 
     row.incasso_totale += r.incasso_totale;
@@ -198,6 +206,7 @@ export function generateCashSummaryExcelReport({
     row.vendita_gv += r.vendita_gv;
     row.lis_plus += r.lis_plus;
     row.mooney += r.mooney;
+    row.pos += r.pos;
 
     dailyMap.set(r.data, row);
   });
@@ -212,6 +221,7 @@ export function generateCashSummaryExcelReport({
     "G&V",
     "LIS+",
     "Mooney",
+    "Pos",
   ]];
 
   const dailyBody = daily.map((r) => [
@@ -222,6 +232,7 @@ export function generateCashSummaryExcelReport({
     r.vendita_gv,
     r.lis_plus,
     r.mooney,
+    r.pos,
   ]);
 
   const dailyTotalsRow = [[
@@ -232,6 +243,7 @@ export function generateCashSummaryExcelReport({
     totals.vendita_gv,
     totals.lis_plus,
     totals.mooney,
+    totals.pos,
   ]];
 
   const wsDaily = XLSX.utils.aoa_to_sheet([...dailyHeader, ...dailyBody, ...dailyTotalsRow]);
@@ -244,14 +256,15 @@ export function generateCashSummaryExcelReport({
     { wch: 14 }, // G&V
     { wch: 12 }, // LIS+
     { wch: 12 }, // Mooney
+    { wch: 12 }, // Pos
   ];
 
   applyStyles(
     wsDaily,
     0,
     dailyBody.length + 1,
-    ["A", "B", "C", "D", "E", "F", "G"],
-    ["B", "C", "D", "E", "F", "G"]
+    ["A", "B", "C", "D", "E", "F", "G", "H"],
+    ["B", "C", "D", "E", "F", "G", "H"]
   );
 
   // =========================

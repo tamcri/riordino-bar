@@ -32,7 +32,8 @@ type MetricKey =
   | "vendita_tabacchi"
   | "vendita_gv"
   | "lis_plus"
-  | "mooney";
+  | "mooney"
+  | "pos";
 
 type MetricChecksMap = Partial<Record<MetricKey, CheckState>>;
 
@@ -45,6 +46,7 @@ type RawRow = {
   gv_pagati: number | null;
   lis_plus: number | null;
   mooney: number | null;
+  pos: number | null;
   vendita_gv: number | null;
   vendita_tabacchi: number | null;
   da_versare: number | null;
@@ -64,6 +66,7 @@ type ViewRow = {
   gv_pagati: number;
   lis_plus: number;
   mooney: number;
+  pos: number;
   vendita_gv: number;
   vendita_tabacchi: number;
   saldo_giorno: number;
@@ -102,6 +105,7 @@ const METRIC_OPTIONS: MetricOption[] = [
   { key: "vendita_gv", label: "Venduto G&V" },
   { key: "lis_plus", label: "LIS+" },
   { key: "mooney", label: "Mooney" },
+  { key: "pos", label: "Pos" },
 ];
 
 const METRIC_COLORS: Record<MetricKey, string> = {
@@ -111,6 +115,7 @@ const METRIC_COLORS: Record<MetricKey, string> = {
   vendita_gv: "#9333ea",
   lis_plus: "#ea580c",
   mooney: "#ca8a04",
+  pos: "#0f766e",
 };
 
 const PV_COMPARE_LINE_COLORS = [
@@ -262,6 +267,8 @@ function metricLabel(metric: MetricKey) {
       return "LIS+";
     case "mooney":
       return "Mooney";
+    case "pos":
+      return "Pos";
     default:
       return "Valore";
   }
@@ -281,6 +288,8 @@ function metricValue(row: ViewRow, metric: MetricKey) {
       return row.lis_plus;
     case "mooney":
       return row.mooney;
+    case "pos":
+      return row.pos;
     default:
       return 0;
   }
@@ -945,6 +954,7 @@ export default function CashSummaryAdminClient() {
         gv_pagati: n(row.gv_pagati),
         lis_plus: n(row.lis_plus),
         mooney: n(row.mooney),
+        pos: n(row.pos),
         vendita_gv: n(row.vendita_gv),
         vendita_tabacchi: n(row.vendita_tabacchi),
         saldo_giorno: saldoGiorno,
@@ -1155,6 +1165,7 @@ export default function CashSummaryAdminClient() {
       vendita_gv: 0,
       lis_plus: 0,
       mooney: 0,
+      pos: 0,
     };
 
     for (const row of filteredComputedRows) {
@@ -1178,6 +1189,7 @@ export default function CashSummaryAdminClient() {
         gv_pagati: Number(row.gv_pagati || 0),
         lis_plus: Number(row.lis_plus || 0),
         mooney: Number(row.mooney || 0),
+        pos: Number(row.pos || 0),
         vendita_gv: Number(row.vendita_gv || 0),
         vendita_tabacchi: Number(row.vendita_tabacchi || 0),
         saldo_giorno: Number(row.saldo_giorno || 0),
@@ -1214,6 +1226,7 @@ export default function CashSummaryAdminClient() {
         gv_pagati: Number(row.gv_pagati ?? 0),
         lis_plus: Number(row.lis_plus ?? 0),
         mooney: Number(row.mooney ?? 0),
+        pos: Number(row.pos ?? 0),
         vendita_gv: Number(row.vendita_gv ?? 0),
         vendita_tabacchi: Number(row.vendita_tabacchi ?? 0),
         saldo_giorno: Number(row.saldo_giorno ?? 0),
@@ -1442,6 +1455,7 @@ export default function CashSummaryAdminClient() {
         vendita_gv: "GrattaEVinci",
         lis_plus: "LIS",
         mooney: "Mooney",
+        pos: "Pos",
         gv_pagati: "PagatiGV",
       };
 

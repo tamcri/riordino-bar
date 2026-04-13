@@ -9,6 +9,7 @@ export type CashSummaryDataReportRow = {
   gv_pagati: number;
   lis_plus: number;
   mooney: number;
+  pos: number;
   vendita_gv: number;
   vendita_tabacchi: number;
   saldo_giorno: number;
@@ -111,6 +112,7 @@ export function generateCashSummaryDataReport({
     vendita_gv: sumBy(sortedRows, (row) => row.vendita_gv),
     lis_plus: sumBy(sortedRows, (row) => row.lis_plus),
     mooney: sumBy(sortedRows, (row) => row.mooney),
+    pos: sumBy(sortedRows, (row) => row.pos),
     saldo_giorno: sumBy(sortedRows, (row) => row.saldo_giorno),
   };
 
@@ -141,13 +143,32 @@ export function generateCashSummaryDataReport({
   const gap = 4;
   const boxWidth = (contentWidth - gap * 2) / 3;
   drawKpiBox(pdf, margin, y, boxWidth, 18, "Righe report", String(sortedRows.length));
-  drawKpiBox(pdf, margin + boxWidth + gap, y, boxWidth, 18, "Totale Incasso", formatEuro(totals.incasso_totale));
-  drawKpiBox(pdf, margin + (boxWidth + gap) * 2, y, boxWidth, 18, "Totale Tabacchi", formatEuro(totals.vendita_tabacchi));
+  drawKpiBox(
+    pdf,
+    margin + boxWidth + gap,
+    y,
+    boxWidth,
+    18,
+    "Totale Incasso",
+    formatEuro(totals.incasso_totale)
+  );
+  drawKpiBox(
+    pdf,
+    margin + (boxWidth + gap) * 2,
+    y,
+    boxWidth,
+    18,
+    "Totale Tabacchi",
+    formatEuro(totals.vendita_tabacchi)
+  );
 
   y += 22;
   drawKpiBox(pdf, margin, y, boxWidth, 18, "Totale G&V", formatEuro(totals.vendita_gv));
   drawKpiBox(pdf, margin + boxWidth + gap, y, boxWidth, 18, "Totale LIS+", formatEuro(totals.lis_plus));
   drawKpiBox(pdf, margin + (boxWidth + gap) * 2, y, boxWidth, 18, "Totale Mooney", formatEuro(totals.mooney));
+
+  y += 22;
+  drawKpiBox(pdf, margin, y, boxWidth, 18, "Totale POS", formatEuro(totals.pos));
 
   y += 24;
 
@@ -181,11 +202,12 @@ export function generateCashSummaryDataReport({
       "Vendita G&V",
       "LIS+",
       "Mooney",
+      "Pos",
       "Saldo giorno",
       "Progressivo",
       "Fondo cassa",
     ]],
-        body: [
+    body: [
       ...sortedRows.map((row) => [
         formatLongDate(row.data),
         row.pv_label,
@@ -196,6 +218,7 @@ export function generateCashSummaryDataReport({
         formatEuro(row.vendita_gv),
         formatEuro(row.lis_plus),
         formatEuro(row.mooney),
+        formatEuro(row.pos),
         formatEuro(row.saldo_giorno),
         formatEuro(row.progressivo_da_versare),
         formatEuro(row.fondo_cassa),
@@ -210,12 +233,12 @@ export function generateCashSummaryDataReport({
         formatEuro(totals.vendita_gv),
         formatEuro(totals.lis_plus),
         formatEuro(totals.mooney),
+        formatEuro(totals.pos),
         formatEuro(totals.saldo_giorno),
         "",
         "",
       ],
     ],
-  
     footStyles: {
       fillColor: [226, 232, 240],
       textColor: [15, 23, 42],
@@ -231,9 +254,10 @@ export function generateCashSummaryDataReport({
       6: { halign: "right", cellWidth: 20 },
       7: { halign: "right", cellWidth: 17 },
       8: { halign: "right", cellWidth: 17 },
-      9: { halign: "right", cellWidth: 20 },
+      9: { halign: "right", cellWidth: 17 },
       10: { halign: "right", cellWidth: 20 },
       11: { halign: "right", cellWidth: 20 },
+      12: { halign: "right", cellWidth: 20 },
     },
     didDrawPage: () => {
       const totalPages = pdf.getNumberOfPages();
@@ -252,13 +276,13 @@ export function generateCashSummaryDataReport({
   });
 
   const safePv = (pvLabel || "Tutti")
-  .replace(/\s+/g, "")
-  .replace(/[^\w\-]/g, "");
+    .replace(/\s+/g, "")
+    .replace(/[^\w\-]/g, "");
 
-const safeFrom = dateFrom || "inizio";
-const safeTo = dateTo || "oggi";
+  const safeFrom = dateFrom || "inizio";
+  const safeTo = dateTo || "oggi";
 
-const dynamicFileName = `Report-Completo-${safePv}-${safeFrom}_${safeTo}.pdf`;
+  const dynamicFileName = `Report-Completo-${safePv}-${safeFrom}_${safeTo}.pdf`;
 
-pdf.save(dynamicFileName);
+  pdf.save(dynamicFileName || fileName);
 }
