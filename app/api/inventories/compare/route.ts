@@ -23,7 +23,7 @@ function isIsoDate(v: string | null) {
   return /^\d{4}-\d{2}-\d{2}$/.test(v.trim());
 }
 
-// ✅ interpreta "" / "null" come NULL (Rapido: categoria = Nessuna/Tutte)
+// interpreta "" / "null" come NULL
 function normNullParam(v: any): string | null {
   const s = String(v ?? "").trim();
   if (!s) return null;
@@ -31,7 +31,7 @@ function normNullParam(v: any): string | null {
   return s;
 }
 
-// ✅ stessa filosofia del gestionale: token 1, uppercase, no spaces
+// stessa filosofia del gestionale: token 1, uppercase, no spaces
 function normCode(v: any) {
   const raw = String(v ?? "").trim();
   if (!raw) return "";
@@ -57,15 +57,14 @@ export async function POST(req: Request) {
   }
 
   const file = form.get("file");
-const inventory_header_id = String(form.get("inventory_header_id") ?? "").trim();
-const pv_id = String(form.get("pv_id") ?? "").trim();
+  const inventory_header_id = String(form.get("inventory_header_id") ?? "").trim();
+  const pv_id = String(form.get("pv_id") ?? "").trim();
 
-// ✅ Rapido: category_id può essere null (form: omesso, "", "null")
-const category_id = normNullParam(form.get("category_id"));
-// ✅ subcategory: "" / "null" / omesso => null
-const subcategory_id = normNullParam(form.get("subcategory_id"));
+  // Rapido: category_id può essere null
+  const category_id = normNullParam(form.get("category_id"));
+  const subcategory_id = normNullParam(form.get("subcategory_id"));
 
-const inventory_date = String(form.get("inventory_date") ?? "").trim();
+  const inventory_date = String(form.get("inventory_date") ?? "").trim();
 
   if (!(file instanceof File)) {
     return NextResponse.json(
@@ -75,15 +74,17 @@ const inventory_date = String(form.get("inventory_date") ?? "").trim();
   }
 
   if (inventory_header_id && !isUuid(inventory_header_id)) {
-  return NextResponse.json(
-    { ok: false, error: "inventory_header_id non valido" },
-    { status: 400 }
-  );
-}
+    return NextResponse.json(
+      { ok: false, error: "inventory_header_id non valido" },
+      { status: 400 }
+    );
+  }
 
-  if (!isUuid(pv_id)) return NextResponse.json({ ok: false, error: "pv_id non valido" }, { status: 400 });
+  if (!isUuid(pv_id)) {
+    return NextResponse.json({ ok: false, error: "pv_id non valido" }, { status: 400 });
+  }
 
-  // ✅ Standard: UUID obbligatorio; Rapido: NULL ammesso
+  // Standard: UUID obbligatorio; Rapido: NULL ammesso
   if (category_id !== null && !isUuid(category_id)) {
     return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
   }
@@ -113,74 +114,107 @@ const inventory_date = String(form.get("inventory_date") ?? "").trim();
     );
   }
 
-  // 2) meta
-  const pvRes = await supabaseAdmin.from("pvs").select("id, code, name").eq("id", pv_id).maybeSingle();
-  if (pvRes.error) return NextResponse.json({ ok: false, error: pvRes.error.message }, { status: 500 });
+  // 2) meta PV
+  const pvRes = await supabaseAdmin
+    .from("pvs")
+    .select("id, code, name")
+    .eq("id", pv_id)
+    .maybeSingle();
+
+  if (pvRes.error) {
+    return NextResponse.json({ ok: false, error: pvRes.error.message }, { status: 500 });
+  }
 
   let categoryName = "Tutte";
   if (!isRapid && category_id) {
-    const catRes = await supabaseAdmin.from("categories").select("id, name").eq("id", category_id).maybeSingle();
-    if (catRes.error) return NextResponse.json({ ok: false, error: catRes.error.message }, { status: 500 });
+    const catRes = await supabaseAdmin
+      .from("categories")
+      .select("id, name")
+      .eq("id", category_id)
+      .maybeSingle();
+
+    if (catRes.error) {
+      return NextResponse.json({ ok: false, error: catRes.error.message }, { status: 500 });
+    }
+
     categoryName = catRes.data?.name ?? "";
   }
 
   let subcategoryName = "—";
   if (subcategory_id) {
-    const subRes = await supabaseAdmin.from("subcategories").select("id, name").eq("id", subcategory_id).maybeSingle();
-    if (subRes.error) return NextResponse.json({ ok: false, error: subRes.error.message }, { status: 500 });
+    const subRes = await supabaseAdmin
+      .from("subcategories")
+      .select("id, name")
+      .eq("id", subcategory_id)
+      .maybeSingle();
+
+    if (subRes.error) {
+      return NextResponse.json({ ok: false, error: subRes.error.message }, { status: 500 });
+    }
+
     subcategoryName = subRes.data?.name ?? "";
   }
 
   const pvLabel = pvRes.data ? `${pvRes.data.code} — ${pvRes.data.name}` : pv_id;
 
   // 3) testata inventario corretta: prima provo con inventory_header_id, altrimenti fallback legacy
-let currentHeader: any = null;
+  let currentHeader: any = null;
 
-if (inventory_header_id) {
-  const { data: headerById, error: headerByIdErr } = await supabaseAdmin
-    .from("inventories_headers")
-    .select("id, operatore, category_id, subcategory_id, rapid_session_id")
-    .eq("id", inventory_header_id)
-    .maybeSingle();
+  if (inventory_header_id) {
+    const { data: headerById, error: headerByIdErr } = await supabaseAdmin
+      .from("inventories_headers")
+      .select("id, operatore, category_id, subcategory_id, rapid_session_id, label")
+      .eq("id", inventory_header_id)
+      .maybeSingle();
 
-  if (headerByIdErr) {
-    return NextResponse.json({ ok: false, error: headerByIdErr.message }, { status: 500 });
+    if (headerByIdErr) {
+      return NextResponse.json({ ok: false, error: headerByIdErr.message }, { status: 500 });
+    }
+
+    currentHeader = headerById ?? null;
   }
 
-  currentHeader = headerById ?? null;
-}
+  if (!currentHeader) {
+    let hq = supabaseAdmin
+      .from("inventories_headers")
+      .select("id, operatore, category_id, subcategory_id, rapid_session_id, label")
+      .eq("pv_id", pv_id)
+      .eq("inventory_date", inventory_date);
 
-if (!currentHeader) {
-  let hq = supabaseAdmin
-    .from("inventories_headers")
-    .select("id, operatore, category_id, subcategory_id, rapid_session_id")
-    .eq("pv_id", pv_id)
-    .eq("inventory_date", inventory_date);
+    if (!isRapid && category_id) hq = hq.eq("category_id", category_id);
+    else hq = hq.is("category_id", null);
 
-  if (!isRapid && category_id) hq = hq.eq("category_id", category_id);
-  else hq = hq.is("category_id", null);
+    if (subcategory_id) hq = hq.eq("subcategory_id", subcategory_id);
+    else hq = hq.is("subcategory_id", null);
 
-  if (subcategory_id) hq = hq.eq("subcategory_id", subcategory_id);
-  else hq = hq.is("subcategory_id", null);
+    const { data: headers, error: headerErr } = await hq
+      .order("updated_at", { ascending: false })
+      .limit(1);
 
-  const { data: headers, error: headerErr } = await hq.order("updated_at", { ascending: false }).limit(1);
-  if (headerErr) {
-    return NextResponse.json({ ok: false, error: headerErr.message }, { status: 500 });
+    if (headerErr) {
+      return NextResponse.json({ ok: false, error: headerErr.message }, { status: 500 });
+    }
+
+    currentHeader = (headers?.[0] as any) ?? null;
   }
 
-  currentHeader = (headers?.[0] as any) ?? null;
-}
+  const operatore = String(currentHeader?.operatore ?? "").trim() || "—";
 
-const operatore = String(currentHeader?.operatore ?? "").trim() || "—";
+  // contesto reale dell'inventario selezionato
+  const currentHeaderCategoryId = (currentHeader?.category_id ?? null) as string | null;
+  const currentHeaderSubcategoryId = (currentHeader?.subcategory_id ?? null) as string | null;
+  const currentHeaderRapidSessionId = (currentHeader?.rapid_session_id ?? null) as string | null;
+  const currentHeaderIsRapid = currentHeaderCategoryId === null;
 
-// ✅ contesto reale dell'inventario selezionato
-const currentHeaderCategoryId = (currentHeader?.category_id ?? null) as string | null;
-const currentHeaderSubcategoryId = (currentHeader?.subcategory_id ?? null) as string | null;
-const currentHeaderRapidSessionId = (currentHeader?.rapid_session_id ?? null) as string | null;
-const currentHeaderIsRapid = currentHeaderCategoryId === null;
+  // label reale della testata inventario
+  const currentHeaderLabel = String(currentHeader?.label ?? "").trim();
+
+  // Se siamo in rapido/category null, usiamo la label come categoria descrittiva
+  if (isRapid && currentHeaderLabel) {
+    categoryName = currentHeaderLabel;
+  }
 
   // 4) righe inventario + join items (LEFT JOIN)
-  // ✅ QUI aggiungo category/subcategory names dagli items, così poi inventoryCompare può creare fogli per gruppo.
   let q = supabaseAdmin
     .from("inventories")
     .select(`
@@ -209,7 +243,9 @@ const currentHeaderIsRapid = currentHeaderCategoryId === null;
   else q = q.is("subcategory_id", null);
 
   const { data: invRows, error: invErr } = await q;
-  if (invErr) return NextResponse.json({ ok: false, error: invErr.message }, { status: 500 });
+  if (invErr) {
+    return NextResponse.json({ ok: false, error: invErr.message }, { status: 500 });
+  }
 
   let inventoryLines = ((invRows || []) as any[]).map((r: any) => ({
     item_id: String(r?.item_id ?? ""),
@@ -220,14 +256,11 @@ const currentHeaderIsRapid = currentHeaderCategoryId === null;
     qty_ml: Number(r?.qty_ml ?? 0),
     prezzo_vendita_eur: r?.items?.prezzo_vendita_eur ?? null,
     volume_ml_per_unit: r?.items?.volume_ml_per_unit ?? null,
-
-    // ✅ passiamo i nomi (usati per i fogli extra)
     category_name: r?.items?.categories?.name ?? null,
     subcategory_name: r?.items?.subcategories?.name ?? null,
   }));
 
-  // ✅ RAPIDO (Tutte): vogliamo poter fare PIÙ COMPARAZIONI con file diversi.
-  // Quindi teniamo SOLO gli articoli "riconosciuti" dal file gestionale.
+  // RAPIDO (Tutte): teniamo solo gli articoli inventario riconosciuti dal file gestionale
   if (isRapid) {
     const gestionaleCodes = new Set(Array.from(gestionaleMap.keys()).map(normCode));
 
@@ -238,13 +271,21 @@ const currentHeaderIsRapid = currentHeaderCategoryId === null;
     });
   }
 
-    // 5) confronto
-  // ✅ Per Compara lavoriamo solo su Tabacchi e Gratta e Vinci:
+  // 5) confronto
+  // Per Compara lavoriamo solo su Tabacchi e Gratta e Vinci:
   // il report deve includere tutti gli articoli presenti nel file allegato,
   // anche se in inventario hanno quantità 0.
-  const normalizedCategoryName = categoryName.toLowerCase().trim();
-  const isTabacchi = normalizedCategoryName.includes("tabacc");
+  const normalizedInventoryLabel = currentHeaderLabel.toLowerCase().trim();
+  const normalizedCategoryName = String(categoryName || "").toLowerCase().trim();
+
+  const isTabacchi =
+    normalizedInventoryLabel.includes("tabacc") ||
+    normalizedCategoryName.includes("tabacc");
+
   const isGrattaEVinci =
+    normalizedInventoryLabel.includes("gratta e vinci") ||
+    normalizedInventoryLabel.includes("gratta&vinci") ||
+    normalizedInventoryLabel.includes("grattaevinci") ||
     normalizedCategoryName.includes("gratta e vinci") ||
     normalizedCategoryName.includes("gratta&vinci") ||
     normalizedCategoryName.includes("grattaevinci");
@@ -256,7 +297,13 @@ const currentHeaderIsRapid = currentHeaderCategoryId === null;
     : buildCompareLines(inventoryLines, gestionaleMap, { onlyInventory: true });
 
   const xlsx = await buildInventoryCompareXlsx(
-    { inventoryDate: inventory_date, operatore, pvLabel, categoryName, subcategoryName },
+    {
+      inventoryDate: inventory_date,
+      operatore,
+      pvLabel,
+      categoryName,
+      subcategoryName,
+    },
     compareLines
   );
 
@@ -266,7 +313,8 @@ const currentHeaderIsRapid = currentHeaderCategoryId === null;
   return new NextResponse(bytes, {
     status: 200,
     headers: {
-      "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "content-type":
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       "content-disposition": `attachment; filename="${filename}"`,
       "cache-control": "no-store",
     },
