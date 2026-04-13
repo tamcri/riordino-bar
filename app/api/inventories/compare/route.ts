@@ -104,10 +104,14 @@ export async function POST(req: Request) {
 
   // 1) gestionale
   let gestionaleMap: Map<string, number>;
-  try {
-    const ab = await file.arrayBuffer();
-    gestionaleMap = await parseGestionaleXlsx(ab);
-  } catch (e: any) {
+let gestionaleDescMap: Map<string, string>;
+
+try {
+  const ab = await file.arrayBuffer();
+  const parsedGestionale = await parseGestionaleXlsx(ab);
+  gestionaleMap = parsedGestionale.qtyMap;
+  gestionaleDescMap = parsedGestionale.descMap;
+} catch (e: any) {
     return NextResponse.json(
       { ok: false, error: e?.message || "Errore lettura Excel gestionale" },
       { status: 400 }
@@ -293,8 +297,11 @@ export async function POST(req: Request) {
   const isFullCompareCategory = isTabacchi || isGrattaEVinci;
 
   const compareLines = isFullCompareCategory
-    ? buildCompareLines(inventoryLines, gestionaleMap)
-    : buildCompareLines(inventoryLines, gestionaleMap, { onlyInventory: true });
+  ? buildCompareLines(inventoryLines, gestionaleMap, { descMap: gestionaleDescMap })
+  : buildCompareLines(inventoryLines, gestionaleMap, {
+      onlyInventory: true,
+      descMap: gestionaleDescMap,
+    });
 
   const xlsx = await buildInventoryCompareXlsx(
     {

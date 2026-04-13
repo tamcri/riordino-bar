@@ -231,13 +231,48 @@ function hasNextHeader(ws: ExcelJS.Worksheet, r: number): boolean {
   return !!findHeaderAt(ws, r);
 }
 
+function extractGestionaleDescription(
+  ws: ExcelJS.Worksheet,
+  dataRow: number,
+  codeCol: number,
+  qtyCol: number
+): string {
+  const candidates: string[] = [];
+
+  for (let rr = dataRow + 1; rr <= Math.min(ws.rowCount, dataRow + 2); rr++) {
+    if (hasNextHeader(ws, rr)) break;
+
+    const row = ws.getRow(rr);
+    const maxC = rowMaxCol(ws, rr);
+
+    for (let c = 1; c <= maxC; c++) {
+      if (c === codeCol || c === qtyCol) continue;
+
+      const txt = cellText(row.getCell(c).value).trim();
+      if (!txt) continue;
+      if (looksLikeItemCode(normCode(txt))) continue;
+      if (/^[-–—]?$/.test(txt)) continue;
+      if (!/[A-Za-zÀ-ÿ]/.test(txt)) continue;
+
+      candidates.push(txt);
+    }
+  }
+
+  candidates.sort((a, b) => b.length - a.length);
+  return candidates[0] ?? "";
+}
+
 /**
  * Legge Excel gestionale:
  * CODE -> qty (da colonna "Giacenza qta1" o simili)
+ * + descrizione articolo letta dalle righe successive
  */
 export async function parseGestionaleXlsx(
   buffer: ArrayBuffer
-): Promise<Map<string, number>> {
+): Promise<{
+  qtyMap: Map<string, number>;
+  descMap: Map<string, string>;
+}> {
   const wb = new ExcelJS.Workbook();
   const bytes = new Uint8Array(buffer);
   await wb.xlsx.load(bytes as any);
@@ -250,7 +285,8 @@ export async function parseGestionaleXlsx(
     );
   }
 
-  const out = new Map<string, number>();
+  const qtyMap = new Map<string, number>();
+  const descMap = new Map<string, string>();
   const seenHeaders = new Set<string>();
 
   function collectRowTexts(rowIdx: number) {
@@ -291,8 +327,15 @@ export async function parseGestionaleXlsx(
       if (qtyNum != null) {
         const code = normCode(cellText(codeRaw));
         if (looksLikeItemCode(code)) {
-          const prev = out.get(code) ?? 0;
-          out.set(code, prev + qtyNum);
+          const prev = qtyMap.get(code) ?? 0;
+          qtyMap.set(code, prev + qtyNum);
+
+          if (!descMap.has(code)) {
+            const desc = extractGestionaleDescription(ws, dataRow, codeCol, qtyCol);
+            if (desc) {
+              descMap.set(code, desc);
+            }
+          }
         }
       }
 
@@ -302,7 +345,7 @@ export async function parseGestionaleXlsx(
     r = dataRow;
   }
 
-  if (out.size === 0) {
+  if (qtyMap.size === 0) {
     const cols = Array.from(seenHeaders).slice(0, 30).join(" | ");
     throw new Error(
       `Nel file gestionale non ho estratto nessuna riga.\n` +
@@ -311,7 +354,7 @@ export async function parseGestionaleXlsx(
     );
   }
 
-  return out;
+  return { qtyMap, descMap };
 }
 
 function applyRedRow(
@@ -452,8 +495,6 @@ function addCompareSheet(
           ? Number(line.prezzoVenditaEur)
           : 0;
 
-    // Se volumeMlPerUnit è presente, qtyInv / qtyGest / diff sono ML totali
-    // e il prezzo è €/L, quindi trasformiamo in litri per i valori.
     const mlPerUnit =
       line.volumeMlPerUnit == null ? null : Number(line.volumeMlPerUnit);
     const isMl =
@@ -608,7 +649,7 @@ export function buildCompareLines(
     subcategory_name?: string | null;
   }[],
   gestionaleMap: Map<string, number>,
-  opts?: { onlyInventory?: boolean }
+  opts?: { onlyInventory?: boolean; descMap?: Map<string, string> }
 ): CompareLine[] {
   const gestionaleCodes = new Set<string>();
   for (const k of gestionaleMap.keys()) {
@@ -687,7 +728,6 @@ export function buildCompareLines(
 
     let qtyGes = Number(gestionaleMap.get(code) ?? 0);
 
-    // Liquidi: se il gestionale esporta in litri decimali, convertiamo a ML
     if (isMlItem) {
       const hasDecimals = Math.abs(qtyGes - Math.trunc(qtyGes)) > 0.000001;
 
@@ -704,7 +744,7 @@ export function buildCompareLines(
 
     out.push({
       code,
-      description: inv?.description ?? "",
+      description: inv?.description || opts?.descMap?.get(code) || "",
       qtyInventory: qtyInv,
       qtyGestionale: qtyGes,
       diff,
