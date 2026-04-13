@@ -233,29 +233,44 @@ function hasNextHeader(ws: ExcelJS.Worksheet, r: number): boolean {
 
 function extractGestionaleDescription(
   ws: ExcelJS.Worksheet,
-  dataRow: number,
+  rowIndex: number,
   codeCol: number,
   qtyCol: number
 ): string {
   const candidates: string[] = [];
 
-  for (let rr = dataRow + 1; rr <= Math.min(ws.rowCount, dataRow + 2); rr++) {
-    if (hasNextHeader(ws, rr)) break;
+  function collectFromRow(rr: number, allowCodeCol: boolean) {
+    if (rr < 1 || rr > ws.rowCount) return;
+    if (hasNextHeader(ws, rr)) return;
 
     const row = ws.getRow(rr);
     const maxC = rowMaxCol(ws, rr);
 
     for (let c = 1; c <= maxC; c++) {
-      if (c === codeCol || c === qtyCol) continue;
+      if (c === qtyCol) continue;
+      if (!allowCodeCol && c === codeCol) continue;
 
       const txt = cellText(row.getCell(c).value).trim();
       if (!txt) continue;
-      if (looksLikeItemCode(normCode(txt))) continue;
+      if (!txt.includes(" ") && looksLikeItemCode(txt.toUpperCase().replace(/\s+/g, ""))) continue;
       if (/^[-–—]?$/.test(txt)) continue;
       if (!/[A-Za-zÀ-ÿ]/.test(txt)) continue;
 
       candidates.push(txt);
     }
+  }
+
+  // Riga articolo: escludo colonna codice e quantità
+  collectFromRow(rowIndex, false);
+
+  // Riga sotto: QUI permetto anche codeCol, perché spesso la descrizione sta lì
+  if (candidates.length === 0) {
+    collectFromRow(rowIndex + 1, true);
+  }
+
+  // Secondo fallback: anche 2 righe sotto
+  if (candidates.length === 0) {
+    collectFromRow(rowIndex + 2, true);
   }
 
   candidates.sort((a, b) => b.length - a.length);
