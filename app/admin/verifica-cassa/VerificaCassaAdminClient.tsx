@@ -127,6 +127,7 @@ export default function VerificaCassaAdminClient() {
   const [uploadingId, setUploadingId] = useState<string | null>(null);
   const [activatingPvId, setActivatingPvId] = useState<string | null>(null);
   const [disablingPvId, setDisablingPvId] = useState<string | null>(null);
+  const [downloadingReport, setDownloadingReport] = useState(false);
   const [activeFilter, setActiveFilter] = useState<FilterKey>('all');
   const [draftDates, setDraftDates] = useState<Record<string, string>>({});
   const [draftIdentifiers, setDraftIdentifiers] = useState<Record<string, string>>({});
@@ -381,6 +382,40 @@ export default function VerificaCassaAdminClient() {
     }
   }
 
+  async function handleDownloadReport() {
+    try {
+      setDownloadingReport(true);
+
+      const res = await fetch('/api/admin/cash-registers/report', {
+        method: 'GET',
+        cache: 'no-store',
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        alert(data?.error || 'Errore generazione PDF');
+        return;
+      }
+
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'verifica-cassa-report.pdf';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Errore download report PDF:', error);
+      alert('Errore download report PDF');
+    } finally {
+      setDownloadingReport(false);
+    }
+  }
+
   if (loading) {
     return <div className="p-6">Caricamento...</div>;
   }
@@ -396,12 +431,23 @@ export default function VerificaCassaAdminClient() {
             </p>
           </div>
 
-          <Link
-            href="/admin"
-            className="inline-flex w-fit items-center rounded-xl border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
-          >
-            Torna ad Admin
-          </Link>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={handleDownloadReport}
+              disabled={downloadingReport}
+              className="inline-flex items-center rounded-xl border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            >
+              {downloadingReport ? 'Generazione PDF...' : 'Report PDF'}
+            </button>
+
+            <Link
+              href="/admin"
+              className="inline-flex items-center rounded-xl border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+            >
+              Torna ad Admin
+            </Link>
+          </div>
         </div>
 
         <div className="mb-5 flex flex-wrap gap-2">
