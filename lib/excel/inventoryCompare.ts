@@ -664,7 +664,11 @@ export function buildCompareLines(
     subcategory_name?: string | null;
   }[],
   gestionaleMap: Map<string, number>,
-  opts?: { onlyInventory?: boolean; descMap?: Map<string, string> }
+  opts?: {
+  onlyInventory?: boolean;
+  descMap?: Map<string, string>;
+  priceMap?: Map<string, number>;
+}
 ): CompareLine[] {
   const gestionaleCodes = new Set<string>();
   for (const k of gestionaleMap.keys()) {
@@ -763,7 +767,7 @@ export function buildCompareLines(
       qtyInventory: qtyInv,
       qtyGestionale: qtyGes,
       diff,
-      prezzoVenditaEur: inv?.prezzo ?? null,
+      prezzoVenditaEur: inv?.prezzo ?? opts?.priceMap?.get(code) ?? null,
       volumeMlPerUnit: isMlItem ? inv?.mlPerUnit ?? null : null,
       foundInInventory,
       foundInGestionale,

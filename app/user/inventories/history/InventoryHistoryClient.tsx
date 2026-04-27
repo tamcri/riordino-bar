@@ -106,6 +106,21 @@ function getInventoryHeaderId(g: Partial<InventoryGroup> | null | undefined) {
   return isUuid(candidate) ? candidate : "";
 }
 
+function getRealPvId(g: Partial<InventoryGroup> | null | undefined, pvs: Pv[]) {
+  if (!g) return "";
+
+  const candidate = String(g.pv_id || "").trim();
+  if (isUuid(candidate)) return candidate;
+
+  const byCode = pvs.find((pv) => String(pv.code || "").trim() === candidate);
+  if (byCode?.id && isUuid(byCode.id)) return byCode.id;
+
+  const byName = pvs.find((pv) => String(pv.name || "").trim() === candidate);
+  if (byName?.id && isUuid(byName.id)) return byName.id;
+
+  return "";
+}
+
 async function fetchJsonSafe<T = any>(
   url: string,
   init?: RequestInit
@@ -515,22 +530,32 @@ export default function InventoryHistoryClient() {
 
     try {
       const fd = new FormData();
-fd.append("file", compareFile);
+      fd.append("file", compareFile);
 
-// ✅ aggiungi header_id se disponibile
-const headerId = getInventoryHeaderId(compareTarget);
-if (headerId) {
-  fd.append("inventory_header_id", headerId);
-}
+      // ✅ aggiungi header_id se disponibile
+      const headerId = getInventoryHeaderId(compareTarget);
+      if (headerId) {
+        fd.append("inventory_header_id", headerId);
+      }
 
-// ✅ questi DEVONO SEMPRE esserci
-fd.append("pv_id", compareTarget.pv_id);
-appendCategoryFd(fd, compareTarget.category_id);
-fd.append("inventory_date", compareTarget.inventory_date);
+      // ✅ questi DEVONO SEMPRE esserci
+      // Alcune versioni della list API possono restituire pv_id come codice PV.
+      // Qui recuperiamo sempre l'UUID reale prima di chiamare il backend.
+      const realPvId = getRealPvId(compareTarget, pvs);
 
-if (compareTarget.subcategory_id) {
-  fd.append("subcategory_id", compareTarget.subcategory_id);
-}
+      if (!realPvId) {
+        throw new Error(
+          `PV non valido per la comparazione. Valore ricevuto: ${compareTarget.pv_id || "vuoto"}`
+        );
+      }
+
+      fd.append("pv_id", realPvId);
+      appendCategoryFd(fd, compareTarget.category_id);
+      fd.append("inventory_date", compareTarget.inventory_date);
+
+      if (compareTarget.subcategory_id) {
+        fd.append("subcategory_id", compareTarget.subcategory_id);
+      }
 
       const res = await fetch("/api/inventories/compare", { method: "POST", body: fd });
 

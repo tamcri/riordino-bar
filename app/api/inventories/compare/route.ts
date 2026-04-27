@@ -13,7 +13,7 @@ export const runtime = "nodejs";
 
 function isUuid(v: string | null) {
   if (!v) return false;
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
     v.trim()
   );
 }
@@ -23,15 +23,20 @@ function isIsoDate(v: string | null) {
   return /^\d{4}-\d{2}-\d{2}$/.test(v.trim());
 }
 
-// interpreta "" / "null" come NULL
 function normNullParam(v: any): string | null {
   const s = String(v ?? "").trim();
   if (!s) return null;
   if (s.toLowerCase() === "null") return null;
+  if (s.toLowerCase() === "undefined") return null;
   return s;
 }
 
-// stessa filosofia del gestionale: token 1, uppercase, no spaces
+function normUuidParam(v: any): string | null {
+  const s = normNullParam(v);
+  if (!s) return null;
+  return isUuid(s) ? s : null;
+}
+
 function normCode(v: any) {
   const raw = String(v ?? "").trim();
   if (!raw) return "";
@@ -57,13 +62,11 @@ export async function POST(req: Request) {
   }
 
   const file = form.get("file");
-  const inventory_header_id = String(form.get("inventory_header_id") ?? "").trim();
+  const inventory_header_id = normUuidParam(form.get("inventory_header_id"));
   const pv_id = String(form.get("pv_id") ?? "").trim();
 
-  // Rapido: category_id può essere null
   const category_id = normNullParam(form.get("category_id"));
   const subcategory_id = normNullParam(form.get("subcategory_id"));
-
   const inventory_date = String(form.get("inventory_date") ?? "").trim();
 
   if (!(file instanceof File)) {
@@ -73,18 +76,10 @@ export async function POST(req: Request) {
     );
   }
 
-  if (inventory_header_id && !isUuid(inventory_header_id)) {
-    return NextResponse.json(
-      { ok: false, error: "inventory_header_id non valido" },
-      { status: 400 }
-    );
-  }
-
   if (!isUuid(pv_id)) {
     return NextResponse.json({ ok: false, error: "pv_id non valido" }, { status: 400 });
   }
 
-  // Standard: UUID obbligatorio; Rapido: NULL ammesso
   if (category_id !== null && !isUuid(category_id)) {
     return NextResponse.json({ ok: false, error: "category_id non valido" }, { status: 400 });
   }
@@ -102,23 +97,21 @@ export async function POST(req: Request) {
 
   const isRapid = category_id === null;
 
-  // 1) gestionale
   let gestionaleMap: Map<string, number>;
-let gestionaleDescMap: Map<string, string>;
+  let gestionaleDescMap: Map<string, string>;
 
-try {
-  const ab = await file.arrayBuffer();
-  const parsedGestionale = await parseGestionaleXlsx(ab);
-  gestionaleMap = parsedGestionale.qtyMap;
-  gestionaleDescMap = parsedGestionale.descMap;
-} catch (e: any) {
+  try {
+    const ab = await file.arrayBuffer();
+    const parsedGestionale = await parseGestionaleXlsx(ab);
+    gestionaleMap = parsedGestionale.qtyMap;
+    gestionaleDescMap = parsedGestionale.descMap;
+  } catch (e: any) {
     return NextResponse.json(
       { ok: false, error: e?.message || "Errore lettura Excel gestionale" },
       { status: 400 }
     );
   }
 
-  // 2) meta PV
   const pvRes = await supabaseAdmin
     .from("pvs")
     .select("id, code, name")
@@ -130,6 +123,7 @@ try {
   }
 
   let categoryName = "Tutte";
+
   if (!isRapid && category_id) {
     const catRes = await supabaseAdmin
       .from("categories")
@@ -145,6 +139,7 @@ try {
   }
 
   let subcategoryName = "—";
+
   if (subcategory_id) {
     const subRes = await supabaseAdmin
       .from("subcategories")
@@ -161,10 +156,9 @@ try {
 
   const pvLabel = pvRes.data ? `${pvRes.data.code} — ${pvRes.data.name}` : pv_id;
 
-  // 3) testata inventario corretta: prima provo con inventory_header_id, altrimenti fallback legacy
   let currentHeader: any = null;
 
-  if (inventory_header_id) {
+  if (inventory_header_id !== null) {
     const { data: headerById, error: headerByIdErr } = await supabaseAdmin
       .from("inventories_headers")
       .select("id, operatore, category_id, subcategory_id, rapid_session_id, label")
@@ -188,8 +182,12 @@ try {
     if (!isRapid && category_id) hq = hq.eq("category_id", category_id);
     else hq = hq.is("category_id", null);
 
-    if (subcategory_id) hq = hq.eq("subcategory_id", subcategory_id);
-    else hq = hq.is("subcategory_id", null);
+    if (!isRapid) {
+      if (subcategory_id) hq = hq.eq("subcategory_id", subcategory_id);
+      else hq = hq.is("subcategory_id", null);
+
+      hq = hq.is("rapid_session_id", null);
+    }
 
     const { data: headers, error: headerErr } = await hq
       .order("updated_at", { ascending: false })
@@ -204,21 +202,15 @@ try {
 
   const operatore = String(currentHeader?.operatore ?? "").trim() || "—";
 
-  // contesto reale dell'inventario selezionato
   const currentHeaderCategoryId = (currentHeader?.category_id ?? null) as string | null;
   const currentHeaderSubcategoryId = (currentHeader?.subcategory_id ?? null) as string | null;
   const currentHeaderRapidSessionId = (currentHeader?.rapid_session_id ?? null) as string | null;
-  const currentHeaderIsRapid = currentHeaderCategoryId === null;
-
-  // label reale della testata inventario
   const currentHeaderLabel = String(currentHeader?.label ?? "").trim();
 
-  // Se siamo in rapido/category null, usiamo la label come categoria descrittiva
   if (isRapid && currentHeaderLabel) {
     categoryName = currentHeaderLabel;
   }
 
-  // 4) righe inventario + join items (LEFT JOIN)
   let q = supabaseAdmin
     .from("inventories")
     .select(`
@@ -226,6 +218,9 @@ try {
       qty,
       qty_gr,
       qty_ml,
+      rapid_session_id,
+      category_id,
+      subcategory_id,
       items:items!left(
         code,
         description,
@@ -240,13 +235,30 @@ try {
     .eq("pv_id", pv_id)
     .eq("inventory_date", inventory_date);
 
-  if (!isRapid && category_id) q = q.eq("category_id", category_id);
-  else q = q.is("category_id", null);
+  if (isRapid) {
+    q = q.is("category_id", null);
 
-  if (subcategory_id) q = q.eq("subcategory_id", subcategory_id);
-  else q = q.is("subcategory_id", null);
+    if (currentHeaderRapidSessionId) {
+      q = q.or(`rapid_session_id.eq.${currentHeaderRapidSessionId},rapid_session_id.is.null`);
+    } else {
+      q = q.is("rapid_session_id", null);
+    }
+
+    // Importante: in rapido NON filtro subcategory_id.
+  } else {
+    const effectiveCategoryId = currentHeaderCategoryId ?? category_id;
+    const effectiveSubcategoryId = currentHeaderSubcategoryId ?? subcategory_id;
+
+    if (effectiveCategoryId) q = q.eq("category_id", effectiveCategoryId);
+
+    if (effectiveSubcategoryId) q = q.eq("subcategory_id", effectiveSubcategoryId);
+    else q = q.is("subcategory_id", null);
+
+    q = q.is("rapid_session_id", null);
+  }
 
   const { data: invRows, error: invErr } = await q;
+
   if (invErr) {
     return NextResponse.json({ ok: false, error: invErr.message }, { status: 500 });
   }
@@ -264,7 +276,26 @@ try {
     subcategory_name: r?.items?.subcategories?.name ?? null,
   }));
 
-  // RAPIDO (Tutte): teniamo solo gli articoli inventario riconosciuti dal file gestionale
+  const { data: allItems, error: allItemsErr } = await supabaseAdmin
+    .from("items")
+    .select("code, prezzo_vendita_eur");
+
+  if (allItemsErr) {
+    return NextResponse.json({ ok: false, error: allItemsErr.message }, { status: 500 });
+  }
+
+  const priceMap = new Map<string, number>();
+
+  for (const item of allItems ?? []) {
+    const code = normCode((item as any)?.code);
+    if (!code) continue;
+
+    const prezzo = (item as any)?.prezzo_vendita_eur;
+    if (prezzo === null || prezzo === undefined || prezzo === "") continue;
+
+    priceMap.set(code, Number(prezzo));
+  }
+
   if (isRapid) {
     const gestionaleCodes = new Set(Array.from(gestionaleMap.keys()).map(normCode));
 
@@ -275,10 +306,6 @@ try {
     });
   }
 
-  // 5) confronto
-  // Per Compara lavoriamo solo su Tabacchi e Gratta e Vinci:
-  // il report deve includere tutti gli articoli presenti nel file allegato,
-  // anche se in inventario hanno quantità 0.
   const normalizedInventoryLabel = currentHeaderLabel.toLowerCase().trim();
   const normalizedCategoryName = String(categoryName || "").toLowerCase().trim();
 
@@ -297,11 +324,15 @@ try {
   const isFullCompareCategory = isTabacchi || isGrattaEVinci;
 
   const compareLines = isFullCompareCategory
-  ? buildCompareLines(inventoryLines, gestionaleMap, { descMap: gestionaleDescMap })
-  : buildCompareLines(inventoryLines, gestionaleMap, {
-      onlyInventory: true,
-      descMap: gestionaleDescMap,
-    });
+    ? buildCompareLines(inventoryLines, gestionaleMap, {
+        descMap: gestionaleDescMap,
+        priceMap,
+      })
+    : buildCompareLines(inventoryLines, gestionaleMap, {
+        onlyInventory: true,
+        descMap: gestionaleDescMap,
+        priceMap,
+      });
 
   const xlsx = await buildInventoryCompareXlsx(
     {
@@ -327,16 +358,3 @@ try {
     },
   });
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
