@@ -243,12 +243,44 @@ export async function GET(req: Request) {
       );
     }
 
+
+
+    let comments_by_summary: Record<string, string> = {};
+
+    if (summaryIds.length > 0) {
+      const { data: commentRows, error: commentErr } = await supabaseAdmin
+        .from("cash_summary_field_comments")
+        .select("summary_id, field_key, comment_text")
+        .in("summary_id", summaryIds)
+        .eq("field_key", "spese_extra");
+
+      if (commentErr) {
+        return NextResponse.json({ ok: false, error: commentErr.message }, { status: 500 });
+      }
+
+      comments_by_summary = (commentRows ?? []).reduce(
+        (acc: Record<string, string>, row: any) => {
+          const summaryId = String(row?.summary_id ?? "").trim();
+          const commentText = String(row?.comment_text ?? "").trim();
+
+          if (!summaryId) {
+            return acc;
+          }
+
+          acc[summaryId] = commentText;
+          return acc;
+        },
+        {}
+      );
+    }
+
     return NextResponse.json({
       ok: true,
       rows,
       saldo_iniziale_by_pv,
       balance_start_date_by_pv,
       checks_by_summary,
+      comments_by_summary,
     });
   } catch (e: any) {
     return NextResponse.json(

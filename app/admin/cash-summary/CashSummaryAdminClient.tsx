@@ -1,5 +1,6 @@
 "use client";
 import { generateCashSummaryExcelReport } from "@/lib/cash-summary-report-excel";
+import { generateCashSummaryPrelieviExcelReport } from "@/lib/cash-summary-prelievi-excel";
 import {
   generateCashSummaryDataReport,
   type CashSummaryDataReportRow,
@@ -47,6 +48,8 @@ type RawRow = {
   lis_plus: number | null;
   mooney: number | null;
   pos: number | null;
+  spese_extra: number | null;
+  prelievo_note?: string | null;
   vendita_gv: number | null;
   vendita_tabacchi: number | null;
   da_versare: number | null;
@@ -67,6 +70,8 @@ type ViewRow = {
   lis_plus: number;
   mooney: number;
   pos: number;
+  spese_extra: number;
+  prelievo_note: string;
   vendita_gv: number;
   vendita_tabacchi: number;
   saldo_giorno: number;
@@ -502,6 +507,7 @@ export default function CashSummaryAdminClient() {
 
   const [rows, setRows] = useState<RawRow[]>([]);
   const [checksBySummary, setChecksBySummary] = useState<Record<string, MetricChecksMap>>({});
+  const [commentsBySummary, setCommentsBySummary] = useState<Record<string, string>>({});
   const [saldoInizialeByPv, setSaldoInizialeByPv] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -579,6 +585,7 @@ export default function CashSummaryAdminClient() {
       if (!res.ok || !json?.ok) {
         setRows([]);
         setChecksBySummary({});
+        setCommentsBySummary({});
         setSaldoInizialeByPv({});
         setMsg(json?.error || "Errore caricamento riepiloghi");
         return;
@@ -590,6 +597,11 @@ export default function CashSummaryAdminClient() {
           ? json.checks_by_summary
           : {}
       );
+      setCommentsBySummary(
+        json?.comments_by_summary && typeof json.comments_by_summary === "object"
+          ? json.comments_by_summary
+          : {}
+      );
       setSaldoInizialeByPv(
         json?.saldo_iniziale_by_pv && typeof json.saldo_iniziale_by_pv === "object"
           ? json.saldo_iniziale_by_pv
@@ -598,6 +610,7 @@ export default function CashSummaryAdminClient() {
     } catch {
       setRows([]);
       setChecksBySummary({});
+      setCommentsBySummary({});
       setSaldoInizialeByPv({});
       setMsg("Errore di rete");
     } finally {
@@ -955,6 +968,8 @@ export default function CashSummaryAdminClient() {
         lis_plus: n(row.lis_plus),
         mooney: n(row.mooney),
         pos: n(row.pos),
+        spese_extra: n(row.spese_extra),
+        prelievo_note: String(commentsBySummary[row.id] ?? row.prelievo_note ?? ""),
         vendita_gv: n(row.vendita_gv),
         vendita_tabacchi: n(row.vendita_tabacchi),
         saldo_giorno: saldoGiorno,
@@ -970,7 +985,7 @@ export default function CashSummaryAdminClient() {
       if (a.data !== b.data) return b.data.localeCompare(a.data);
       return a.pv_label.localeCompare(b.pv_label);
     });
-  }, [rows, saldoInizialeByPv, checksBySummary]);
+  }, [rows, saldoInizialeByPv, checksBySummary, commentsBySummary]);
 
   const filteredComputedRows = useMemo(() => {
     if (statusFilter === "all") return computedRows;
@@ -1250,6 +1265,34 @@ export default function CashSummaryAdminClient() {
     } catch (error) {
       console.error("REPORT EXCEL ERROR:", error);
       setMsg("Errore durante la generazione del report Excel.");
+    }
+  }
+
+  function handleGeneratePrelieviExcelReport() {
+    try {
+      const rowsForReport = filteredComputedRows.map((row) => ({
+        data: String(row.data ?? ""),
+        pv_label: String(row.pv_label ?? ""),
+        spese_extra: Number(row.spese_extra ?? 0),
+        note: String(row.prelievo_note ?? ""),
+      }));
+
+      const selectedPvRow = pvs.find((pv) => pv.id === pvId);
+      const selectedPvLabel = selectedPvRow
+        ? `${selectedPvRow.code} — ${selectedPvRow.name}`
+        : "Tutti i PV";
+
+      generateCashSummaryPrelieviExcelReport({
+        rows: rowsForReport,
+        pvLabel: selectedPvRow?.code || selectedPvLabel,
+        dateFrom: dateFrom || undefined,
+        dateTo: dateTo || undefined,
+      });
+
+      setMsg("Report prelievi generato correttamente.");
+    } catch (error) {
+      console.error("REPORT PRELIEVI ERROR:", error);
+      setMsg("Errore durante la generazione del report prelievi.");
     }
   }
 
@@ -1719,6 +1762,15 @@ export default function CashSummaryAdminClient() {
               className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50"
             >
               EXPORT EXCEL
+            </button>
+
+            <button
+              type="button"
+              onClick={handleGeneratePrelieviExcelReport}
+              title="Esporta in Excel solo Data, PV, Prelievo e Note"
+              className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50"
+            >
+              EXPORT PRELIEVI
             </button>
 
             <button
