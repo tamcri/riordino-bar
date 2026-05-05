@@ -15,13 +15,6 @@ export type GenerateCashSummaryPrelieviExcelReportArgs = {
   fileName?: string;
 };
 
-function formatLongDate(value: string) {
-  if (!value) return "";
-  const [yyyy, mm, dd] = value.split("-");
-  if (!yyyy || !mm || !dd) return value;
-  return `${dd}/${mm}/${yyyy}`;
-}
-
 function safeFilePart(value: string) {
   return String(value || "")
     .trim()
@@ -43,16 +36,16 @@ function n(value: unknown) {
 }
 
 function applyStyles(ws: XLSX.WorkSheet, totalRows: number) {
-  const euroCol = "C";
+  const euroCol = "B";
 
   for (let r = 2; r <= totalRows; r += 1) {
     const cell = ws[`${euroCol}${r}`];
-    if (cell && typeof cell.v === "number") {
+    if (cell && (typeof cell.v === "number" || cell.f)) {
       cell.z = '[$€-it-IT] #,##0.00';
     }
   }
 
-  ["A", "B", "C", "D"].forEach((col) => {
+  ["A", "B", "C"].forEach((col) => {
     const headerCell = ws[`${col}1`];
     if (headerCell) {
       headerCell.s = {
@@ -61,6 +54,24 @@ function applyStyles(ws: XLSX.WorkSheet, totalRows: number) {
       };
     }
   });
+
+  const totalLabelCell = ws[`A${totalRows}`];
+  const totalValueCell = ws[`B${totalRows}`];
+
+  if (totalLabelCell) {
+    totalLabelCell.s = {
+      ...(totalLabelCell.s || {}),
+      font: { bold: true },
+    };
+  }
+
+  if (totalValueCell) {
+    totalValueCell.z = '[$€-it-IT] #,##0.00';
+    totalValueCell.s = {
+      ...(totalValueCell.s || {}),
+      font: { bold: true },
+    };
+  }
 }
 
 export function generateCashSummaryPrelieviExcelReport({
@@ -70,30 +81,45 @@ export function generateCashSummaryPrelieviExcelReport({
   dateTo,
   fileName,
 }: GenerateCashSummaryPrelieviExcelReportArgs) {
-  const sortedRows = [...rows].sort((a, b) => {
-    if (a.data !== b.data) return a.data.localeCompare(b.data);
-    return a.pv_label.localeCompare(b.pv_label);
-  });
+  const sortedRows = [...rows]
+    .filter((row) => n(row.spese_extra) > 0)
+    .sort((a, b) => {
+      return String(a.pv_label ?? "").localeCompare(String(b.pv_label ?? ""));
+    });
 
-  const header = [["Data", "PV", "Prelievo", "Note"]];
+  const header = [["PV", "Prelievo", "Note"]];
 
   const body = sortedRows.map((row) => [
-    formatLongDate(String(row.data ?? "")),
     String(row.pv_label ?? ""),
     n(row.spese_extra),
     String(row.note ?? ""),
   ]);
 
-  const ws = XLSX.utils.aoa_to_sheet([...header, ...body]);
+  const lastDataRow = body.length + 1;
+  const totalRowIndex = body.length + 2;
+
+  const totalRow = [
+    "TOTALE",
+    {
+      f: body.length > 0 ? `SUBTOTAL(109,B2:B${lastDataRow})` : "0",
+      t: "n",
+    },
+    "",
+  ];
+
+  const ws = XLSX.utils.aoa_to_sheet([...header, ...body, totalRow]);
 
   ws["!cols"] = [
-    { wch: 12 }, // Data
     { wch: 28 }, // PV
     { wch: 16 }, // Prelievo
     { wch: 42 }, // Note
   ];
 
-  applyStyles(ws, body.length + 1);
+  ws["!autofilter"] = {
+    ref: `A1:C${totalRowIndex}`,
+  };
+
+  applyStyles(ws, totalRowIndex);
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Prelievi");
