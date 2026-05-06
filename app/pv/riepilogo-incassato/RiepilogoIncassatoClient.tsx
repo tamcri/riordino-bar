@@ -1,5 +1,6 @@
 "use client";
 
+import { generatePvCashSummaryPdf } from "@/lib/pdf/generatePvCashSummaryPdf";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
@@ -33,6 +34,13 @@ type NotificationRow = {
   is_read: boolean;
   created_at: string;
   read_at?: string | null;
+};
+
+type PvCashSummaryDetailResponse = {
+  ok: boolean;
+  summary?: any;
+  suppliers?: any[];
+  error?: string;
 };
 
 const FIELD_LABELS: Record<string, string> = {
@@ -177,6 +185,7 @@ export default function RiepilogoIncassatoClient() {
   const [loading, setLoading] = useState(true);
   const [notificationsLoading, setNotificationsLoading] = useState(true);
   const [markingReadId, setMarkingReadId] = useState<string | null>(null);
+  const [generatingPdfId, setGeneratingPdfId] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [activePeriodPreset, setActivePeriodPreset] =
     useState<PeriodPresetKey>("current_month");
@@ -257,6 +266,36 @@ export default function RiepilogoIncassatoClient() {
     }
   }
 
+  async function handleGeneratePdf(summaryId: string) {
+    setGeneratingPdfId(summaryId);
+    setMsg(null);
+
+    try {
+      const res = await fetch(
+        `/api/cash-summary/pv-get-by-id?id=${encodeURIComponent(summaryId)}`,
+        {
+          cache: "no-store",
+        }
+      );
+
+      const json = (await res.json().catch(() => null)) as PvCashSummaryDetailResponse | null;
+
+      if (!res.ok || !json?.ok || !json.summary) {
+        setMsg(json?.error || "Errore generazione PDF");
+        return;
+      }
+
+      generatePvCashSummaryPdf({
+        summary: json.summary,
+        suppliers: Array.isArray(json.suppliers) ? json.suppliers : [],
+      });
+    } catch {
+      setMsg("Errore di rete durante la generazione del PDF");
+    } finally {
+      setGeneratingPdfId(null);
+    }
+  }
+
   useEffect(() => {
     loadRows();
     loadNotifications();
@@ -307,7 +346,8 @@ export default function RiepilogoIncassatoClient() {
                       Riepilogo modificato dall’amministrazione
                     </h2>
                     <p className="mt-1 text-sm text-blue-800">
-                      Il riepilogo del <strong>{formatDate(notification.summary_date)}</strong> è stato modificato dall’amministrazione il{" "}
+                      Il riepilogo del <strong>{formatDate(notification.summary_date)}</strong>{" "}
+                      è stato modificato dall’amministrazione il{" "}
                       <strong>{formatDateTime(notification.created_at)}</strong>.
                     </p>
                   </div>
@@ -467,6 +507,7 @@ export default function RiepilogoIncassatoClient() {
                 {filteredRows.map((row) => {
                   const status = normalizeStatus(row);
                   const isClosed = status === "chiuso";
+                  const isGeneratingPdf = generatingPdfId === row.id;
 
                   return (
                     <tr key={row.id} className="border-t">
@@ -486,6 +527,15 @@ export default function RiepilogoIncassatoClient() {
                             className="rounded-lg border px-3 py-1.5 hover:bg-gray-50"
                           >
                             Dettaglio
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleGeneratePdf(row.id)}
+                            disabled={isGeneratingPdf}
+                            className="rounded-lg border border-red-300 px-3 py-1.5 text-red-700 hover:bg-red-50 disabled:opacity-50"
+                          >
+                            {isGeneratingPdf ? "Creo..." : "PDF"}
                           </button>
 
                           {!isClosed && (
