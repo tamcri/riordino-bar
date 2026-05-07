@@ -50,60 +50,76 @@ export function generatePvCashSummaryPdf({
   });
 
   const pageWidth = pdf.internal.pageSize.getWidth();
-  const margin = 12;
+  const pageHeight = pdf.internal.pageSize.getHeight();
+  const margin = 10;
+  const contentWidth = pageWidth - margin * 2;
 
   const status = normalizeStatus(summary);
   const generatedAt = new Date().toLocaleString("it-IT");
 
-  let y = 14;
+  const totaleEntrate =
+    n(summary.incasso_totale) +
+    n(summary.vendita_gv) +
+    n(summary.vendita_tabacchi) +
+    n(summary.lis_plus) +
+    n(summary.mooney);
+
+  const totaleUscite =
+    n(summary.pagamento_fornitori) +
+    n(summary.gv_pagati) +
+    n(summary.pos) +
+    n(summary.spese_extra);
+
+  let y = 10;
 
   pdf.setFont("helvetica", "bold");
-  pdf.setFontSize(18);
+  pdf.setFontSize(16);
   pdf.setTextColor(15, 23, 42);
   pdf.text("Riepilogo Incassato", margin, y);
 
-  y += 7;
-
   pdf.setFont("helvetica", "normal");
-  pdf.setFontSize(10);
+  pdf.setFontSize(8);
   pdf.setTextColor(71, 85, 105);
-  pdf.text(`Generato il: ${generatedAt}`, margin, y);
+  pdf.text(`Generato il: ${generatedAt}`, pageWidth - margin, y, {
+    align: "right",
+  });
 
-  y += 8;
+  y += 5;
 
   autoTable(pdf, {
     startY: y,
     theme: "grid",
-    head: [["Campo", "Valore"]],
+    head: [["Campo", "Valore", "Campo", "Valore"]],
     body: [
-      ["Data", formatDate(summary.data)],
-      ["Operatore", summary.operatore || "—"],
-      ["Stato", statusLabel(status)],
-      ["ID riepilogo", summary.id],
+      ["Data", formatDate(summary.data), "Operatore", summary.operatore || "—"],
+      ["Stato", statusLabel(status), "ID", summary.id],
     ],
-    headStyles: {
-      fillColor: [15, 23, 42],
-      textColor: 255,
-      fontStyle: "bold",
-    },
+    styles: compactStyle(),
+    headStyles: darkHeadStyle(),
     bodyStyles: {
       textColor: [51, 65, 85],
     },
     columnStyles: {
-      0: { fontStyle: "bold", cellWidth: 55 },
-      1: { cellWidth: 125 },
+      0: { fontStyle: "bold", cellWidth: 24 },
+      1: { cellWidth: 42 },
+      2: { fontStyle: "bold", cellWidth: 24 },
+      3: { cellWidth: contentWidth - 90 },
     },
     margin: { left: margin, right: margin },
   });
 
-  y = getFinalY(pdf) + 8;
+  y = getFinalY(pdf) + 5;
+
+  const halfGap = 4;
+  const halfWidth = (contentWidth - halfGap) / 2;
 
   pdf.setFont("helvetica", "bold");
-  pdf.setFontSize(13);
+  pdf.setFontSize(11);
   pdf.setTextColor(15, 23, 42);
-  pdf.text("Esistenza Cassa", margin, y);
+  pdf.text("Entrate", margin, y);
+  pdf.text("Uscite", margin + halfWidth + halfGap, y);
 
-  y += 4;
+  y += 2;
 
   autoTable(pdf, {
     startY: y,
@@ -111,112 +127,98 @@ export function generatePvCashSummaryPdf({
     head: [["Voce", "Importo"]],
     body: [
       ["Incasso Totale", formatEuro(summary.incasso_totale)],
-      ["Pagamento Fornitori", formatEuro(summary.pagamento_fornitori)],
-      ["G&V Pagati", formatEuro(summary.gv_pagati)],
-      ["LIS+", formatEuro(summary.lis_plus)],
-      ["Mooney", formatEuro(summary.mooney)],
-      ["Totale Esistenza Cassa", formatEuro(summary.totale_esistenza_cassa)],
-    ],
-    headStyles: {
-      fillColor: [30, 64, 175],
-      textColor: 255,
-      fontStyle: "bold",
-    },
-    bodyStyles: {
-      textColor: [51, 65, 85],
-    },
-    columnStyles: {
-      1: { halign: "right" },
-    },
-    margin: { left: margin, right: margin },
-  });
-
-  y = getFinalY(pdf) + 8;
-
-  pdf.setFont("helvetica", "bold");
-  pdf.setFontSize(13);
-  pdf.setTextColor(15, 23, 42);
-  pdf.text("Vendite e Calcoli", margin, y);
-
-  y += 4;
-
-  autoTable(pdf, {
-    startY: y,
-    theme: "grid",
-    head: [["Voce", "Importo"]],
-    body: [
       ["Vendita G&V", formatEuro(summary.vendita_gv)],
       ["Vendita Tabacchi", formatEuro(summary.vendita_tabacchi)],
-      ["Totale", formatEuro(summary.totale)],
-      ["POS", formatEuro(summary.pos)],
-      ["Prelievo", formatEuro(summary.spese_extra)],
-      ["Versamento", formatEuro(summary.versamento)],
+      ["LIS+", formatEuro(summary.lis_plus)],
+      ["Mooney", formatEuro(summary.mooney)],
+      [
+  { content: "Totale Entrate", styles: { fontStyle: "bold" } },
+  {
+    content: formatEuro(totaleEntrate),
+    styles: { fontStyle: "bold", halign: "right" },
+  },
+],
     ],
-    headStyles: {
-      fillColor: [30, 64, 175],
-      textColor: 255,
-      fontStyle: "bold",
-    },
+    styles: compactStyle(),
+    headStyles: blueHeadStyle(),
     bodyStyles: {
       textColor: [51, 65, 85],
     },
     columnStyles: {
-      1: { halign: "right" },
+      0: { cellWidth: 48 },
+      1: { cellWidth: halfWidth - 48, halign: "right" },
     },
-    margin: { left: margin, right: margin },
+    margin: {
+      left: margin,
+      right: pageWidth - margin - halfWidth,
+    },
   });
-
-  y = getFinalY(pdf) + 8;
-
-  pdf.setFont("helvetica", "bold");
-  pdf.setFontSize(13);
-  pdf.setTextColor(15, 23, 42);
-  pdf.text("Fondo Cassa", margin, y);
-
-  y += 4;
 
   autoTable(pdf, {
     startY: y,
     theme: "grid",
     head: [["Voce", "Importo"]],
     body: [
-      ["Fondo Cassa Iniziale", formatEuro(summary.fondo_cassa_iniziale)],
-      ["Parziale 1", formatEuro(summary.parziale_1)],
-      ["Parziale 2", formatEuro(summary.parziale_2)],
-      ["Parziale 3", formatEuro(summary.parziale_3)],
-      ["Fondo Cassa", formatEuro(summary.fondo_cassa)],
+      ["Pagamento Fornitori", formatEuro(summary.pagamento_fornitori)],
+      ["G&V Pagati", formatEuro(summary.gv_pagati)],
+      ["POS", formatEuro(summary.pos)],
+      ["Prelievo", formatEuro(summary.spese_extra)],
       [
-        "Differenza % Fondo Cassa",
-        formatPercent(computeDeltaPercent(summary.fondo_cassa_iniziale, summary.fondo_cassa)),
-      ],
+  { content: "Totale Uscite", styles: { fontStyle: "bold" } },
+  {
+    content: formatEuro(totaleUscite),
+    styles: { fontStyle: "bold", halign: "right" },
+  },
+],
+      ["", ""],
     ],
-    headStyles: {
-      fillColor: [30, 64, 175],
-      textColor: 255,
-      fontStyle: "bold",
-    },
+    styles: compactStyle(),
+    headStyles: blueHeadStyle(),
     bodyStyles: {
       textColor: [51, 65, 85],
     },
     columnStyles: {
-      1: { halign: "right" },
+      0: { cellWidth: 48 },
+      1: { cellWidth: halfWidth - 48, halign: "right" },
+    },
+    margin: {
+      left: margin + halfWidth + halfGap,
+      right: margin,
+    },
+  });
+
+  y = getFinalY(pdf) + 5;
+
+  autoTable(pdf, {
+    startY: y,
+    theme: "grid",
+    body: [["Versamento", formatEuro(summary.versamento)]],
+    styles: {
+      font: "helvetica",
+      fontSize: 10,
+      cellPadding: { top: 2, right: 2, bottom: 2, left: 2 },
+      lineWidth: 0.1,
+    },
+    bodyStyles: {
+      textColor: [15, 23, 42],
+      fontStyle: "bold",
+      fillColor: [248, 250, 252],
+    },
+    columnStyles: {
+      0: { cellWidth: contentWidth / 2, fontStyle: "bold" },
+      1: { cellWidth: contentWidth / 2, halign: "right", fontStyle: "bold" },
     },
     margin: { left: margin, right: margin },
   });
 
-  y = getFinalY(pdf) + 8;
-
-  if (y > 235) {
-    pdf.addPage();
-    y = 14;
-  }
+  y = getFinalY(pdf) + 5;
 
   pdf.setFont("helvetica", "bold");
-  pdf.setFontSize(13);
+  pdf.setFontSize(11);
   pdf.setTextColor(15, 23, 42);
   pdf.text("Pagamenti Fornitori", margin, y);
 
-  y += 4;
+  y += 2;
 
   const supplierRows =
     suppliers.length > 0
@@ -232,32 +234,87 @@ export function generatePvCashSummaryPdf({
     theme: "grid",
     head: [["Codice", "Ragione Sociale", "Importo"]],
     body: supplierRows,
+    styles: {
+      font: "helvetica",
+      fontSize: 7,
+      cellPadding: { top: 1, right: 1.5, bottom: 1, left: 1.5 },
+      lineWidth: 0.1,
+      overflow: "linebreak",
+    },
     headStyles: {
       fillColor: [30, 64, 175],
       textColor: 255,
       fontStyle: "bold",
+      fontSize: 7,
     },
     bodyStyles: {
       textColor: [51, 65, 85],
     },
     columnStyles: {
-      2: { halign: "right" },
+      0: { cellWidth: 28 },
+      1: { cellWidth: contentWidth - 68 },
+      2: { cellWidth: 40, halign: "right" },
     },
     margin: { left: margin, right: margin },
     didDrawPage: () => {
-      const currentPage = pdf.getCurrentPageInfo().pageNumber;
-      const totalPages = pdf.getNumberOfPages();
-
       pdf.setFont("helvetica", "normal");
-      pdf.setFontSize(8);
+      pdf.setFontSize(7);
       pdf.setTextColor(100, 116, 139);
       pdf.text(
-        `Pagina ${currentPage} di ${totalPages}`,
+        `Pagina ${pdf.getCurrentPageInfo().pageNumber} di ${pdf.getNumberOfPages()}`,
         pageWidth - margin,
-        pdf.internal.pageSize.getHeight() - 6,
+        pageHeight - 5,
         { align: "right" }
       );
     },
+  });
+
+  y = getFinalY(pdf) + 5;
+
+  if (y > 250) {
+    pdf.addPage();
+    y = 10;
+  }
+
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(11);
+  pdf.setTextColor(15, 23, 42);
+  pdf.text("Fondo Cassa", margin, y);
+
+  y += 2;
+
+  autoTable(pdf, {
+    startY: y,
+    theme: "grid",
+    head: [["Voce", "Importo", "Voce", "Importo"]],
+    body: [
+      [
+        "Fondo Cassa Iniziale",
+        formatEuro(summary.fondo_cassa_iniziale),
+        "Fondo Cassa",
+        formatEuro(summary.fondo_cassa),
+      ],
+      [
+        "Differenza %",
+        formatPercent(
+          computeDeltaPercent(summary.fondo_cassa_iniziale, summary.fondo_cassa)
+        ),
+        "",
+        "",
+      ],
+    ],
+    styles: compactStyle(),
+    headStyles: blueHeadStyle(),
+    bodyStyles: {
+      textColor: [51, 65, 85],
+    },
+    columnStyles: {
+      0: { cellWidth: 50 },
+      1: { cellWidth: 40, halign: "right" },
+      2: { cellWidth: 50 },
+      3: { cellWidth: contentWidth - 140, halign: "right" },
+    },
+    margin: { left: margin, right: margin },
   });
 
   const fileName = `Riepilogo-Incassato-${safeFileName(summary.data)}-${safeFileName(
@@ -265,6 +322,34 @@ export function generatePvCashSummaryPdf({
   )}.pdf`;
 
   pdf.save(fileName);
+}
+
+function compactStyle() {
+  return {
+    font: "helvetica",
+    fontSize: 8,
+    cellPadding: { top: 1.2, right: 1.5, bottom: 1.2, left: 1.5 },
+    lineWidth: 0.1,
+    overflow: "linebreak" as const,
+  };
+}
+
+function darkHeadStyle() {
+  return {
+    fillColor: [15, 23, 42] as [number, number, number],
+    textColor: 255,
+    fontStyle: "bold" as const,
+    fontSize: 8,
+  };
+}
+
+function blueHeadStyle() {
+  return {
+    fillColor: [30, 64, 175] as [number, number, number],
+    textColor: 255,
+    fontStyle: "bold" as const,
+    fontSize: 8,
+  };
 }
 
 function getFinalY(pdf: jsPDF) {
@@ -312,7 +397,10 @@ function statusLabel(status: SummaryStatus) {
   return "Bozza";
 }
 
-function computeDeltaPercent(initial: number | null | undefined, current: number | null | undefined) {
+function computeDeltaPercent(
+  initial: number | null | undefined,
+  current: number | null | undefined
+) {
   const initialValue = n(initial);
   const currentValue = n(current);
 
