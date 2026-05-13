@@ -28,6 +28,9 @@ export type PvCashSummaryPdfSummary = {
   fondo_cassa: number | null;
   status?: string | null;
   is_closed: boolean;
+  pv_code?: string | null;
+  pv_name?: string | null;
+  pv_label?: string | null;
 };
 
 export type PvCashSummaryPdfSupplier = {
@@ -56,6 +59,7 @@ export function generatePvCashSummaryPdf({
 
   const status = normalizeStatus(summary);
   const generatedAt = new Date().toLocaleString("it-IT");
+  const pvLabel = getPvLabel(summary);
 
   const totaleEntrate =
     n(summary.incasso_totale) +
@@ -70,7 +74,7 @@ export function generatePvCashSummaryPdf({
     n(summary.pos) +
     n(summary.spese_extra);
 
-  let y = 10;
+  let y = 9;
 
   pdf.setFont("helvetica", "bold");
   pdf.setFontSize(16);
@@ -84,7 +88,14 @@ export function generatePvCashSummaryPdf({
     align: "right",
   });
 
-  y += 5;
+  y += 4;
+
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(9);
+  pdf.setTextColor(30, 64, 175);
+  pdf.text(`PV: ${pvLabel || "—"}`, margin, y);
+
+  y += 4;
 
   autoTable(pdf, {
     startY: y,
@@ -132,12 +143,12 @@ export function generatePvCashSummaryPdf({
       ["LIS+", formatEuro(summary.lis_plus)],
       ["Mooney", formatEuro(summary.mooney)],
       [
-  { content: "Totale Entrate", styles: { fontStyle: "bold" } },
-  {
-    content: formatEuro(totaleEntrate),
-    styles: { fontStyle: "bold", halign: "right" },
-  },
-],
+        { content: "Totale Entrate", styles: { fontStyle: "bold" } },
+        {
+          content: formatEuro(totaleEntrate),
+          styles: { fontStyle: "bold", halign: "right" },
+        },
+      ],
     ],
     styles: compactStyle(),
     headStyles: blueHeadStyle(),
@@ -164,12 +175,12 @@ export function generatePvCashSummaryPdf({
       ["POS", formatEuro(summary.pos)],
       ["Prelievo", formatEuro(summary.spese_extra)],
       [
-  { content: "Totale Uscite", styles: { fontStyle: "bold" } },
-  {
-    content: formatEuro(totaleUscite),
-    styles: { fontStyle: "bold", halign: "right" },
-  },
-],
+        { content: "Totale Uscite", styles: { fontStyle: "bold" } },
+        {
+          content: formatEuro(totaleUscite),
+          styles: { fontStyle: "bold", halign: "right" },
+        },
+      ],
       ["", ""],
     ],
     styles: compactStyle(),
@@ -318,7 +329,7 @@ export function generatePvCashSummaryPdf({
   });
 
   const fileName = `Riepilogo-Incassato-${safeFileName(summary.data)}-${safeFileName(
-    summary.operatore || "PV"
+    pvLabel || summary.operatore || "PV"
   )}.pdf`;
 
   pdf.save(fileName);
@@ -419,6 +430,20 @@ function formatPercent(value: number | null) {
     minimumFractionDigits: 0,
     maximumFractionDigits: 2,
   })}%`;
+}
+
+function getPvLabel(summary: PvCashSummaryPdfSummary) {
+  const explicitLabel = String(summary.pv_label ?? "").trim();
+  if (explicitLabel) return explicitLabel;
+
+  const code = String(summary.pv_code ?? "").trim();
+  const name = String(summary.pv_name ?? "").trim();
+
+  if (code && name) return `${code} — ${name}`;
+  if (name) return name;
+  if (code) return code;
+
+  return "";
 }
 
 function safeFileName(value: string) {

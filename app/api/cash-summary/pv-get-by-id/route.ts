@@ -56,6 +56,16 @@ async function requirePvIdForPuntoVendita(username: string): Promise<string> {
   throw new Error("Utente punto vendita senza PV assegnato (pv_id mancante).");
 }
 
+function buildPvLabel(pv: { code?: string | null; name?: string | null } | null) {
+  const code = String(pv?.code ?? "").trim();
+  const name = String(pv?.name ?? "").trim();
+
+  if (code && name) return `${code} — ${name}`;
+  if (name) return name;
+  if (code) return code;
+  return "";
+}
+
 export async function GET(req: Request) {
   try {
     const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
@@ -100,6 +110,14 @@ export async function GET(req: Request) {
       );
     }
 
+    const { data: pvRow } = await supabaseAdmin
+      .from("pvs")
+      .select("code, name")
+      .eq("id", pv_id)
+      .maybeSingle();
+
+    const pvLabel = buildPvLabel(pvRow ?? null);
+
     const { data: suppliers, error: suppliersErr } = await supabaseAdmin
       .from("pv_cash_supplier_payments")
       .select("*")
@@ -115,7 +133,12 @@ export async function GET(req: Request) {
 
     return NextResponse.json({
       ok: true,
-      summary,
+      summary: {
+        ...summary,
+        pv_code: String(pvRow?.code ?? "").trim(),
+        pv_name: String(pvRow?.name ?? "").trim(),
+        pv_label: pvLabel,
+      },
       suppliers: suppliers ?? [],
     });
   } catch (e: any) {
