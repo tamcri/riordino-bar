@@ -425,6 +425,16 @@ export default function AdminPage() {
 
               <div className="pt-3 mt-4 border-t">
                 <div className="text-xs font-bold uppercase tracking-wide text-gray-1000">
+                  Sara Moroni
+                </div>
+              </div>
+
+              <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/admin/bonifici">
+               Ricevute bonifici
+              </Link>
+
+              <div className="pt-3 mt-4 border-t">
+                <div className="text-xs font-bold uppercase tracking-wide text-gray-1000">
                   Controllo periodico Casse
                 </div>
               </div>
