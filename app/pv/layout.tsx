@@ -73,6 +73,13 @@ export default function PvLayout({ children }: { children: React.ReactNode }) {
           >
             Riepilogo Incassato
           </Link>
+
+          <Link
+            href="/pv/turni"
+            className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Turni
+          </Link>
         </div>
       </nav>
 

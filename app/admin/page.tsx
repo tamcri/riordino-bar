@@ -477,6 +477,10 @@ export default function AdminPage() {
                 Ordini PV
               </Link>
 
+              <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/admin/turni">
+                Visualizza turni
+              </Link>
+
               <div className="pt-3 border-t mt-2">
                 <p className="text-xs text-gray-500">
                   Tip: nel menu dell’area operativa aggiungeremo anche il tasto “Admin” per tornare qui.
