@@ -405,6 +405,16 @@ export default function AdminPage() {
 
               <div className="pt-3 mt-4 border-t">
                 <div className="text-xs font-bold uppercase tracking-wide text-gray-1000">
+                  Turni Dipendenti
+                </div>
+              </div>
+
+              <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/admin/turni">
+                Visualizza turni
+              </Link>
+
+              <div className="pt-3 mt-4 border-t">
+                <div className="text-xs font-bold uppercase tracking-wide text-gray-1000">
                   Elisabetta Di Trocchio
                 </div>
               </div>
@@ -475,10 +485,6 @@ export default function AdminPage() {
 
               <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/admin/ordini-pv">
                 Ordini PV
-              </Link>
-
-              <Link className="rounded-xl border p-3 hover:bg-gray-50" href="/admin/turni">
-                Visualizza turni
               </Link>
 
               <div className="pt-3 border-t mt-2">
