@@ -46,11 +46,7 @@ export function generatePvCashSummaryPdf({
   summary: PvCashSummaryPdfSummary;
   suppliers: PvCashSummaryPdfSupplier[];
 }) {
-  const pdf = new jsPDF({
-    orientation: "p",
-    unit: "mm",
-    format: "a4",
-  });
+  const pdf = new jsPDF({ orientation: "p", unit: "mm", format: "a4" });
 
   const pageWidth = pdf.internal.pageSize.getWidth();
   const pageHeight = pdf.internal.pageSize.getHeight();
@@ -60,6 +56,8 @@ export function generatePvCashSummaryPdf({
   const status = normalizeStatus(summary);
   const generatedAt = new Date().toLocaleString("it-IT");
   const pvLabel = getPvLabel(summary);
+
+  const prelievo = n(summary.spese_extra);
 
   const totaleEntrate =
     n(summary.incasso_totale) +
@@ -71,8 +69,10 @@ export function generatePvCashSummaryPdf({
   const totaleUscite =
     n(summary.pagamento_fornitori) +
     n(summary.gv_pagati) +
-    n(summary.pos) +
-    n(summary.spese_extra);
+    n(summary.pos);
+
+  const versamentoPrimaPrelievo = n(summary.versamento) + prelievo;
+  const totaleVersamento = n(summary.versamento);
 
   let y = 9;
 
@@ -84,9 +84,7 @@ export function generatePvCashSummaryPdf({
   pdf.setFont("helvetica", "normal");
   pdf.setFontSize(8);
   pdf.setTextColor(71, 85, 105);
-  pdf.text(`Generato il: ${generatedAt}`, pageWidth - margin, y, {
-    align: "right",
-  });
+  pdf.text(`Generato il: ${generatedAt}`, pageWidth - margin, y, { align: "right" });
 
   y += 4;
 
@@ -107,9 +105,7 @@ export function generatePvCashSummaryPdf({
     ],
     styles: compactStyle(),
     headStyles: darkHeadStyle(),
-    bodyStyles: {
-      textColor: [51, 65, 85],
-    },
+    bodyStyles: { textColor: [51, 65, 85] },
     columnStyles: {
       0: { fontStyle: "bold", cellWidth: 24 },
       1: { cellWidth: 42 },
@@ -144,25 +140,17 @@ export function generatePvCashSummaryPdf({
       ["Mooney", formatEuro(summary.mooney)],
       [
         { content: "Totale Entrate", styles: { fontStyle: "bold" } },
-        {
-          content: formatEuro(totaleEntrate),
-          styles: { fontStyle: "bold", halign: "right" },
-        },
+        { content: formatEuro(totaleEntrate), styles: { fontStyle: "bold", halign: "right" } },
       ],
     ],
     styles: compactStyle(),
     headStyles: blueHeadStyle(),
-    bodyStyles: {
-      textColor: [51, 65, 85],
-    },
+    bodyStyles: { textColor: [51, 65, 85] },
     columnStyles: {
       0: { cellWidth: 48 },
       1: { cellWidth: halfWidth - 48, halign: "right" },
     },
-    margin: {
-      left: margin,
-      right: pageWidth - margin - halfWidth,
-    },
+    margin: { left: margin, right: pageWidth - margin - halfWidth },
   });
 
   autoTable(pdf, {
@@ -173,29 +161,21 @@ export function generatePvCashSummaryPdf({
       ["Pagamento Fornitori", formatEuro(summary.pagamento_fornitori)],
       ["G&V Pagati", formatEuro(summary.gv_pagati)],
       ["POS", formatEuro(summary.pos)],
-      ["Prelievo", formatEuro(summary.spese_extra)],
       [
         { content: "Totale Uscite", styles: { fontStyle: "bold" } },
-        {
-          content: formatEuro(totaleUscite),
-          styles: { fontStyle: "bold", halign: "right" },
-        },
+        { content: formatEuro(totaleUscite), styles: { fontStyle: "bold", halign: "right" } },
       ],
+      ["", ""],
       ["", ""],
     ],
     styles: compactStyle(),
     headStyles: blueHeadStyle(),
-    bodyStyles: {
-      textColor: [51, 65, 85],
-    },
+    bodyStyles: { textColor: [51, 65, 85] },
     columnStyles: {
       0: { cellWidth: 48 },
       1: { cellWidth: halfWidth - 48, halign: "right" },
     },
-    margin: {
-      left: margin + halfWidth + halfGap,
-      right: margin,
-    },
+    margin: { left: margin + halfWidth + halfGap, right: margin },
   });
 
   y = getFinalY(pdf) + 5;
@@ -203,7 +183,11 @@ export function generatePvCashSummaryPdf({
   autoTable(pdf, {
     startY: y,
     theme: "grid",
-    body: [["Versamento", formatEuro(summary.versamento)]],
+    body: [
+      ["Versamento", formatEuro(versamentoPrimaPrelievo)],
+      ["Prelievo", formatEuro(prelievo)],
+      ["Tot. da Versare", formatEuro(totaleVersamento)],
+    ],
     styles: {
       font: "helvetica",
       fontSize: 10,
@@ -212,7 +196,6 @@ export function generatePvCashSummaryPdf({
     },
     bodyStyles: {
       textColor: [15, 23, 42],
-      fontStyle: "bold",
       fillColor: [248, 250, 252],
     },
     columnStyles: {
@@ -258,9 +241,7 @@ export function generatePvCashSummaryPdf({
       fontStyle: "bold",
       fontSize: 7,
     },
-    bodyStyles: {
-      textColor: [51, 65, 85],
-    },
+    bodyStyles: { textColor: [51, 65, 85] },
     columnStyles: {
       0: { cellWidth: 28 },
       1: { cellWidth: contentWidth - 68 },
@@ -307,18 +288,14 @@ export function generatePvCashSummaryPdf({
       ],
       [
         "Differenza %",
-        formatPercent(
-          computeDeltaPercent(summary.fondo_cassa_iniziale, summary.fondo_cassa)
-        ),
+        formatPercent(computeDeltaPercent(summary.fondo_cassa_iniziale, summary.fondo_cassa)),
         "",
         "",
       ],
     ],
     styles: compactStyle(),
     headStyles: blueHeadStyle(),
-    bodyStyles: {
-      textColor: [51, 65, 85],
-    },
+    bodyStyles: { textColor: [51, 65, 85] },
     columnStyles: {
       0: { cellWidth: 50 },
       1: { cellWidth: 40, halign: "right" },
@@ -381,17 +358,13 @@ function formatEuro(value: number | null | undefined) {
 
 function formatDate(value: string | null | undefined) {
   if (!value) return "—";
-
   const [yyyy, mm, dd] = String(value).split("-");
   if (yyyy && mm && dd) return `${dd}/${mm}/${yyyy}`;
-
   return String(value);
 }
 
 function normalizeStatus(summary: PvCashSummaryPdfSummary): SummaryStatus {
-  if (summary.is_closed || Number(summary.tot_versato ?? 0) > 0) {
-    return "chiuso";
-  }
+  if (summary.is_closed || Number(summary.tot_versato ?? 0) > 0) return "chiuso";
 
   const raw = String(summary.status ?? "").trim().toLowerCase();
 
