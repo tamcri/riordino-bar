@@ -373,7 +373,7 @@ export default function TurniPvClient() {
           }
 
           if (minutesBetween(cell.start_time, cell.end_time) <= 0) {
-            throw new Error(`${employee.name}, ${formatDateIT(date)}: ora fine deve essere successiva a ora inizio.`);
+            throw new Error(`${employee.name}, ${formatDateIT(date)}: ora fine deve essere diversa da ora inizio.`);
           }
         }
 
@@ -383,7 +383,7 @@ export default function TurniPvClient() {
           }
 
           if (minutesBetween(cell.second_start_time, cell.second_end_time) <= 0) {
-            throw new Error(`${employee.name}, ${formatDateIT(date)}: fine pomeriggio deve essere successiva a inizio pomeriggio.`);
+            throw new Error(`${employee.name}, ${formatDateIT(date)}: fine pomeriggio deve essere diversa da inizio pomeriggio.`);
           }
 
           if (cell.end_time && cell.second_start_time && minutesBetween(cell.end_time, cell.second_start_time) <= 0) {
@@ -491,32 +491,27 @@ export default function TurniPvClient() {
             </div>
 
             <div>
-  <label className="block text-sm font-medium mb-2 invisible">
-    Navigazione
-  </label>
+              <label className="block text-sm font-medium mb-2 invisible">Navigazione</label>
 
-  <div className="flex gap-2">
-    <button
-      type="button"
-      className="rounded-xl border bg-white px-4 py-3 hover:bg-gray-50"
-      onClick={() => setWeekStart(addDaysISO(weekStart, -7))}
-    >
-      ← Prec.
-    </button>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  className="rounded-xl border bg-white px-4 py-3 hover:bg-gray-50"
+                  onClick={() => setWeekStart(addDaysISO(weekStart, -7))}
+                >
+                  ← Prec.
+                </button>
+                <button
+                  type="button"
+                  className="rounded-xl border bg-white px-4 py-3 hover:bg-gray-50"
+                  onClick={() => setWeekStart(addDaysISO(weekStart, 7))}
+                >
+                  Succ. →
+                </button>
+              </div>
 
-    <button
-      type="button"
-      className="rounded-xl border bg-white px-4 py-3 hover:bg-gray-50"
-      onClick={() => setWeekStart(addDaysISO(weekStart, 7))}
-    >
-      Succ. →
-    </button>
-  </div>
-
-  <p className="text-xs text-gray-500 mt-1 invisible">
-    La data viene portata al lunedì della settimana.
-  </p>
-</div>
+              <p className="text-xs text-gray-500 mt-1 invisible">La data viene portata al lunedì della settimana.</p>
+            </div>
           </div>
         </div>
       </section>

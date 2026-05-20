@@ -261,7 +261,7 @@ export async function POST(req: Request) {
 
         if (minutesBetween(start_time, end_time) <= 0) {
           return NextResponse.json(
-            { ok: false, error: "Ora fine deve essere successiva a ora inizio" },
+            { ok: false, error: "Ora fine deve essere diversa da ora inizio" },
             { status: 400 }
           );
         }
@@ -280,7 +280,7 @@ export async function POST(req: Request) {
 
         if (minutesBetween(second_start_time, second_end_time) <= 0) {
           return NextResponse.json(
-            { ok: false, error: "Fine pomeriggio deve essere successiva a inizio pomeriggio" },
+            { ok: false, error: "Fine pomeriggio deve essere diversa da inizio pomeriggio" },
             { status: 400 }
           );
         }

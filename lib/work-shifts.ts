@@ -138,8 +138,13 @@ export function timeToMinutes(value: string | null | undefined) {
 export function minutesBetween(startTime: string | null | undefined, endTime: string | null | undefined) {
   const start = timeToMinutes(startTime);
   const end = timeToMinutes(endTime);
-  if (start === null || end === null || end <= start) return 0;
-  return end - start;
+  if (start === null || end === null || end === start) return 0;
+  if (end > start) return end - start;
+
+  // Turno notturno: se l'ora di fine e' minore dell'ora di inizio,
+  // il turno viene considerato concluso il giorno successivo.
+  // Esempio: 21:00 - 05:00 = 8 ore, conteggiate nel giorno di inizio.
+  return 1440 - start + end;
 }
 
 export function hoursBetween(startTime: string | null | undefined, endTime: string | null | undefined) {
