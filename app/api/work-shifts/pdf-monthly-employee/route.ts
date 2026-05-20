@@ -7,12 +7,13 @@ import {
   asRecord,
   formatDateIT,
   formatHours,
+  formatShiftTimeRange,
   getErrorMessage,
-  hoursBetween,
   isDateOnly,
   isUuid,
   normalizeShiftStatus,
   normalizeTime,
+  shiftHoursTotal,
   shiftStatusLabel,
   toDateOnlyUTC,
   type ShiftStatus,
@@ -32,6 +33,8 @@ type ShiftDbRow = {
   shift_date?: unknown;
   start_time?: unknown;
   end_time?: unknown;
+  second_start_time?: unknown;
+  second_end_time?: unknown;
   status?: unknown;
   note?: unknown;
 };
@@ -42,6 +45,9 @@ type MonthlyRow = {
   status: ShiftStatus | null;
   start_time: string | null;
   end_time: string | null;
+  second_start_time: string | null;
+  second_end_time: string | null;
+  shift_label: string;
   note: string;
   hours: number;
 };
@@ -112,20 +118,38 @@ function normalizeShift(row: ShiftDbRow) {
   const status = normalizeShiftStatus(row?.status) ?? "rest";
   const startTime = normalizeTime(row?.start_time ?? "") ?? null;
   const endTime = normalizeTime(row?.end_time ?? "") ?? null;
+  const secondStartTime = normalizeTime(row?.second_start_time ?? "") ?? null;
+  const secondEndTime = normalizeTime(row?.second_end_time ?? "") ?? null;
+  const hours = shiftHoursTotal({
+    status,
+    start_time: startTime,
+    end_time: endTime,
+    second_start_time: secondStartTime,
+    second_end_time: secondEndTime,
+  });
+  const shiftLabel = formatShiftTimeRange({
+    status,
+    start_time: startTime,
+    end_time: endTime,
+    second_start_time: secondStartTime,
+    second_end_time: secondEndTime,
+  });
 
   return {
     shift_date: String(row?.shift_date ?? ""),
     status,
     start_time: startTime,
     end_time: endTime,
+    second_start_time: secondStartTime,
+    second_end_time: secondEndTime,
+    shift_label: shiftLabel,
     note: row?.note ? String(row.note) : "",
-    hours: status === "rest" ? 0 : hoursBetween(startTime, endTime),
+    hours,
   };
 }
 
 function shiftTime(row: MonthlyRow) {
-  if (!row.status || row.status === "rest") return "-";
-  return `${row.start_time || "--:--"} - ${row.end_time || "--:--"}`;
+  return row.shift_label || "-";
 }
 
 export async function GET(req: Request) {
@@ -175,7 +199,7 @@ export async function GET(req: Request) {
 
     const { data: shiftsData, error: shiftsError } = await supabaseAdmin
       .from("work_shifts")
-      .select("shift_date, start_time, end_time, status, note")
+      .select("shift_date, start_time, end_time, second_start_time, second_end_time, status, note")
       .eq("employee_id", employeeId)
       .eq("pv_id", employee.pv_id)
       .gte("shift_date", monthStart)
@@ -187,7 +211,7 @@ export async function GET(req: Request) {
     }
 
     const shiftsByDate = new Map(
-      (shiftsData ?? []).map((row) => {
+      ((shiftsData ?? []) as unknown[]).map((row) => {
         const shift = normalizeShift(row as unknown as ShiftDbRow);
         return [shift.shift_date, shift] as const;
       })
@@ -202,14 +226,19 @@ export async function GET(req: Request) {
         status: shift?.status ?? null,
         start_time: shift?.start_time ?? null,
         end_time: shift?.end_time ?? null,
+        second_start_time: shift?.second_start_time ?? null,
+        second_end_time: shift?.second_end_time ?? null,
+        shift_label: shift?.shift_label ?? "—",
         note: shift?.note ?? "",
         hours: shift?.hours ?? 0,
       };
     });
 
     const totalHours = rows.reduce((sum, row) => sum + row.hours, 0);
-    const totalWorkDays = rows.filter((row) => row.status === "work").length;
+    const totalWorkDays = rows.filter((row) => row.status === "work" || row.status === "split" || row.status === "change").length;
+    const totalSplitDays = rows.filter((row) => row.status === "split").length;
     const totalRestDays = rows.filter((row) => row.status === "rest").length;
+    const totalVacationDays = rows.filter((row) => row.status === "vacation").length;
     const totalChangeDays = rows.filter((row) => row.status === "change").length;
     const pvLabel = [employee.pv_code, employee.pv_name].filter(Boolean).join(" - ") || "PV non indicato";
 
@@ -219,7 +248,7 @@ export async function GET(req: Request) {
         `Mese: ${formatMonthIT(month)}`,
         `Punto vendita: ${pvLabel}`,
         `Dipendente: ${employee.name}`,
-        `Totale ore: ${formatHours(totalHours)} h - Lavorati: ${totalWorkDays} - Riposi: ${totalRestDays} - Cambi: ${totalChangeDays}`,
+        `Totale ore: ${formatHours(totalHours)} h - Lavorati: ${totalWorkDays} - Spezzati: ${totalSplitDays} - Riposi: ${totalRestDays} - Ferie: ${totalVacationDays} - Cambi: ${totalChangeDays}`,
       ],
     });
 

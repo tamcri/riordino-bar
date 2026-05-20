@@ -8,8 +8,11 @@ import {
   formatHours,
   getMondayISO,
   getWeekDates,
-  hoursBetween,
+  isNoTimeStatus,
   minutesBetween,
+  requiresSecondShift,
+  shiftHoursTotal,
+  SHIFT_STATUSES,
   normalizeShiftStatus,
   normalizeTime,
   shiftStatusLabel,
@@ -31,6 +34,8 @@ type ShiftApiRow = {
   status: ShiftStatus;
   start_time: string | null;
   end_time: string | null;
+  second_start_time: string | null;
+  second_end_time: string | null;
   note: string | null;
 };
 
@@ -40,6 +45,8 @@ type ShiftCell = {
   status: ShiftStatus;
   start_time: string;
   end_time: string;
+  second_start_time: string;
+  second_end_time: string;
   note: string;
 };
 
@@ -80,6 +87,8 @@ function emptyCell(employeeId: string, date: string): ShiftCell {
     status: "rest",
     start_time: "",
     end_time: "",
+    second_start_time: "",
+    second_end_time: "",
     note: "",
   };
 }
@@ -98,12 +107,15 @@ function buildCells(employees: Employee[], shifts: ShiftApiRow[], weekDates: str
     if (!next[key]) continue;
 
     const status = normalizeShiftStatus(row.status) ?? "rest";
+    const noTime = isNoTimeStatus(status);
     next[key] = {
       employee_id: row.employee_id,
       shift_date: row.shift_date,
       status,
-      start_time: status === "rest" ? "" : normalizeTime(row.start_time ?? "") ?? "",
-      end_time: status === "rest" ? "" : normalizeTime(row.end_time ?? "") ?? "",
+      start_time: noTime ? "" : normalizeTime(row.start_time ?? "") ?? "",
+      end_time: noTime ? "" : normalizeTime(row.end_time ?? "") ?? "",
+      second_start_time: status === "split" ? normalizeTime(row.second_start_time ?? "") ?? "" : "",
+      second_end_time: status === "split" ? normalizeTime(row.second_end_time ?? "") ?? "" : "",
       note: String(row.note ?? ""),
     };
   }
@@ -115,6 +127,10 @@ function statusCellClass(status: ShiftStatus) {
   switch (status) {
     case "work":
       return "border-emerald-200 bg-emerald-50";
+    case "split":
+      return "border-sky-200 bg-sky-50";
+    case "vacation":
+      return "border-violet-200 bg-violet-50";
     case "change":
       return "border-amber-200 bg-amber-50";
     case "rest":
@@ -166,7 +182,7 @@ export default function TurniPvClient() {
       let total = 0;
       for (const date of weekDates) {
         const cell = cells[cellKey(employee.id, date)] ?? emptyCell(employee.id, date);
-        if (cell.status !== "rest") total += hoursBetween(cell.start_time, cell.end_time);
+        total += shiftHoursTotal(cell);
       }
       totals[employee.id] = total;
     }
@@ -237,9 +253,16 @@ export default function TurniPvClient() {
       const current = prev[key] ?? emptyCell(employeeId, date);
       const next: ShiftCell = { ...current, ...patch };
 
-      if (patch.status === "rest") {
+      if (patch.status && isNoTimeStatus(patch.status)) {
         next.start_time = "";
         next.end_time = "";
+        next.second_start_time = "";
+        next.second_end_time = "";
+      }
+
+      if (patch.status && patch.status !== "split") {
+        next.second_start_time = "";
+        next.second_end_time = "";
       }
 
       return { ...prev, [key]: next };
@@ -335,6 +358,8 @@ export default function TurniPvClient() {
       status: ShiftStatus;
       start_time: string | null;
       end_time: string | null;
+      second_start_time: string | null;
+      second_end_time: string | null;
       note: string | null;
     }> = [];
 
@@ -342,7 +367,7 @@ export default function TurniPvClient() {
       for (const date of weekDates) {
         const cell = cells[cellKey(employee.id, date)] ?? emptyCell(employee.id, date);
 
-        if (cell.status !== "rest") {
+        if (!isNoTimeStatus(cell.status)) {
           if (!cell.start_time || !cell.end_time) {
             throw new Error(`${employee.name}, ${formatDateIT(date)}: inserisci ora inizio e ora fine.`);
           }
@@ -352,12 +377,28 @@ export default function TurniPvClient() {
           }
         }
 
+        if (requiresSecondShift(cell.status)) {
+          if (!cell.second_start_time || !cell.second_end_time) {
+            throw new Error(`${employee.name}, ${formatDateIT(date)}: per lo spezzato inserisci anche inizio e fine pomeriggio.`);
+          }
+
+          if (minutesBetween(cell.second_start_time, cell.second_end_time) <= 0) {
+            throw new Error(`${employee.name}, ${formatDateIT(date)}: fine pomeriggio deve essere successiva a inizio pomeriggio.`);
+          }
+
+          if (cell.end_time && cell.second_start_time && minutesBetween(cell.end_time, cell.second_start_time) <= 0) {
+            throw new Error(`${employee.name}, ${formatDateIT(date)}: il turno pomeriggio deve iniziare dopo la fine del turno mattina.`);
+          }
+        }
+
         shifts.push({
           employee_id: employee.id,
           shift_date: date,
           status: cell.status,
-          start_time: cell.status === "rest" ? null : cell.start_time,
-          end_time: cell.status === "rest" ? null : cell.end_time,
+          start_time: isNoTimeStatus(cell.status) ? null : cell.start_time,
+          end_time: isNoTimeStatus(cell.status) ? null : cell.end_time,
+          second_start_time: cell.status === "split" ? cell.second_start_time : null,
+          second_end_time: cell.status === "split" ? cell.second_end_time : null,
           note: cell.note.trim() || null,
         });
       }
@@ -449,22 +490,33 @@ export default function TurniPvClient() {
               <p className="text-xs text-gray-500 mt-1">La data viene portata al lunedì della settimana.</p>
             </div>
 
-            <div className="flex gap-2">
-              <button
-                type="button"
-                className="rounded-xl border bg-white px-4 py-3 hover:bg-gray-50"
-                onClick={() => setWeekStart(addDaysISO(weekStart, -7))}
-              >
-                ← Prec.
-              </button>
-              <button
-                type="button"
-                className="rounded-xl border bg-white px-4 py-3 hover:bg-gray-50"
-                onClick={() => setWeekStart(addDaysISO(weekStart, 7))}
-              >
-                Succ. →
-              </button>
-            </div>
+            <div>
+  <label className="block text-sm font-medium mb-2 invisible">
+    Navigazione
+  </label>
+
+  <div className="flex gap-2">
+    <button
+      type="button"
+      className="rounded-xl border bg-white px-4 py-3 hover:bg-gray-50"
+      onClick={() => setWeekStart(addDaysISO(weekStart, -7))}
+    >
+      ← Prec.
+    </button>
+
+    <button
+      type="button"
+      className="rounded-xl border bg-white px-4 py-3 hover:bg-gray-50"
+      onClick={() => setWeekStart(addDaysISO(weekStart, 7))}
+    >
+      Succ. →
+    </button>
+  </div>
+
+  <p className="text-xs text-gray-500 mt-1 invisible">
+    La data viene portata al lunedì della settimana.
+  </p>
+</div>
           </div>
         </div>
       </section>
@@ -611,27 +663,76 @@ export default function TurniPvClient() {
                                 })
                               }
                             >
-                              <option value="work">{shiftStatusLabel("work")}</option>
-                              <option value="rest">{shiftStatusLabel("rest")}</option>
-                              <option value="change">{shiftStatusLabel("change")}</option>
+                              {SHIFT_STATUSES.map((status) => (
+                                <option key={status} value={status}>
+                                  {shiftStatusLabel(status)}
+                                </option>
+                              ))}
                             </select>
 
-                            {cell.status !== "rest" && (
-                              <div className="mt-2 grid grid-cols-2 gap-2">
-                                <input
-                                  type="time"
-                                  className="w-full rounded-lg border bg-white p-2 text-xs"
-                                  value={cell.start_time}
-                                  onChange={(e) => updateCell(employee.id, date, { start_time: e.target.value })}
-                                  aria-label="Ora inizio"
-                                />
-                                <input
-                                  type="time"
-                                  className="w-full rounded-lg border bg-white p-2 text-xs"
-                                  value={cell.end_time}
-                                  onChange={(e) => updateCell(employee.id, date, { end_time: e.target.value })}
-                                  aria-label="Ora fine"
-                                />
+                            {!isNoTimeStatus(cell.status) && (
+                              <div className="mt-2 space-y-2">
+                                <div className="grid grid-cols-2 gap-2">
+                                  <div>
+                                    <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                                      {cell.status === "split" ? "AM inizio" : "Inizio"}
+                                    </div>
+                                    <input
+                                      type="time"
+                                      className="w-full rounded-lg border bg-white p-2 text-xs"
+                                      value={cell.start_time}
+                                      onChange={(e) => updateCell(employee.id, date, { start_time: e.target.value })}
+                                      aria-label={cell.status === "split" ? "Mattina inizio" : "Ora inizio"}
+                                    />
+                                  </div>
+
+                                  <div>
+                                    <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                                      {cell.status === "split" ? "AM fine" : "Fine"}
+                                    </div>
+                                    <input
+                                      type="time"
+                                      className="w-full rounded-lg border bg-white p-2 text-xs"
+                                      value={cell.end_time}
+                                      onChange={(e) => updateCell(employee.id, date, { end_time: e.target.value })}
+                                      aria-label={cell.status === "split" ? "Mattina fine" : "Ora fine"}
+                                    />
+                                  </div>
+                                </div>
+
+                                {requiresSecondShift(cell.status) && (
+                                  <div className="grid grid-cols-2 gap-2">
+                                    <div>
+                                      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                                        PM inizio
+                                      </div>
+                                      <input
+                                        type="time"
+                                        className="w-full rounded-lg border bg-white p-2 text-xs"
+                                        value={cell.second_start_time}
+                                        onChange={(e) => updateCell(employee.id, date, { second_start_time: e.target.value })}
+                                        aria-label="Pomeriggio inizio"
+                                      />
+                                    </div>
+
+                                    <div>
+                                      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                                        PM fine
+                                      </div>
+                                      <input
+                                        type="time"
+                                        className="w-full rounded-lg border bg-white p-2 text-xs"
+                                        value={cell.second_end_time}
+                                        onChange={(e) => updateCell(employee.id, date, { second_end_time: e.target.value })}
+                                        aria-label="Pomeriggio fine"
+                                      />
+                                    </div>
+                                  </div>
+                                )}
+
+                                <div className="text-[11px] font-semibold text-gray-600">
+                                  Ore: {formatHours(shiftHoursTotal(cell))} h
+                                </div>
                               </div>
                             )}
 
@@ -661,8 +762,10 @@ export default function TurniPvClient() {
       <section className="rounded-2xl border bg-white p-4">
         <h2 className="text-lg font-semibold">Legenda</h2>
         <div className="mt-3 flex flex-wrap gap-3 text-sm">
-          <span className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2">Turno: conta nelle ore</span>
+          <span className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2">Turno: orario continuo, conta nelle ore</span>
+          <span className="rounded-xl border border-sky-200 bg-sky-50 px-3 py-2">Spezzato: mattina + pomeriggio, conta entrambe le fasce</span>
           <span className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">Riposo: 0 ore</span>
+          <span className="rounded-xl border border-violet-200 bg-violet-50 px-3 py-2">Ferie: 0 ore</span>
           <span className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2">Cambio turno: conta nelle ore e può avere nota</span>
         </div>
       </section>

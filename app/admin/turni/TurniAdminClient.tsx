@@ -7,11 +7,12 @@ import {
   currentWeekMondayISO,
   formatDateIT,
   formatHours,
+  formatShiftTimeRange,
   getMondayISO,
   getWeekDates,
-  hoursBetween,
   normalizeShiftStatus,
   normalizeTime,
+  shiftHoursTotal,
   shiftStatusLabel,
   type ShiftStatus,
   WEEK_DAYS,
@@ -61,6 +62,8 @@ type ShiftRow = {
   status: ShiftStatus;
   start_time: string | null;
   end_time: string | null;
+  second_start_time: string | null;
+  second_end_time: string | null;
   note: string | null;
 };
 
@@ -72,6 +75,9 @@ type MonthlyRow = {
   status_label: string;
   start_time: string | null;
   end_time: string | null;
+  second_start_time: string | null;
+  second_end_time: string | null;
+  shift_label: string;
   note: string | null;
   hours: number;
 };
@@ -95,7 +101,9 @@ type MonthlyResponse = ApiResponseBase & {
     total_hours?: number;
     total_hours_label?: string;
     total_work_days?: number;
+    total_split_days?: number;
     total_rest_days?: number;
+    total_vacation_days?: number;
     total_change_days?: number;
   };
 };
@@ -120,6 +128,10 @@ function statusBadgeClass(status: ShiftStatus) {
   switch (status) {
     case "work":
       return "border-emerald-200 bg-emerald-50 text-emerald-800";
+    case "split":
+      return "border-sky-200 bg-sky-50 text-sky-800";
+    case "vacation":
+      return "border-violet-200 bg-violet-50 text-violet-800";
     case "change":
       return "border-amber-200 bg-amber-50 text-amber-800";
     case "rest":
@@ -211,9 +223,7 @@ export default function TurniAdminClient() {
       };
 
       current.shiftsByDate[row.shift_date] = row;
-      if (row.status !== "rest") {
-        current.totalHours += hoursBetween(row.start_time, row.end_time);
-      }
+      current.totalHours += shiftHoursTotal(row);
 
       map.set(key, current);
     }
@@ -234,6 +244,14 @@ export default function TurniAdminClient() {
     () => rows.filter((row) => row.status === "rest").length,
     [rows]
   );
+  const totalVacationDays = useMemo(
+    () => rows.filter((row) => row.status === "vacation").length,
+    [rows]
+  );
+  const totalSplits = useMemo(
+    () => rows.filter((row) => row.status === "split").length,
+    [rows]
+  );
   const totalChanges = useMemo(
     () => rows.filter((row) => row.status === "change").length,
     [rows]
@@ -246,7 +264,9 @@ export default function TurniAdminClient() {
 
   const monthlyTotalHours = Number(monthlyTotals?.total_hours ?? 0);
   const monthlyWorkDays = Number(monthlyTotals?.total_work_days ?? 0);
+  const monthlySplitDays = Number(monthlyTotals?.total_split_days ?? 0);
   const monthlyRestDays = Number(monthlyTotals?.total_rest_days ?? 0);
+  const monthlyVacationDays = Number(monthlyTotals?.total_vacation_days ?? 0);
   const monthlyChangeDays = Number(monthlyTotals?.total_change_days ?? 0);
 
   async function loadPvs() {
@@ -277,6 +297,8 @@ export default function TurniAdminClient() {
           status: normalizeShiftStatus(row.status) ?? "rest",
           start_time: normalizeTime(row.start_time ?? ""),
           end_time: normalizeTime(row.end_time ?? ""),
+          second_start_time: normalizeTime(row.second_start_time ?? ""),
+          second_end_time: normalizeTime(row.second_end_time ?? ""),
           note: row.note ?? "",
         }))
       );
@@ -472,7 +494,7 @@ export default function TurniAdminClient() {
 
         {viewMode === "weekly" ? (
           <>
-            <section className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <section className="grid grid-cols-1 md:grid-cols-6 gap-4">
               <div className="rounded-2xl border bg-white p-4">
                 <div className="text-sm text-gray-500">Dipendenti visualizzati</div>
                 <div className="text-2xl font-semibold mt-1">{totalEmployees}</div>
@@ -484,8 +506,18 @@ export default function TurniAdminClient() {
               </div>
 
               <div className="rounded-2xl border bg-white p-4">
-                <div className="text-sm text-gray-500">Giorni di riposo</div>
+                <div className="text-sm text-gray-500">Spezzati</div>
+                <div className="text-2xl font-semibold mt-1">{totalSplits}</div>
+              </div>
+
+              <div className="rounded-2xl border bg-white p-4">
+                <div className="text-sm text-gray-500">Riposi</div>
                 <div className="text-2xl font-semibold mt-1">{totalRestDays}</div>
+              </div>
+
+              <div className="rounded-2xl border bg-white p-4">
+                <div className="text-sm text-gray-500">Ferie</div>
+                <div className="text-2xl font-semibold mt-1">{totalVacationDays}</div>
               </div>
 
               <div className="rounded-2xl border bg-white p-4">
@@ -774,16 +806,15 @@ export default function TurniAdminClient() {
                           }
 
                           const status = normalizeShiftStatus(shift.status) ?? "rest";
-                          const startTime = normalizeTime(shift.start_time ?? "");
-                          const endTime = normalizeTime(shift.end_time ?? "");
+                          const shiftTimeLabel = formatShiftTimeRange(shift);
 
                           return (
                             <td key={date} className="border-b px-3 py-3">
                               <div className={`rounded-xl border px-3 py-2 ${statusBadgeClass(status)}`}>
                                 <div className="text-xs font-semibold">{shiftStatusLabel(status)}</div>
-                                {status !== "rest" && (
-                                  <div className="mt-1 text-sm">
-                                    {startTime || "--:--"} - {endTime || "--:--"}
+                                {shiftTimeLabel !== "—" && (
+                                  <div className="mt-1 whitespace-pre-line text-sm">
+                                    {shiftTimeLabel.replace(" / ", "\n")}
                                   </div>
                                 )}
                                 {shift.note && (
@@ -850,8 +881,7 @@ export default function TurniAdminClient() {
                   <tbody>
                     {monthlyRows.map((row) => {
                       const status = normalizeShiftStatus(row.status ?? "");
-                      const startTime = normalizeTime(row.start_time ?? "");
-                      const endTime = normalizeTime(row.end_time ?? "");
+                      const shiftTimeLabel = row.shift_label || formatShiftTimeRange(row);
 
                       return (
                         <tr key={row.shift_date} className="align-top hover:bg-gray-50">
@@ -862,8 +892,8 @@ export default function TurniAdminClient() {
                               {status ? shiftStatusLabel(status) : "Nessun turno"}
                             </span>
                           </td>
-                          <td className="border-b px-3 py-3">
-                            {status && status !== "rest" ? `${startTime || "--:--"} - ${endTime || "--:--"}` : "—"}
+                          <td className="border-b px-3 py-3 whitespace-pre-line">
+                            {shiftTimeLabel !== "—" ? shiftTimeLabel.replace(" / ", "\n") : "—"}
                           </td>
                           <td className="border-b px-3 py-3 text-right font-semibold">{formatHours(row.hours)} h</td>
                           <td className="border-b px-3 py-3 text-gray-700">{row.note || "—"}</td>
@@ -879,7 +909,7 @@ export default function TurniAdminClient() {
                       </td>
                       <td className="px-3 py-3 text-right font-semibold">{formatHours(monthlyTotalHours)} h</td>
                       <td className="px-3 py-3 text-sm text-gray-600">
-                        Lavorati: {monthlyWorkDays} · Riposi: {monthlyRestDays} · Cambi: {monthlyChangeDays}
+                        Lavorati: {monthlyWorkDays} · Spezzati: {monthlySplitDays} · Riposi: {monthlyRestDays} · Ferie: {monthlyVacationDays} · Cambi: {monthlyChangeDays}
                       </td>
                     </tr>
                   </tfoot>

@@ -25,6 +25,8 @@ type ShiftDbRow = {
   shift_date?: unknown;
   start_time?: unknown;
   end_time?: unknown;
+  second_start_time?: unknown;
+  second_end_time?: unknown;
   status?: unknown;
   note?: unknown;
   created_at?: unknown;
@@ -47,6 +49,8 @@ function shiftSelect() {
     shift_date,
     start_time,
     end_time,
+    second_start_time,
+    second_end_time,
     status,
     note,
     created_at,
@@ -109,7 +113,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: previousError.message }, { status: 500 });
     }
 
-    const rows = Array.isArray(previousRows) ? previousRows.map(asRecord) : [];
+    const rows: Record<string, unknown>[] = Array.isArray(previousRows) ? previousRows.map(asRecord) : [];
     if (rows.length === 0) {
       return NextResponse.json({ ok: false, error: "Nessun turno trovato nella settimana precedente" }, { status: 404 });
     }
@@ -143,6 +147,8 @@ export async function POST(req: Request) {
         status: normalizeShiftStatus(row.status) ?? "rest",
         start_time: normalizeTime(row.start_time ?? ""),
         end_time: normalizeTime(row.end_time ?? ""),
+        second_start_time: normalizeTime(row.second_start_time ?? ""),
+        second_end_time: normalizeTime(row.second_end_time ?? ""),
         note: row.note ? String(row.note).slice(0, 500) : null,
         created_by: userId,
         updated_by: userId,

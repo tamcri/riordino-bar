@@ -13,9 +13,12 @@ import {
   getWeekDates,
   getMondayISO,
   isDateOnly,
+  isNoTimeStatus,
   isUuid,
   minutesBetween,
+  requiresSecondShift,
   normalizeShiftStatus,
+  shiftMinutesTotal,
   normalizeTime,
 } from "@/lib/work-shifts";
 
@@ -28,6 +31,8 @@ type ShiftDbRow = {
   shift_date?: unknown;
   start_time?: unknown;
   end_time?: unknown;
+  second_start_time?: unknown;
+  second_end_time?: unknown;
   status?: unknown;
   note?: unknown;
   created_at?: unknown;
@@ -44,6 +49,8 @@ function shiftSelect() {
     shift_date,
     start_time,
     end_time,
+    second_start_time,
+    second_end_time,
     status,
     note,
     created_at,
@@ -56,6 +63,8 @@ function shiftSelect() {
 function normalizeShift(row: ShiftDbRow) {
   const startTime = normalizeTime(row?.start_time ?? "") ?? null;
   const endTime = normalizeTime(row?.end_time ?? "") ?? null;
+  const secondStartTime = normalizeTime(row?.second_start_time ?? "") ?? null;
+  const secondEndTime = normalizeTime(row?.second_end_time ?? "") ?? null;
   const employee = asRecord(row?.employees);
   const pv = asRecord(row?.pvs);
 
@@ -71,8 +80,10 @@ function normalizeShift(row: ShiftDbRow) {
     status: normalizeShiftStatus(row?.status) ?? "rest",
     start_time: startTime,
     end_time: endTime,
+    second_start_time: secondStartTime,
+    second_end_time: secondEndTime,
     note: row?.note ? String(row.note) : "",
-    hours: minutesBetween(startTime, endTime) / 60,
+    hours: shiftMinutesTotal({ status: normalizeShiftStatus(row?.status) ?? "rest", start_time: startTime, end_time: endTime, second_start_time: secondStartTime, second_end_time: secondEndTime }) / 60,
     created_at: row?.created_at ? String(row.created_at) : null,
     updated_at: row?.updated_at ? String(row.updated_at) : null,
   };
@@ -233,15 +244,17 @@ export async function POST(req: Request) {
 
       let start_time: string | null = null;
       let end_time: string | null = null;
+      let second_start_time: string | null = null;
+      let second_end_time: string | null = null;
       const note = clampText(row.note, 500) || null;
 
-      if (status !== "rest") {
+      if (!isNoTimeStatus(status)) {
         start_time = normalizeTime(row.start_time ?? "");
         end_time = normalizeTime(row.end_time ?? "");
 
         if (!start_time || !end_time) {
           return NextResponse.json(
-            { ok: false, error: "Ora inizio e ora fine sono obbligatorie per Turno e Cambio turno" },
+            { ok: false, error: "Ora inizio e ora fine sono obbligatorie per Turno, Spezzato e Cambio turno" },
             { status: 400 }
           );
         }
@@ -254,6 +267,32 @@ export async function POST(req: Request) {
         }
       }
 
+      if (requiresSecondShift(status)) {
+        second_start_time = normalizeTime(row.second_start_time ?? "");
+        second_end_time = normalizeTime(row.second_end_time ?? "");
+
+        if (!second_start_time || !second_end_time) {
+          return NextResponse.json(
+            { ok: false, error: "Per lo spezzato sono obbligatori anche inizio e fine pomeriggio" },
+            { status: 400 }
+          );
+        }
+
+        if (minutesBetween(second_start_time, second_end_time) <= 0) {
+          return NextResponse.json(
+            { ok: false, error: "Fine pomeriggio deve essere successiva a inizio pomeriggio" },
+            { status: 400 }
+          );
+        }
+
+        if (end_time && minutesBetween(end_time, second_start_time) <= 0) {
+          return NextResponse.json(
+            { ok: false, error: "Il turno pomeriggio deve iniziare dopo la fine del turno mattina" },
+            { status: 400 }
+          );
+        }
+      }
+
       payload.push({
         pv_id,
         employee_id,
@@ -261,6 +300,8 @@ export async function POST(req: Request) {
         status,
         start_time,
         end_time,
+        second_start_time,
+        second_end_time,
         note,
         created_by: userId,
         updated_by: userId,
@@ -286,3 +327,4 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: getErrorMessage(e, "Errore server") }, { status: 500 });
   }
 }
+

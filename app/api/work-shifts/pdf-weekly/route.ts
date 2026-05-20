@@ -7,14 +7,15 @@ import {
   asRecord,
   formatDateIT,
   formatHours,
+  formatShiftTimeRange,
   getErrorMessage,
   getMondayISO,
   getWeekDates,
-  hoursBetween,
   isDateOnly,
   isUuid,
   normalizeShiftStatus,
   normalizeTime,
+  shiftHoursTotal,
   shiftStatusLabel,
   type ShiftStatus,
 } from "@/lib/work-shifts";
@@ -28,6 +29,8 @@ type ShiftDbRow = {
   shift_date?: unknown;
   start_time?: unknown;
   end_time?: unknown;
+  second_start_time?: unknown;
+  second_end_time?: unknown;
   status?: unknown;
   note?: unknown;
   employees?: unknown;
@@ -45,6 +48,9 @@ type NormalizedShift = {
   status: ShiftStatus;
   start_time: string | null;
   end_time: string | null;
+  second_start_time: string | null;
+  second_end_time: string | null;
+  shift_label: string;
   note: string;
   hours: number;
 };
@@ -67,6 +73,8 @@ function shiftSelect() {
     shift_date,
     start_time,
     end_time,
+    second_start_time,
+    second_end_time,
     status,
     note,
     employees:employees(id, name, active),
@@ -77,9 +85,18 @@ function shiftSelect() {
 function normalizeShift(row: ShiftDbRow): NormalizedShift {
   const startTime = normalizeTime(row?.start_time ?? "") ?? null;
   const endTime = normalizeTime(row?.end_time ?? "") ?? null;
+  const secondStartTime = normalizeTime(row?.second_start_time ?? "") ?? null;
+  const secondEndTime = normalizeTime(row?.second_end_time ?? "") ?? null;
   const employee = asRecord(row?.employees);
   const pv = asRecord(row?.pvs);
   const status = normalizeShiftStatus(row?.status) ?? "rest";
+  const hours = shiftHoursTotal({
+    status,
+    start_time: startTime,
+    end_time: endTime,
+    second_start_time: secondStartTime,
+    second_end_time: secondEndTime,
+  });
 
   return {
     pv_id: String(row?.pv_id ?? ""),
@@ -92,8 +109,17 @@ function normalizeShift(row: ShiftDbRow): NormalizedShift {
     status,
     start_time: startTime,
     end_time: endTime,
+    second_start_time: secondStartTime,
+    second_end_time: secondEndTime,
+    shift_label: formatShiftTimeRange({
+      status,
+      start_time: startTime,
+      end_time: endTime,
+      second_start_time: secondStartTime,
+      second_end_time: secondEndTime,
+    }),
     note: row?.note ? String(row.note) : "",
-    hours: status === "rest" ? 0 : hoursBetween(startTime, endTime),
+    hours,
   };
 }
 
@@ -147,8 +173,8 @@ function shiftCell(shift: NormalizedShift | undefined) {
 
   const lines = [shiftStatusLabel(shift.status)];
 
-  if (shift.status !== "rest") {
-    lines.push(`${shift.start_time || "--:--"} - ${shift.end_time || "--:--"}`);
+  if (shift.shift_label && shift.shift_label !== "—") {
+    lines.push(shift.shift_label);
   }
 
   if (shift.note) lines.push(`Nota: ${shift.note}`);

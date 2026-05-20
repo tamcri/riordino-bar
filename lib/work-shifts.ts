@@ -1,4 +1,4 @@
-export type ShiftStatus = "work" | "rest" | "change";
+export type ShiftStatus = "work" | "split" | "rest" | "vacation" | "change";
 
 export type WeekDay = {
   key: string;
@@ -6,7 +6,7 @@ export type WeekDay = {
   label: string;
 };
 
-export const SHIFT_STATUSES: ShiftStatus[] = ["work", "rest", "change"];
+export const SHIFT_STATUSES: ShiftStatus[] = ["work", "split", "rest", "vacation", "change"];
 
 export const WEEK_DAYS: WeekDay[] = [
   { key: "mon", shortLabel: "Lun", label: "Lunedì" },
@@ -60,7 +60,7 @@ export function normalizeTime(value: unknown): string | null {
 
 export function normalizeShiftStatus(value: unknown): ShiftStatus | null {
   const s = String(value ?? "").trim().toLowerCase();
-  if (s === "work" || s === "rest" || s === "change") return s;
+  if (s === "work" || s === "split" || s === "rest" || s === "vacation" || s === "change") return s;
   return null;
 }
 
@@ -68,11 +68,23 @@ export function shiftStatusLabel(status: ShiftStatus) {
   switch (status) {
     case "work":
       return "Turno";
+    case "split":
+      return "Spezzato";
     case "rest":
       return "Riposo";
+    case "vacation":
+      return "Ferie";
     case "change":
       return "Cambio turno";
   }
+}
+
+export function isNoTimeStatus(status: ShiftStatus) {
+  return status === "rest" || status === "vacation";
+}
+
+export function requiresSecondShift(status: ShiftStatus) {
+  return status === "split";
 }
 
 export function parseDateOnlyUTC(value: string) {
@@ -132,6 +144,52 @@ export function minutesBetween(startTime: string | null | undefined, endTime: st
 
 export function hoursBetween(startTime: string | null | undefined, endTime: string | null | undefined) {
   return minutesBetween(startTime, endTime) / 60;
+}
+
+export function shiftMinutesTotal(args: {
+  status: ShiftStatus | null | undefined;
+  start_time?: string | null;
+  end_time?: string | null;
+  second_start_time?: string | null;
+  second_end_time?: string | null;
+}) {
+  const status = normalizeShiftStatus(args.status) ?? "rest";
+  if (isNoTimeStatus(status)) return 0;
+
+  const first = minutesBetween(args.start_time, args.end_time);
+  if (status !== "split") return first;
+
+  return first + minutesBetween(args.second_start_time, args.second_end_time);
+}
+
+export function shiftHoursTotal(args: {
+  status: ShiftStatus | null | undefined;
+  start_time?: string | null;
+  end_time?: string | null;
+  second_start_time?: string | null;
+  second_end_time?: string | null;
+}) {
+  return shiftMinutesTotal(args) / 60;
+}
+
+export function formatShiftTimeRange(args: {
+  status: ShiftStatus | null | undefined;
+  start_time?: string | null;
+  end_time?: string | null;
+  second_start_time?: string | null;
+  second_end_time?: string | null;
+}) {
+  const status = normalizeShiftStatus(args.status);
+  if (!status || isNoTimeStatus(status)) return "—";
+
+  const firstStart = normalizeTime(args.start_time ?? "") ?? "--:--";
+  const firstEnd = normalizeTime(args.end_time ?? "") ?? "--:--";
+
+  if (status !== "split") return `${firstStart} - ${firstEnd}`;
+
+  const secondStart = normalizeTime(args.second_start_time ?? "") ?? "--:--";
+  const secondEnd = normalizeTime(args.second_end_time ?? "") ?? "--:--";
+  return `${firstStart} - ${firstEnd} / ${secondStart} - ${secondEnd}`;
 }
 
 export function formatHours(value: number) {

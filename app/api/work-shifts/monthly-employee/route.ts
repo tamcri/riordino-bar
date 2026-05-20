@@ -6,11 +6,12 @@ import {
   asRecord,
   formatHours,
   getErrorMessage,
-  hoursBetween,
+  formatShiftTimeRange,
   isDateOnly,
   isUuid,
   normalizeShiftStatus,
   normalizeTime,
+  shiftHoursTotal,
   shiftStatusLabel,
   toDateOnlyUTC,
   type ShiftStatus,
@@ -33,6 +34,8 @@ type ShiftDbRow = {
   shift_date?: unknown;
   start_time?: unknown;
   end_time?: unknown;
+  second_start_time?: unknown;
+  second_end_time?: unknown;
   status?: unknown;
   note?: unknown;
 };
@@ -95,7 +98,15 @@ function normalizeShift(row: ShiftDbRow) {
   const status = normalizeShiftStatus(row?.status) ?? "rest";
   const startTime = normalizeTime(row?.start_time ?? "") ?? null;
   const endTime = normalizeTime(row?.end_time ?? "") ?? null;
-  const hours = status === "rest" ? 0 : hoursBetween(startTime, endTime);
+  const secondStartTime = normalizeTime(row?.second_start_time ?? "") ?? null;
+  const secondEndTime = normalizeTime(row?.second_end_time ?? "") ?? null;
+  const hours = shiftHoursTotal({
+    status,
+    start_time: startTime,
+    end_time: endTime,
+    second_start_time: secondStartTime,
+    second_end_time: secondEndTime,
+  });
 
   return {
     id: String(row?.id ?? ""),
@@ -106,6 +117,15 @@ function normalizeShift(row: ShiftDbRow) {
     status_label: shiftStatusLabel(status),
     start_time: startTime,
     end_time: endTime,
+    second_start_time: secondStartTime,
+    second_end_time: secondEndTime,
+    shift_label: formatShiftTimeRange({
+      status,
+      start_time: startTime,
+      end_time: endTime,
+      second_start_time: secondStartTime,
+      second_end_time: secondEndTime,
+    }),
     note: row?.note ? String(row.note) : "",
     hours,
   };
@@ -172,7 +192,7 @@ export async function GET(req: Request) {
     }
 
     const shiftsByDate = new Map(
-      (shiftData ?? []).map((row) => {
+      ((shiftData ?? []) as unknown[]).map((row) => {
         const normalized = normalizeShift(row as unknown as ShiftDbRow);
         return [normalized.shift_date, normalized] as const;
       })
@@ -190,14 +210,19 @@ export async function GET(req: Request) {
         status_label: status ? shiftStatusLabel(status as ShiftStatus) : "Nessun turno",
         start_time: shift?.start_time ?? null,
         end_time: shift?.end_time ?? null,
+        second_start_time: shift?.second_start_time ?? null,
+        second_end_time: shift?.second_end_time ?? null,
+        shift_label: shift?.shift_label ?? "—",
         note: shift?.note ?? "",
         hours: shift?.hours ?? 0,
       };
     });
 
     const total_hours = rows.reduce((sum, row) => sum + row.hours, 0);
-    const total_work_days = rows.filter((row) => row.status === "work").length;
+    const total_work_days = rows.filter((row) => row.status === "work" || row.status === "split" || row.status === "change").length;
+    const total_split_days = rows.filter((row) => row.status === "split").length;
     const total_rest_days = rows.filter((row) => row.status === "rest").length;
+    const total_vacation_days = rows.filter((row) => row.status === "vacation").length;
     const total_change_days = rows.filter((row) => row.status === "change").length;
 
     return NextResponse.json({
@@ -211,7 +236,9 @@ export async function GET(req: Request) {
         total_hours,
         total_hours_label: `${formatHours(total_hours)} h`,
         total_work_days,
+        total_split_days,
         total_rest_days,
+        total_vacation_days,
         total_change_days,
       },
     });
