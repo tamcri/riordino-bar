@@ -124,6 +124,21 @@ type WeekResponse = ApiResponseBase & {
   rows?: ShiftRow[];
 };
 
+type ShiftManagerSetting = {
+  id: string;
+  pv_id: string;
+  configured: boolean;
+  enabled: boolean;
+  updated_at: string | null;
+  pv_code: string | null;
+  pv_name: string | null;
+};
+
+type ShiftManagerSettingsResponse = ApiResponseBase & {
+  rows?: ShiftManagerSetting[];
+  row?: ShiftManagerSetting;
+};
+
 function statusBadgeClass(status: ShiftStatus) {
   switch (status) {
     case "work":
@@ -201,6 +216,11 @@ export default function TurniAdminClient() {
   const [bootLoading, setBootLoading] = useState(true);
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [settingsRows, setSettingsRows] = useState<ShiftManagerSetting[]>([]);
+  const [settingsPvId, setSettingsPvId] = useState("");
+  const [settingsCode, setSettingsCode] = useState("");
+  const [settingsEnabled, setSettingsEnabled] = useState(true);
+  const [settingsLoading, setSettingsLoading] = useState(false);
 
   const weekDates = useMemo(() => getWeekDates(weekStart), [weekStart]);
   const weekLabel = `${formatDateIT(weekDates[0])} - ${formatDateIT(weekDates[6])}`;
@@ -262,6 +282,11 @@ export default function TurniAdminClient() {
     [employeeId, employees]
   );
 
+  const selectedShiftSetting = useMemo(
+    () => settingsRows.find((row) => row.pv_id === settingsPvId) ?? null,
+    [settingsPvId, settingsRows]
+  );
+
   const monthlyTotalHours = Number(monthlyTotals?.total_hours ?? 0);
   const monthlyWorkDays = Number(monthlyTotals?.total_work_days ?? 0);
   const monthlySplitDays = Number(monthlyTotals?.total_split_days ?? 0);
@@ -275,6 +300,61 @@ export default function TurniAdminClient() {
 
     const list = (res.data?.pvs ?? res.data?.rows ?? []) as PV[];
     setPvs(Array.isArray(list) ? list : []);
+  }
+
+  async function loadShiftManagerSettings() {
+    const res = await fetchJsonSafe<ShiftManagerSettingsResponse>("/api/work-shifts/manager-settings");
+    if (!res.ok) throw new Error(res.data?.error || res.rawText || `HTTP ${res.status}`);
+
+    const rows = Array.isArray(res.data?.rows) ? (res.data.rows as ShiftManagerSetting[]) : [];
+    setSettingsRows(rows);
+  }
+
+  async function saveShiftManagerSettings(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setMsg(null);
+
+    if (!settingsPvId) {
+      setError("Seleziona un punto vendita.");
+      return;
+    }
+
+    const code = settingsCode.trim();
+    if (code && !/^[A-Za-z0-9]{6,32}$/.test(code)) {
+      setError("Il codice responsabile deve essere alfanumerico, senza spazi, da 6 a 32 caratteri.");
+      return;
+    }
+
+    if (!code && !selectedShiftSetting) {
+      setError("Per la prima configurazione devi inserire un codice responsabile.");
+      return;
+    }
+
+    setSettingsLoading(true);
+    try {
+      const body: Record<string, unknown> = {
+        pv_id: settingsPvId,
+        enabled: settingsEnabled,
+      };
+      if (code) body.code = code;
+
+      const res = await fetchJsonSafe<ShiftManagerSettingsResponse>("/api/work-shifts/manager-settings", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) throw new Error(res.data?.error || res.rawText || `HTTP ${res.status}`);
+
+      setSettingsCode("");
+      setMsg("Impostazioni responsabile turni salvate.");
+      await loadShiftManagerSettings();
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, "Errore salvataggio impostazioni responsabile"));
+    } finally {
+      setSettingsLoading(false);
+    }
   }
 
   async function loadRows() {
@@ -382,6 +462,7 @@ export default function TurniAdminClient() {
     (async () => {
       try {
         await loadPvs();
+        await loadShiftManagerSettings();
         await loadRows();
       } catch (e: unknown) {
         setError(getErrorMessage(e, "Errore"));
@@ -489,6 +570,83 @@ export default function TurniAdminClient() {
             >
               Scheda mensile dipendente
             </button>
+          </div>
+        </section>
+
+        <section className="rounded-2xl border bg-white p-4">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold">Gestione codice responsabile turni</h2>
+              <p className="mt-1 text-sm text-gray-600">
+                Imposta il codice responsabile per ogni PV e blocca o riattiva temporaneamente l'accesso alla sezione Turni lato PV.
+              </p>
+              {selectedShiftSetting && (
+                <p className="mt-2 text-xs text-gray-500">
+                  Stato attuale: {selectedShiftSetting.configured ? "codice configurato" : "codice non configurato"} · {selectedShiftSetting.enabled ? "accesso attivo" : "accesso bloccato"}
+                </p>
+              )}
+            </div>
+
+            <form onSubmit={saveShiftManagerSettings} className="grid w-full grid-cols-1 gap-3 lg:max-w-3xl md:grid-cols-4">
+              <div className="md:col-span-1">
+                <label className="mb-2 block text-sm font-medium">Punto Vendita</label>
+                <select
+                  className="w-full rounded-xl border bg-white p-3"
+                  value={settingsPvId}
+                  onChange={(e) => {
+                    const nextPvId = e.target.value;
+                    const current = settingsRows.find((row) => row.pv_id === nextPvId) ?? null;
+                    setSettingsPvId(nextPvId);
+                    setSettingsEnabled(current?.enabled !== false);
+                    setSettingsCode("");
+                  }}
+                >
+                  <option value="">Seleziona PV</option>
+                  {pvs.map((pv) => (
+                    <option key={pv.id} value={pv.id}>
+                      {pv.code} — {pv.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="md:col-span-1">
+                <label className="mb-2 block text-sm font-medium">Nuovo codice</label>
+                <input
+                  type="password"
+                  className="w-full rounded-xl border p-3"
+                  value={settingsCode}
+                  minLength={6}
+                  maxLength={32}
+                  placeholder={selectedShiftSetting?.configured ? "Lascia vuoto per non cambiarlo" : "Min. 6 caratteri"}
+                  autoComplete="off"
+                  onChange={(e) => setSettingsCode(e.target.value)}
+                />
+              </div>
+
+              <div className="md:col-span-1">
+                <label className="mb-2 block text-sm font-medium">Stato accesso</label>
+                <select
+                  className="w-full rounded-xl border bg-white p-3"
+                  value={settingsEnabled ? "enabled" : "disabled"}
+                  onChange={(e) => setSettingsEnabled(e.target.value === "enabled")}
+                >
+                  <option value="enabled">Attivo</option>
+                  <option value="disabled">Bloccato</option>
+                </select>
+              </div>
+
+              <div className="md:col-span-1">
+                <label className="mb-2 block text-sm font-medium invisible">Azione</label>
+                <button
+                  type="submit"
+                  className="w-full rounded-xl bg-slate-900 px-4 py-3 text-white disabled:opacity-60"
+                  disabled={settingsLoading || !settingsPvId}
+                >
+                  {settingsLoading ? "Salvo..." : "Salva"}
+                </button>
+              </div>
+            </form>
           </div>
         </section>
 

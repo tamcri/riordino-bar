@@ -76,6 +76,16 @@ type CopyPreviousResponse = ApiResponseBase & {
   copied?: number;
 };
 
+type ManagerStatusResponse = ApiResponseBase & {
+  configured?: boolean;
+  enabled?: boolean;
+  unlocked?: boolean;
+};
+
+type ManagerLoginResponse = ApiResponseBase & {
+  unlocked?: boolean;
+};
+
 function cellKey(employeeId: string, date: string) {
   return `${employeeId}:${date}`;
 }
@@ -165,6 +175,13 @@ export default function TurniPvClient() {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [cells, setCells] = useState<Record<string, ShiftCell>>({});
 
+  const [managerStatusLoading, setManagerStatusLoading] = useState(true);
+  const [managerUnlocked, setManagerUnlocked] = useState(false);
+  const [managerConfigured, setManagerConfigured] = useState(false);
+  const [managerEnabled, setManagerEnabled] = useState(true);
+  const [managerCode, setManagerCode] = useState("");
+  const [managerLoginLoading, setManagerLoginLoading] = useState(false);
+
   const [newEmployeeName, setNewEmployeeName] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -174,6 +191,19 @@ export default function TurniPvClient() {
   const [error, setError] = useState<string | null>(null);
 
   const weekLabel = `${formatDateIT(weekDates[0])} - ${formatDateIT(weekDates[6])}`;
+
+  useEffect(() => {
+  return () => {
+    try {
+      fetch("/api/work-shifts/manager-logout", {
+        method: "POST",
+        keepalive: true,
+      }).catch(() => {});
+    } catch {
+      // Non bloccare la navigazione se la pulizia fallisce.
+    }
+  };
+}, []);
 
   const employeeTotals = useMemo(() => {
     const totals: Record<string, number> = {};
@@ -241,10 +271,107 @@ export default function TurniPvClient() {
     }
   }
 
+  async function checkManagerStatus(loadAfterUnlock = false) {
+    setManagerStatusLoading(true);
+    setError(null);
+    setMsg(null);
+
+    try {
+      const res = await fetchJsonSafe<ManagerStatusResponse>("/api/work-shifts/manager-status");
+      if (!res.ok || !res.data) {
+        throw new Error(res.data?.error || res.rawText || `HTTP ${res.status}`);
+      }
+
+      const configured = res.data.configured === true;
+      const enabled = res.data.enabled !== false;
+      const unlocked = res.data.unlocked === true;
+
+      setManagerConfigured(configured);
+      setManagerEnabled(enabled);
+      setManagerUnlocked(unlocked);
+
+      if (!configured) {
+        setError("Codice responsabile non configurato. Contatta l'amministratore.");
+        setLoading(false);
+        return;
+      }
+
+      if (!enabled) {
+        setError("Accesso turni momentaneamente bloccato. Contatta l'amministratore.");
+        setLoading(false);
+        return;
+      }
+
+      if (unlocked && loadAfterUnlock) {
+        await loadData(weekStart);
+      } else {
+        setLoading(false);
+      }
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, "Errore verifica accesso responsabile"));
+      setManagerUnlocked(false);
+      setLoading(false);
+    } finally {
+      setManagerStatusLoading(false);
+    }
+  }
+
+  async function managerLogin(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setMsg(null);
+
+    const code = managerCode.trim();
+    if (!/^[A-Za-z0-9]{6,32}$/.test(code)) {
+      setError("Il codice responsabile deve essere alfanumerico, senza spazi, da 6 a 32 caratteri.");
+      return;
+    }
+
+    setManagerLoginLoading(true);
+    try {
+      const res = await fetchJsonSafe<ManagerLoginResponse>("/api/work-shifts/manager-login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+
+      if (!res.ok) throw new Error(res.data?.error || res.rawText || `HTTP ${res.status}`);
+
+      setManagerCode("");
+      setManagerUnlocked(true);
+      setMsg("Accesso responsabile sbloccato.");
+      await loadData(weekStart);
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, "Codice responsabile non valido"));
+    } finally {
+      setManagerLoginLoading(false);
+    }
+  }
+
+  async function managerLogout() {
+    setError(null);
+    setMsg(null);
+
+    try {
+      await fetchJsonSafe<ApiResponseBase>("/api/work-shifts/manager-logout", { method: "POST" });
+    } finally {
+      setManagerUnlocked(false);
+      setEmployees([]);
+      setCells({});
+      setMsg("Accesso responsabile chiuso.");
+    }
+  }
+
   useEffect(() => {
-    loadData(weekStart);
+    void checkManagerStatus(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [weekStart]);
+  }, []);
+
+  useEffect(() => {
+    if (!managerUnlocked) return;
+    void loadData(weekStart);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [weekStart, managerUnlocked]);
 
   function updateCell(employeeId: string, date: string, patch: Partial<ShiftCell>) {
     const key = cellKey(employeeId, date);
@@ -466,6 +593,69 @@ export default function TurniPvClient() {
     }
   }
 
+  if (managerStatusLoading) {
+    return (
+      <div className="rounded-2xl border bg-white p-6 text-sm text-gray-600">
+        Verifica accesso responsabile turni...
+      </div>
+    );
+  }
+
+  if (!managerUnlocked) {
+    return (
+      <div className="space-y-6">
+        <section className="rounded-2xl border bg-white p-6">
+          <div>
+            <h2 className="text-xl font-semibold">Accesso responsabile turni</h2>
+            <p className="mt-1 text-sm text-gray-600">
+              Questa sezione è riservata al responsabile. Inserisci il codice configurato dall'amministratore.
+            </p>
+          </div>
+
+          {error && (
+            <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+              {error}
+            </div>
+          )}
+
+          {msg && (
+            <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
+              {msg}
+            </div>
+          )}
+
+          {managerConfigured && managerEnabled ? (
+            <form onSubmit={managerLogin} className="mt-5 flex max-w-md flex-col gap-3 sm:flex-row">
+              <input
+                type="password"
+                className="w-full rounded-xl border p-3"
+                placeholder="Codice responsabile"
+                value={managerCode}
+                minLength={6}
+                maxLength={32}
+                autoComplete="off"
+                onChange={(e) => setManagerCode(e.target.value)}
+              />
+              <button
+                type="submit"
+                className="rounded-xl bg-slate-900 px-5 py-3 text-white disabled:opacity-60"
+                disabled={managerLoginLoading}
+              >
+                {managerLoginLoading ? "Verifica..." : "Entra"}
+              </button>
+            </form>
+          ) : (
+            <div className="mt-5 rounded-xl border bg-gray-50 p-4 text-sm text-gray-700">
+              {!managerConfigured
+                ? "Codice responsabile non configurato. Chiedi all'admin di impostarlo."
+                : "Accesso turni momentaneamente bloccato dall'admin."}
+            </div>
+          )}
+        </section>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <section className="rounded-2xl border bg-white p-4">
@@ -476,6 +666,13 @@ export default function TurniPvClient() {
               {me ? `${me.pv_code} — ${me.pv_name}` : "Caricamento punto vendita..."}
             </p>
             <p className="text-sm text-gray-500 mt-1">Periodo: {weekLabel}</p>
+            <button
+              type="button"
+              className="mt-3 rounded-xl border bg-white px-3 py-2 text-sm hover:bg-gray-50"
+              onClick={managerLogout}
+            >
+              Chiudi accesso responsabile
+            </button>
           </div>
 
           <div className="flex flex-col gap-3 md:flex-row md:items-end">
@@ -670,7 +867,7 @@ export default function TurniPvClient() {
                                 <div className="grid grid-cols-2 gap-2">
                                   <div>
                                     <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-                                      {cell.status === "split" ? "AM inizio" : "Inizio"}
+                                      {cell.status === "split" ? "Mattina inizio" : "Inizio"}
                                     </div>
                                     <input
                                       type="time"
@@ -683,7 +880,7 @@ export default function TurniPvClient() {
 
                                   <div>
                                     <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-                                      {cell.status === "split" ? "AM fine" : "Fine"}
+                                      {cell.status === "split" ? "Mattina fine" : "Fine"}
                                     </div>
                                     <input
                                       type="time"
@@ -699,7 +896,7 @@ export default function TurniPvClient() {
                                   <div className="grid grid-cols-2 gap-2">
                                     <div>
                                       <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-                                        PM inizio
+                                        Pomeriggio inizio
                                       </div>
                                       <input
                                         type="time"
@@ -712,7 +909,7 @@ export default function TurniPvClient() {
 
                                     <div>
                                       <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-                                        PM fine
+                                        Pomeriggio fine
                                       </div>
                                       <input
                                         type="time"

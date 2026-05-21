@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue, type SessionData } from "@/lib/auth";
 import { getAppUserIdByUsername } from "@/lib/appUsers";
 import { getPvIdForSession } from "@/lib/pvLookup";
+import { requireShiftManagerAccess } from "@/lib/work-shifts-manager";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import {
   addDaysISO,
@@ -121,6 +122,13 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
     }
 
+    if (session.role === "punto_vendita") {
+      const manager = await requireShiftManagerAccess(session);
+      if (!manager.ok) {
+        return NextResponse.json({ ok: false, error: manager.error }, { status: manager.httpStatus });
+      }
+    }
+
     const url = new URL(req.url);
     const week_start = validateWeekStart(url.searchParams.get("week_start"));
     const weekDates = getWeekDates(week_start);
@@ -165,6 +173,11 @@ export async function POST(req: Request) {
     const session = await getSessionFromCookie();
     if (!session || session.role !== "punto_vendita") {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
+    }
+
+    const manager = await requireShiftManagerAccess(session);
+    if (!manager.ok) {
+      return NextResponse.json({ ok: false, error: manager.error }, { status: manager.httpStatus });
     }
 
     const body = asRecord(await req.json().catch(() => null));
@@ -327,4 +340,3 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: getErrorMessage(e, "Errore server") }, { status: 500 });
   }
 }
-

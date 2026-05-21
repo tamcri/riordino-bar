@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { getAppUserIdByUsername } from "@/lib/appUsers";
 import { getPvIdForSession } from "@/lib/pvLookup";
+import { requireShiftManagerAccess } from "@/lib/work-shifts-manager";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { asRecord, clampText, getErrorMessage, isUuid } from "@/lib/work-shifts";
 
@@ -54,6 +55,13 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
     }
 
+    if (session.role === "punto_vendita") {
+      const manager = await requireShiftManagerAccess(session);
+      if (!manager.ok) {
+        return NextResponse.json({ ok: false, error: manager.error }, { status: manager.httpStatus });
+      }
+    }
+
     const url = new URL(req.url);
     const pvIdParam = String(url.searchParams.get("pv_id") ?? "").trim();
     const includeInactive = String(url.searchParams.get("include_inactive") ?? "") === "1";
@@ -99,6 +107,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
     }
 
+    const manager = await requireShiftManagerAccess(session);
+    if (!manager.ok) {
+      return NextResponse.json({ ok: false, error: manager.error }, { status: manager.httpStatus });
+    }
+
     const body = asRecord(await req.json().catch(() => null));
     const name = clampText(body.name, 120);
 
@@ -142,6 +155,11 @@ export async function PATCH(req: Request) {
     const session = await getSessionFromCookie();
     if (!session || session.role !== "punto_vendita") {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
+    }
+
+    const manager = await requireShiftManagerAccess(session);
+    if (!manager.ok) {
+      return NextResponse.json({ ok: false, error: manager.error }, { status: manager.httpStatus });
     }
 
     const body = asRecord(await req.json().catch(() => null));

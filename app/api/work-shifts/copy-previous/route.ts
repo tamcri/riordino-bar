@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { getAppUserIdByUsername } from "@/lib/appUsers";
 import { getPvIdForSession } from "@/lib/pvLookup";
+import { requireShiftManagerAccess } from "@/lib/work-shifts-manager";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import {
   addDaysISO,
@@ -76,6 +77,8 @@ function normalizeShift(row: ShiftDbRow) {
     status: normalizeShiftStatus(row?.status) ?? "rest",
     start_time: normalizeTime(row?.start_time ?? "") ?? null,
     end_time: normalizeTime(row?.end_time ?? "") ?? null,
+    second_start_time: normalizeTime(row?.second_start_time ?? "") ?? null,
+    second_end_time: normalizeTime(row?.second_end_time ?? "") ?? null,
     note: row?.note ? String(row.note) : "",
     created_at: row?.created_at ? String(row.created_at) : null,
     updated_at: row?.updated_at ? String(row.updated_at) : null,
@@ -87,6 +90,11 @@ export async function POST(req: Request) {
     const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
     if (!session || session.role !== "punto_vendita") {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
+    }
+
+    const manager = await requireShiftManagerAccess(session);
+    if (!manager.ok) {
+      return NextResponse.json({ ok: false, error: manager.error }, { status: manager.httpStatus });
     }
 
     const body = asRecord(await req.json().catch(() => null));
@@ -103,7 +111,7 @@ export async function POST(req: Request) {
 
     const { data: previousRows, error: previousError } = await supabaseAdmin
       .from("work_shifts")
-      .select("employee_id, shift_date, start_time, end_time, status, note")
+      .select("employee_id, shift_date, start_time, end_time, second_start_time, second_end_time, status, note")
       .eq("pv_id", pv_id)
       .gte("shift_date", previous_start)
       .lte("shift_date", previous_end)
