@@ -1605,18 +1605,20 @@ useEffect(() => {
     if (inventoryMode === "rapid" || !nextCategoryId) {
       if (inventoryMode !== "rapid") return;
 
-      const resAll = await fetch(`/api/items/list_all?limit=10000&include_inactive=1`, { cache: "no-store" });
+      const resAll = await fetch(`/api/items/list_all?limit=10000`, { cache: "no-store" });
       const jsonAll = await resAll.json().catch(() => null);
       if (!resAll.ok || !jsonAll?.ok) throw new Error(jsonAll?.error || "Errore caricamento articoli");
 
-      const rowsAll: Item[] = (jsonAll.rows || []).map((r: any) => ({
-        ...r,
-        category_id: r?.category_id ?? null,
-        subcategory_id: r?.subcategory_id ?? null,
-        volume_ml_per_unit: r?.volume_ml_per_unit ?? null,
-        um: r?.um ?? null,
-        peso_kg: r?.peso_kg ?? null,
-      }));
+      const rowsAll: Item[] = (jsonAll.rows || [])
+  .filter((r: any) => r?.is_active !== false)
+  .map((r: any) => ({
+    ...r,
+    category_id: r?.category_id ?? null,
+    subcategory_id: r?.subcategory_id ?? null,
+    volume_ml_per_unit: r?.volume_ml_per_unit ?? null,
+    um: r?.um ?? null,
+    peso_kg: r?.peso_kg ?? null,
+  }));
 
       const pz: Record<string, string> = {};
       const gr: Record<string, string> = {};

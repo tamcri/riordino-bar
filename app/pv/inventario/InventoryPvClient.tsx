@@ -1475,7 +1475,9 @@ return computed > 0 || total > 0;
   const jsonAll = await resAll.json().catch(() => null);
   if (!resAll.ok || !jsonAll?.ok) throw new Error(jsonAll?.error || "Errore caricamento articoli");
 
-  const rowsAll: Item[] = (jsonAll.rows || []).map((r: any) => ({
+  const rowsAll: Item[] = (jsonAll.rows || [])
+  .filter((r: any) => r?.is_active !== false)
+  .map((r: any) => ({
     ...r,
     category_id: r?.category_id ?? null,
     subcategory_id: r?.subcategory_id ?? null,
