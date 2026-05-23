@@ -197,6 +197,38 @@ export function formatShiftTimeRange(args: {
   return `${firstStart} - ${firstEnd} / ${secondStart} - ${secondEnd}`;
 }
 
+export function getShiftPublicLabel(args: {
+  status: ShiftStatus | null | undefined;
+  start_time?: string | null;
+  end_time?: string | null;
+  second_start_time?: string | null;
+  second_end_time?: string | null;
+}) {
+  const status = normalizeShiftStatus(args.status) ?? "rest";
+
+  switch (status) {
+    case "split":
+      return "Spezzato";
+    case "rest":
+      return "Riposo";
+    case "vacation":
+      return "Ferie";
+    case "change":
+      return "Cambio turno";
+    case "work": {
+      const start = timeToMinutes(args.start_time);
+      const end = timeToMinutes(args.end_time);
+      if (start === null) return "Turno";
+
+      // Per la vista PV non mostriamo gli orari: indichiamo solo la fascia.
+      // Se l'ora di fine e' minore dell'ora di inizio, il turno finisce il giorno dopo: lo mostriamo come Notte.
+      if (end !== null && end < start) return "Notte";
+
+      return start < 13 * 60 ? "Mattina" : "Pomeriggio";
+    }
+  }
+}
+
 export function formatHours(value: number) {
   const rounded = Math.round((Number(value) || 0) * 100) / 100;
   return new Intl.NumberFormat("it-IT", {

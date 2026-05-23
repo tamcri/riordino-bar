@@ -180,6 +180,39 @@ function employeeOptionLabel(employee: Employee) {
   return pvLabel ? `${employee.name} (${pvLabel})` : employee.name;
 }
 
+function timeRangeLabel(startTime: string | null, endTime: string | null) {
+  const start = normalizeTime(startTime ?? "");
+  const end = normalizeTime(endTime ?? "");
+
+  if (!start || !end) return null;
+
+  return `${start} - ${end}`;
+}
+
+function monthlyShiftTimeLabel(row: MonthlyRow) {
+  if (!row.has_shift || !row.status) return "—";
+
+  const firstRange = timeRangeLabel(row.start_time, row.end_time);
+  const secondRange = timeRangeLabel(row.second_start_time, row.second_end_time);
+
+  if (firstRange && secondRange) return `${firstRange} / ${secondRange}`;
+  if (firstRange) return firstRange;
+
+  return row.shift_label || "—";
+}
+
+function monthlyRowHours(row: MonthlyRow) {
+  if (!row.has_shift || !row.status) return 0;
+
+  return shiftHoursTotal({
+    status: row.status,
+    start_time: row.start_time,
+    end_time: row.end_time,
+    second_start_time: row.second_start_time,
+    second_end_time: row.second_end_time,
+  });
+}
+
 async function fetchJsonSafe<T extends ApiResponseBase>(
   url: string,
   init?: RequestInit
@@ -287,7 +320,13 @@ export default function TurniAdminClient() {
     [settingsPvId, settingsRows]
   );
 
-  const monthlyTotalHours = Number(monthlyTotals?.total_hours ?? 0);
+  const monthlyRowsTotalHours = useMemo(
+    () => monthlyRows.reduce((sum, row) => sum + monthlyRowHours(row), 0),
+    [monthlyRows]
+  );
+
+  const monthlyTotalHours =
+    monthlyRows.length > 0 ? monthlyRowsTotalHours : Number(monthlyTotals?.total_hours ?? 0);
   const monthlyWorkDays = Number(monthlyTotals?.total_work_days ?? 0);
   const monthlySplitDays = Number(monthlyTotals?.total_split_days ?? 0);
   const monthlyRestDays = Number(monthlyTotals?.total_rest_days ?? 0);
@@ -908,6 +947,8 @@ export default function TurniAdminClient() {
           </div>
         )}
 
+
+
         {viewMode === "weekly" ? (
           <section className="rounded-2xl border bg-white overflow-hidden">
             <div className="border-b p-4">
@@ -1039,7 +1080,8 @@ export default function TurniAdminClient() {
                   <tbody>
                     {monthlyRows.map((row) => {
                       const status = normalizeShiftStatus(row.status ?? "");
-                      const shiftTimeLabel = row.shift_label || formatShiftTimeRange(row);
+                      const shiftTimeLabel = monthlyShiftTimeLabel(row);
+                      const rowHours = monthlyRowHours(row);
 
                       return (
                         <tr key={row.shift_date} className="align-top hover:bg-gray-50">
@@ -1053,7 +1095,7 @@ export default function TurniAdminClient() {
                           <td className="border-b px-3 py-3 whitespace-pre-line">
                             {shiftTimeLabel !== "—" ? shiftTimeLabel.replace(" / ", "\n") : "—"}
                           </td>
-                          <td className="border-b px-3 py-3 text-right font-semibold">{formatHours(row.hours)} h</td>
+                          <td className="border-b px-3 py-3 text-right font-semibold">{formatHours(rowHours)} h</td>
                           <td className="border-b px-3 py-3 text-gray-700">{row.note || "—"}</td>
                         </tr>
                       );

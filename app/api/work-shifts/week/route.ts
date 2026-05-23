@@ -13,6 +13,7 @@ import {
   getErrorMessage,
   getWeekDates,
   getMondayISO,
+  getShiftPublicLabel,
   isDateOnly,
   isNoTimeStatus,
   isUuid,
@@ -154,13 +155,39 @@ export async function GET(req: Request) {
     const { data, error } = await q;
     if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
 
+    const normalizedRows = (data ?? []).map((row) => normalizeShift(row as unknown as ShiftDbRow));
+
+    const rows =
+      session.role === "punto_vendita"
+        ? normalizedRows.map((row) => ({
+            id: row.id,
+            pv_id: row.pv_id,
+            employee_id: row.employee_id,
+            employee_name: row.employee_name,
+            employee_active: row.employee_active,
+            pv_code: row.pv_code,
+            pv_name: row.pv_name,
+            shift_date: row.shift_date,
+            status: row.status,
+            start_time: null,
+            end_time: null,
+            second_start_time: null,
+            second_end_time: null,
+            note: "",
+            public_label: getShiftPublicLabel(row),
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+          }))
+        : normalizedRows;
+
     return NextResponse.json({
       ok: true,
       week_start,
       week_end,
       week_dates: weekDates,
       pv_id: pvResolved.pv_id,
-      rows: (data ?? []).map((row) => normalizeShift(row as unknown as ShiftDbRow)),
+      rows,
+      pv_summary_only: session.role === "punto_vendita" && normalizedRows.length > 0,
       warning: pvResolved.warning ?? null,
     });
   } catch (e: unknown) {

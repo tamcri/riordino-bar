@@ -37,6 +37,7 @@ type ShiftApiRow = {
   second_start_time: string | null;
   second_end_time: string | null;
   note: string | null;
+  public_label?: string | null;
 };
 
 type ShiftCell = {
@@ -48,6 +49,7 @@ type ShiftCell = {
   second_start_time: string;
   second_end_time: string;
   note: string;
+  public_label: string;
 };
 
 type ApiResponseBase = {
@@ -70,6 +72,7 @@ type EmployeesResponse = ApiResponseBase & {
 type WeekResponse = ApiResponseBase & {
   rows?: ShiftApiRow[];
   saved?: number;
+  pv_summary_only?: boolean;
 };
 
 type CopyPreviousResponse = ApiResponseBase & {
@@ -100,6 +103,7 @@ function emptyCell(employeeId: string, date: string): ShiftCell {
     second_start_time: "",
     second_end_time: "",
     note: "",
+    public_label: "",
   };
 }
 
@@ -127,6 +131,7 @@ function buildCells(employees: Employee[], shifts: ShiftApiRow[], weekDates: str
       second_start_time: status === "split" ? normalizeTime(row.second_start_time ?? "") ?? "" : "",
       second_end_time: status === "split" ? normalizeTime(row.second_end_time ?? "") ?? "" : "",
       note: String(row.note ?? ""),
+      public_label: String(row.public_label ?? ""),
     };
   }
 
@@ -174,6 +179,7 @@ export default function TurniPvClient() {
   const [me, setMe] = useState<{ pv_id: string; pv_code: string; pv_name: string } | null>(null);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [cells, setCells] = useState<Record<string, ShiftCell>>({});
+  const [summaryOnly, setSummaryOnly] = useState(false);
 
   const [managerStatusLoading, setManagerStatusLoading] = useState(true);
   const [managerUnlocked, setManagerUnlocked] = useState(false);
@@ -191,19 +197,6 @@ export default function TurniPvClient() {
   const [error, setError] = useState<string | null>(null);
 
   const weekLabel = `${formatDateIT(weekDates[0])} - ${formatDateIT(weekDates[6])}`;
-
-  useEffect(() => {
-  return () => {
-    try {
-      fetch("/api/work-shifts/manager-logout", {
-        method: "POST",
-        keepalive: true,
-      }).catch(() => {});
-    } catch {
-      // Non bloccare la navigazione se la pulizia fallisce.
-    }
-  };
-}, []);
 
   const employeeTotals = useMemo(() => {
     const totals: Record<string, number> = {};
@@ -260,10 +253,12 @@ export default function TurniPvClient() {
         : [];
 
       const dates = getWeekDates(nextWeekStart);
+      setSummaryOnly(Boolean(shiftsRes.data?.pv_summary_only && shiftRows.length > 0));
       setEmployees(employeeRows.filter((employee) => employee.active !== false));
       setCells(buildCells(employeeRows.filter((employee) => employee.active !== false), shiftRows, dates));
     } catch (e: unknown) {
       setError(getErrorMessage(e, "Errore caricamento turni"));
+      setSummaryOnly(false);
       setEmployees([]);
       setCells({});
     } finally {
@@ -356,6 +351,8 @@ export default function TurniPvClient() {
       await fetchJsonSafe<ApiResponseBase>("/api/work-shifts/manager-logout", { method: "POST" });
     } finally {
       setManagerUnlocked(false);
+      setSummaryOnly(false);
+      setSummaryOnly(false);
       setEmployees([]);
       setCells({});
       setMsg("Accesso responsabile chiuso.");
@@ -365,6 +362,19 @@ export default function TurniPvClient() {
   useEffect(() => {
     void checkManagerStatus(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      try {
+        fetch("/api/work-shifts/manager-logout", {
+          method: "POST",
+          keepalive: true,
+        }).catch(() => {});
+      } catch {
+        // Non bloccare la navigazione se la pulizia fallisce.
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -378,7 +388,7 @@ export default function TurniPvClient() {
 
     setCells((prev) => {
       const current = prev[key] ?? emptyCell(employeeId, date);
-      const next: ShiftCell = { ...current, ...patch };
+      const next: ShiftCell = { ...current, ...patch, public_label: "" };
 
       if (patch.status && isNoTimeStatus(patch.status)) {
         next.start_time = "";
@@ -718,10 +728,13 @@ export default function TurniPvClient() {
           <div>
             <h2 className="text-lg font-semibold">Dipendenti</h2>
             <p className="text-sm text-gray-600 mt-1">
-              Aggiungi i dipendenti del tuo PV. La disattivazione non elimina i turni già salvati.
+              {summaryOnly
+                ? "Settimana già salvata: lato PV sono visibili solo presenze e stati, senza orari."
+                : "Aggiungi i dipendenti del tuo PV. La disattivazione non elimina i turni già salvati."}
             </p>
           </div>
 
+          {!summaryOnly && (
           <form onSubmit={addEmployee} className="flex flex-col gap-2 sm:flex-row">
             <input
               className="w-full rounded-xl border p-3 sm:w-72"
@@ -737,6 +750,7 @@ export default function TurniPvClient() {
               {employeeLoading ? "Salvataggio..." : "Aggiungi"}
             </button>
           </form>
+          )}
         </div>
 
         {employees.length > 0 && (
@@ -744,22 +758,26 @@ export default function TurniPvClient() {
             {employees.map((employee) => (
               <div key={employee.id} className="inline-flex items-center gap-2 rounded-xl border bg-gray-50 px-3 py-2 text-sm">
                 <span>{employee.name}</span>
-                <button
-                  type="button"
-                  className="text-xs text-slate-700 hover:underline disabled:opacity-60"
-                  disabled={employeeLoading}
-                  onClick={() => renameEmployee(employee)}
-                >
-                  Rinomina
-                </button>
-                <button
-                  type="button"
-                  className="text-xs text-red-700 hover:underline disabled:opacity-60"
-                  disabled={employeeLoading}
-                  onClick={() => deactivateEmployee(employee)}
-                >
-                  Disattiva
-                </button>
+                {!summaryOnly && (
+                  <>
+                    <button
+                      type="button"
+                      className="text-xs text-slate-700 hover:underline disabled:opacity-60"
+                      disabled={employeeLoading}
+                      onClick={() => renameEmployee(employee)}
+                    >
+                      Rinomina
+                    </button>
+                    <button
+                      type="button"
+                      className="text-xs text-red-700 hover:underline disabled:opacity-60"
+                      disabled={employeeLoading}
+                      onClick={() => deactivateEmployee(employee)}
+                    >
+                      Disattiva
+                    </button>
+                  </>
+                )}
               </div>
             ))}
           </div>
@@ -783,10 +801,13 @@ export default function TurniPvClient() {
           <div>
             <h2 className="text-lg font-semibold">Griglia turni</h2>
             <p className="text-sm text-gray-600 mt-1">
-              Dipendenti sulle righe, giorni sulle colonne, totale ore nella colonna finale.
+              {summaryOnly
+                ? "Settimana già salvata: gli orari e il totale ore sono visibili solo all'admin."
+                : "Dipendenti sulle righe, giorni sulle colonne, totale ore nella colonna finale."}
             </p>
           </div>
 
+          {!summaryOnly && (
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
@@ -806,7 +827,14 @@ export default function TurniPvClient() {
               {saving ? "Salvataggio..." : "Salva settimana"}
             </button>
           </div>
+          )}
         </div>
+
+        {summaryOnly && (
+          <div className="border-b bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            Questa settimana è già stata salvata. Lato PV restano visibili solo Mattina, Pomeriggio, Spezzato, Riposo, Ferie o Cambio turno.
+          </div>
+        )}
 
         {loading ? (
           <div className="p-6 text-sm text-gray-600">Caricamento turni...</div>
@@ -828,7 +856,9 @@ export default function TurniPvClient() {
                       <div className="text-xs font-normal text-gray-500">{formatDateIT(date)}</div>
                     </th>
                   ))}
-                  <th className="border-b px-3 py-3 font-semibold min-w-28 text-right">Totale</th>
+                  {!summaryOnly && (
+                    <th className="border-b px-3 py-3 font-semibold min-w-28 text-right">Totale</th>
+                  )}
                 </tr>
               </thead>
 
@@ -846,103 +876,113 @@ export default function TurniPvClient() {
                       return (
                         <td key={key} className="border-b px-2 py-2">
                           <div className={`rounded-xl border p-2 ${statusCellClass(cell.status)}`}>
-                            <select
-                              className="w-full rounded-lg border bg-white p-2 text-xs"
-                              value={cell.status}
-                              onChange={(e) =>
-                                updateCell(employee.id, date, {
-                                  status: e.target.value as ShiftStatus,
-                                })
-                              }
-                            >
-                              {SHIFT_STATUSES.map((status) => (
-                                <option key={status} value={status}>
-                                  {shiftStatusLabel(status)}
-                                </option>
-                              ))}
-                            </select>
+                            {summaryOnly ? (
+                              <div className="rounded-lg border bg-white px-3 py-2 text-center text-xs font-semibold text-slate-700">
+                                {cell.public_label || shiftStatusLabel(cell.status)}
+                              </div>
+                            ) : (
+                              <>
+                                <select
+                                  className="w-full rounded-lg border bg-white p-2 text-xs"
+                                  value={cell.status}
+                                  onChange={(e) =>
+                                    updateCell(employee.id, date, {
+                                      status: e.target.value as ShiftStatus,
+                                    })
+                                  }
+                                >
+                                  {SHIFT_STATUSES.map((status) => (
+                                    <option key={status} value={status}>
+                                      {shiftStatusLabel(status)}
+                                    </option>
+                                  ))}
+                                </select>
 
-                            {!isNoTimeStatus(cell.status) && (
-                              <div className="mt-2 space-y-2">
-                                <div className="grid grid-cols-2 gap-2">
-                                  <div>
-                                    <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-                                      {cell.status === "split" ? "Mattina inizio" : "Inizio"}
-                                    </div>
-                                    <input
-                                      type="time"
-                                      className="w-full rounded-lg border bg-white p-2 text-xs"
-                                      value={cell.start_time}
-                                      onChange={(e) => updateCell(employee.id, date, { start_time: e.target.value })}
-                                      aria-label={cell.status === "split" ? "Mattina inizio" : "Ora inizio"}
-                                    />
-                                  </div>
-
-                                  <div>
-                                    <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-                                      {cell.status === "split" ? "Mattina fine" : "Fine"}
-                                    </div>
-                                    <input
-                                      type="time"
-                                      className="w-full rounded-lg border bg-white p-2 text-xs"
-                                      value={cell.end_time}
-                                      onChange={(e) => updateCell(employee.id, date, { end_time: e.target.value })}
-                                      aria-label={cell.status === "split" ? "Mattina fine" : "Ora fine"}
-                                    />
-                                  </div>
-                                </div>
-
-                                {requiresSecondShift(cell.status) && (
-                                  <div className="grid grid-cols-2 gap-2">
-                                    <div>
-                                      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-                                        Pomeriggio inizio
+                                {!isNoTimeStatus(cell.status) && (
+                                  <div className="mt-2 space-y-2">
+                                    <div className="grid grid-cols-2 gap-2">
+                                      <div>
+                                        <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                                          {cell.status === "split" ? "AM inizio" : "Inizio"}
+                                        </div>
+                                        <input
+                                          type="time"
+                                          className="w-full rounded-lg border bg-white p-2 text-xs"
+                                          value={cell.start_time}
+                                          onChange={(e) => updateCell(employee.id, date, { start_time: e.target.value })}
+                                          aria-label={cell.status === "split" ? "Mattina inizio" : "Ora inizio"}
+                                        />
                                       </div>
-                                      <input
-                                        type="time"
-                                        className="w-full rounded-lg border bg-white p-2 text-xs"
-                                        value={cell.second_start_time}
-                                        onChange={(e) => updateCell(employee.id, date, { second_start_time: e.target.value })}
-                                        aria-label="Pomeriggio inizio"
-                                      />
+
+                                      <div>
+                                        <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                                          {cell.status === "split" ? "AM fine" : "Fine"}
+                                        </div>
+                                        <input
+                                          type="time"
+                                          className="w-full rounded-lg border bg-white p-2 text-xs"
+                                          value={cell.end_time}
+                                          onChange={(e) => updateCell(employee.id, date, { end_time: e.target.value })}
+                                          aria-label={cell.status === "split" ? "Mattina fine" : "Ora fine"}
+                                        />
+                                      </div>
                                     </div>
 
-                                    <div>
-                                      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-                                        Pomeriggio fine
+                                    {requiresSecondShift(cell.status) && (
+                                      <div className="grid grid-cols-2 gap-2">
+                                        <div>
+                                          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                                            PM inizio
+                                          </div>
+                                          <input
+                                            type="time"
+                                            className="w-full rounded-lg border bg-white p-2 text-xs"
+                                            value={cell.second_start_time}
+                                            onChange={(e) => updateCell(employee.id, date, { second_start_time: e.target.value })}
+                                            aria-label="Pomeriggio inizio"
+                                          />
+                                        </div>
+
+                                        <div>
+                                          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                                            PM fine
+                                          </div>
+                                          <input
+                                            type="time"
+                                            className="w-full rounded-lg border bg-white p-2 text-xs"
+                                            value={cell.second_end_time}
+                                            onChange={(e) => updateCell(employee.id, date, { second_end_time: e.target.value })}
+                                            aria-label="Pomeriggio fine"
+                                          />
+                                        </div>
                                       </div>
-                                      <input
-                                        type="time"
-                                        className="w-full rounded-lg border bg-white p-2 text-xs"
-                                        value={cell.second_end_time}
-                                        onChange={(e) => updateCell(employee.id, date, { second_end_time: e.target.value })}
-                                        aria-label="Pomeriggio fine"
-                                      />
+                                    )}
+
+                                    <div className="text-[11px] font-semibold text-gray-600">
+                                      Ore: {formatHours(shiftHoursTotal(cell))} h
                                     </div>
                                   </div>
                                 )}
 
-                                <div className="text-[11px] font-semibold text-gray-600">
-                                  Ore: {formatHours(shiftHoursTotal(cell))} h
-                                </div>
-                              </div>
+                                <input
+                                  className="mt-2 w-full rounded-lg border bg-white p-2 text-xs"
+                                  placeholder={cell.status === "change" ? "Nota cambio turno" : "Nota"}
+                                  value={cell.note}
+                                  maxLength={500}
+                                  onChange={(e) => updateCell(employee.id, date, { note: e.target.value })}
+                                />
+                              </>
                             )}
-
-                            <input
-                              className="mt-2 w-full rounded-lg border bg-white p-2 text-xs"
-                              placeholder={cell.status === "change" ? "Nota cambio turno" : "Nota"}
-                              value={cell.note}
-                              maxLength={500}
-                              onChange={(e) => updateCell(employee.id, date, { note: e.target.value })}
-                            />
                           </div>
                         </td>
                       );
                     })}
 
-                    <td className="border-b px-3 py-3 text-right font-semibold">
-                      {formatHours(employeeTotals[employee.id] ?? 0)} h
-                    </td>
+                    {!summaryOnly && (
+                      <td className="border-b px-3 py-3 text-right font-semibold">
+                        {formatHours(employeeTotals[employee.id] ?? 0)} h
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>

@@ -180,7 +180,7 @@ export async function GET(req: Request) {
 
     const { data: shiftData, error: shiftError } = await supabaseAdmin
       .from("work_shifts")
-      .select("id, pv_id, employee_id, shift_date, start_time, end_time, status, note")
+      .select("id, pv_id, employee_id, shift_date, start_time, end_time, second_start_time, second_end_time, status, note")
       .eq("employee_id", employeeId)
       .eq("pv_id", employee.pv_id)
       .gte("shift_date", month_start)
