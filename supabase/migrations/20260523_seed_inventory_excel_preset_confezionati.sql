@@ -1,0 +1,156 @@
+-- Preset Confezionati: associa articoli attivi in base ai codici del file Excel
+insert into public.inventory_excel_presets (name, slug)
+values ('Confezionati', 'confezionati')
+on conflict (slug) do update
+set name = excluded.name,
+    is_active = true,
+    updated_at = now();
+
+-- Pulisce le associazioni precedenti del preset Confezionati
+delete from public.inventory_excel_preset_items pi
+using public.inventory_excel_presets p
+where pi.preset_id = p.id
+  and p.slug = 'confezionati';
+
+-- Inserisce le associazioni dal file
+insert into public.inventory_excel_preset_items (preset_id, item_id)
+select p.id, i.id
+from public.inventory_excel_presets p
+join public.items i
+  on upper(trim(i.code)) in (
+  '10CENT',
+  '342B',
+  '346A',
+  '6287',
+  '8543',
+  '9311500',
+  '9342300',
+  '9342301',
+  'AIRSTICK',
+  'ALP STICK',
+  'ALP3',
+  'ALPENEXP',
+  'B391',
+  'BAC',
+  'BACIOM',
+  'BAIOC',
+  'BARRFIT',
+  'BBMFIBRA',
+  'BFRUIT',
+  'BIGBABOL',
+  'BIGBM',
+  'BISK',
+  'BOUNTY',
+  'BROOKLYN',
+  'C080',
+  'C609',
+  'CANDY COSBY',
+  'CANDY DISPENCER',
+  'CANDY NECKLACE&WATCH',
+  'CARDS',
+  'CHUPS',
+  'CREAMY',
+  'CRIK',
+  'CRIK150',
+  'CRIK2',
+  'DAYG',
+  'DAYG2',
+  'DAYPVA',
+  'DUPLO CIOCO STICK',
+  'FISHERMAN FRIEND',
+  'FONZIES',
+  'FRISKG',
+  'FRISKL',
+  'FRUIGOD',
+  'FRUITB',
+  'FRUITFRU',
+  'FRUITJ1',
+  'FT ONDE FRIZZ',
+  'GLK',
+  'GOLB',
+  'GOLIAST',
+  'GOLIASTIK',
+  'GOLPLUS',
+  'GOLPLUSS',
+  'GOOD FY FRUIT',
+  'HALLS',
+  'HAN',
+  'HANUTA RIEGEL',
+  'HAPPY',
+  'HAPPYHI',
+  'HARIGE',
+  'J BEE CONFE',
+  'KIND',
+  'KINDER C',
+  'KINDERJ',
+  'KINDERKIND',
+  'KINDERS',
+  'KIT',
+  'LION',
+  'M&M',
+  'M09321',
+  'MARS',
+  'MAX',
+  'MENB',
+  'MENT',
+  'MENT2',
+  'MENTOSGUM',
+  'MENTOSSTIK',
+  'MENW',
+  'MIK',
+  'MILKA BARRETTA',
+  'MILKA ORO',
+  'MILKEXP',
+  'MINI50',
+  'MOROSBAS',
+  'MOROSCAS',
+  'MORS',
+  'MRNT',
+  'MULKAC',
+  'NUTBIS',
+  'NUTBR',
+  'ORC',
+  'OREO',
+  'PATPREZ',
+  'PIPS',
+  'POCKETES',
+  'POLOOR',
+  'PRIGLES 40G',
+  'PRINGL',
+  'Q02047',
+  'Q02453',
+  'RADIX',
+  'RAFF',
+  'RICOLAAST',
+  'RIN',
+  'RINGT',
+  'SKIT',
+  'SMART',
+  'SNIC',
+  'SOURS FRISK',
+  'TABUAST',
+  'TAV1',
+  'TIC',
+  'TRONKY',
+  'TUBETTI YUMMY',
+  'TUC',
+  'TWIX',
+  'V BLAST BARAT',
+  'VIGORBAS',
+  'VIGORSOL',
+  'VIGORSOL B GRANDE',
+  'VIVIBL',
+  'VIVICE',
+  'VIVIDENDTAST',
+  'VIVIDENT'
+  )
+where p.slug = 'confezionati'
+  and i.is_active = true
+on conflict (preset_id, item_id) do nothing;
+
+-- Controllo finale
+select p.name, count(*) as articoli_associati
+from public.inventory_excel_presets p
+join public.inventory_excel_preset_items pi on pi.preset_id = p.id
+where p.slug = 'confezionati'
+group by p.name;
