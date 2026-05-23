@@ -1757,6 +1757,44 @@ return computed > 0 || total > 0;
     clearDraft();
   }
 
+
+  async function handleDownloadTemplate() {
+    try {
+      const label = String(categoryNote || "").trim();
+
+      if (!label) {
+        alert("Inserisci prima il nome categoria/label inventario.");
+        return;
+      }
+
+      const res = await fetch(
+        `/api/inventories/export-template?label=${encodeURIComponent(label)}`,
+        { cache: "no-store" }
+      );
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        throw new Error(err?.error || "Errore download modello Excel");
+      }
+
+      const blob = await res.blob();
+      const disposition = res.headers.get("Content-Disposition") || "";
+      const match = disposition.match(/filename="?([^";]+)"?/i);
+      const fileName = match?.[1] || `inventario_${label.toLowerCase().replace(/\s+/g, "_")}.xlsx`;
+
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (e: any) {
+      alert(e?.message || "Errore download modello Excel");
+    }
+  }
+
   async function save(mode: "close" | "continue") {
     if (!canSave) return;
 
@@ -2164,6 +2202,17 @@ console.log(
 
           <div className="grid grid-cols-3 gap-2 w-full md:w-auto">
   
+
+
+  <button
+    type="button"
+    className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 w-full disabled:opacity-60"
+    disabled={saving || !categoryNote.trim()}
+    onClick={handleDownloadTemplate}
+    title="Scarica il modello Excel per la categoria/label indicata"
+  >
+    Scarica modello Excel
+  </button>
 
   <button
     className="rounded-xl bg-slate-900 text-white px-4 py-2 disabled:opacity-60 w-full"
