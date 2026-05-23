@@ -208,6 +208,36 @@ type DraftAdmin = {
   addQtyMap?: Record<string, string>;
 };
 
+type ImportPreviewRow = {
+  row_number: number;
+  item_id: string;
+  code: string;
+  description: string;
+  excel_description?: string;
+  qty: number;
+  qty_ml: number;
+  qty_gr: number;
+  um?: string | null;
+  volume_ml_per_unit?: number | null;
+};
+
+type ImportPreviewResult = {
+  ok: boolean;
+  file_name?: string;
+  totals?: {
+    excel_rows: number;
+    valid_rows: number;
+    missing_rows: number;
+    inactive_rows: number;
+    empty_qty_rows: number;
+  };
+  rows: ImportPreviewRow[];
+  missing_rows?: any[];
+  inactive_rows?: any[];
+  empty_qty_rows?: any[];
+  error?: string;
+};
+
 export default function InventoryPvClient() {
   // ✅ tempo chiusura rapida dopo ultimo tap (multi tap: +10 +1 +1 +1…)
   const RAPID_AUTO_CLOSE_MS = 2000;
@@ -246,6 +276,12 @@ const [categoryNote, setCategoryNote] = useState("");
 
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importPreview, setImportPreview] = useState<ImportPreviewResult | null>(null);
+  const [importLoading, setImportLoading] = useState(false);
+  const [importSaving, setImportSaving] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
 
   // ✅ pezzi (per tutti)
   const [qtyPzMap, setQtyPzMap] = useState<Record<string, string>>({});
@@ -1795,6 +1831,142 @@ return computed > 0 || total > 0;
     }
   }
 
+  async function handleImportPreview() {
+    if (!importFile) {
+      setImportError("Seleziona prima un file Excel.");
+      return;
+    }
+
+    setImportLoading(true);
+    setImportError(null);
+    setImportPreview(null);
+    setMsg(null);
+    setError(null);
+
+    try {
+      const fd = new FormData();
+      fd.append("file", importFile);
+
+      const res = await fetch("/api/inventories/import-preview", {
+        method: "POST",
+        body: fd,
+      });
+
+      const json = await res.json().catch(() => null);
+
+      if (!res.ok || !json?.ok) {
+        throw new Error(json?.error || "Errore anteprima import Excel");
+      }
+
+      setImportPreview(json as ImportPreviewResult);
+    } catch (e: any) {
+      setImportError(e?.message || "Errore anteprima import Excel");
+    } finally {
+      setImportLoading(false);
+    }
+  }
+
+  async function confirmImportExcel() {
+    if (!importPreview?.rows?.length) {
+      setImportError("Nessuna riga valida da importare.");
+      return;
+    }
+
+    const dateToUse = inventoryDate.trim();
+    if (!isIsoDate(dateToUse)) {
+      setImportError("Data inventario non valida (YYYY-MM-DD).");
+      return;
+    }
+
+    if (!pvId) {
+      setImportError("PV mancante.");
+      return;
+    }
+
+    if (!operatore.trim()) {
+      setImportError("Inserisci il nome operatore prima di confermare l'import.");
+      return;
+    }
+
+    if (!categoryNote.trim()) {
+      setImportError("Inserisci il nome categoria/label prima di confermare l'import.");
+      return;
+    }
+
+    if (!isUuid(rapidSessionId)) {
+      setImportError("Rapido: rapid_session_id non valido. Premi Nuovo/Pulisci e riprova.");
+      return;
+    }
+
+    setImportSaving(true);
+    setImportError(null);
+    setMsg(null);
+    setError(null);
+
+    try {
+      const rows = importPreview.rows.map((r) => ({
+        item_id: r.item_id,
+        qty: Number(r.qty || 0),
+        qty_ml: Number(r.qty_ml || 0),
+        qty_gr: Number(r.qty_gr || 0),
+      }));
+
+      const basePayload = {
+        pv_id: pvId,
+        category_id: null,
+        subcategory_id: null,
+        inventory_date: dateToUse,
+        operatore: operatore.trim(),
+        label: categoryNote.trim() || null,
+        rows,
+        mode: "close",
+        rapid_session_id: rapidSessionId,
+      };
+
+      let res = await fetch("/api/inventories/save", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(basePayload),
+      });
+
+      let json = await res.json().catch(() => null);
+
+      if (res.status === 409 || json?.code === "INVENTORY_ALREADY_EXISTS") {
+        const ok = window.confirm(
+          (json?.error || "Esiste già un inventario per questa combinazione.") +
+            "\n\nVuoi SOVRASCRIVERLO? (attenzione: perdi i dati precedenti)"
+        );
+
+        if (!ok) {
+          setImportError("Import annullato. Inventario precedente lasciato intatto.");
+          return;
+        }
+
+        res = await fetch("/api/inventories/save", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ ...basePayload, force_overwrite: true }),
+        });
+
+        json = await res.json().catch(() => null);
+      }
+
+      if (!res.ok || !json?.ok) {
+        throw new Error(json?.error || "Salvataggio import Excel fallito");
+      }
+
+      setMsg(`Import Excel completato — righe salvate: ${json.saved}`);
+      setImportFile(null);
+      setImportPreview(null);
+      setImportError(null);
+      resetAfterClose();
+    } catch (e: any) {
+      setImportError(e?.message || "Errore salvataggio import Excel");
+    } finally {
+      setImportSaving(false);
+    }
+  }
+
   async function save(mode: "close" | "continue") {
     if (!canSave) return;
 
@@ -2254,6 +2426,127 @@ console.log(
   </button>
 </div>
         </div>
+      </div>
+
+      <div className="rounded-2xl border bg-white p-4 space-y-3">
+        <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold">Import inventario da Excel</div>
+            <div className="text-xs text-gray-500 mt-1">
+              Carica il modello compilato. Verranno lette le colonne Codice, PZ, ML e GR.
+            </div>
+          </div>
+
+          <div className="flex flex-col md:flex-row gap-2 w-full md:w-auto">
+            <input
+              type="file"
+              accept=".xlsx,.xls"
+              className="w-full md:w-72 rounded-xl border px-3 py-2 text-sm"
+              disabled={saving || importLoading || importSaving}
+              onChange={(e) => {
+                const file = e.target.files?.[0] || null;
+                setImportFile(file);
+                setImportPreview(null);
+                setImportError(null);
+              }}
+            />
+
+            <button
+              type="button"
+              className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-60"
+              disabled={!importFile || importLoading || importSaving || saving}
+              onClick={handleImportPreview}
+            >
+              {importLoading ? "Analizzo..." : "Importa Excel"}
+            </button>
+          </div>
+        </div>
+
+        {importError && <div className="text-sm text-red-600">{importError}</div>}
+
+        {importPreview && (
+          <div className="rounded-xl border bg-gray-50 p-3 space-y-3">
+            <div className="text-sm font-medium">
+              Anteprima: <span className="font-normal">{importPreview.file_name || importFile?.name || "file Excel"}</span>
+            </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-sm">
+              <div className="rounded-lg bg-white border p-2">
+                Righe Excel<br />
+                <b>{importPreview.totals?.excel_rows ?? 0}</b>
+              </div>
+              <div className="rounded-lg bg-white border p-2">
+                Valide<br />
+                <b>{importPreview.totals?.valid_rows ?? 0}</b>
+              </div>
+              <div className="rounded-lg bg-white border p-2">
+                Codici mancanti<br />
+                <b>{importPreview.totals?.missing_rows ?? 0}</b>
+              </div>
+              <div className="rounded-lg bg-white border p-2">
+                Non attivi<br />
+                <b>{importPreview.totals?.inactive_rows ?? 0}</b>
+              </div>
+              <div className="rounded-lg bg-white border p-2">
+                Quantità vuote<br />
+                <b>{importPreview.totals?.empty_qty_rows ?? 0}</b>
+              </div>
+            </div>
+
+            {importPreview.rows?.length > 0 && (
+              <div className="overflow-auto rounded-xl border bg-white max-h-72">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-50 sticky top-0">
+                    <tr>
+                      <th className="text-left p-2 w-28">Codice</th>
+                      <th className="text-left p-2">Descrizione</th>
+                      <th className="text-right p-2 w-20">PZ</th>
+                      <th className="text-right p-2 w-20">ML</th>
+                      <th className="text-right p-2 w-20">GR</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {importPreview.rows.slice(0, 50).map((r) => (
+                      <tr key={`${r.item_id}-${r.row_number}`} className="border-t">
+                        <td className="p-2 font-medium">{r.code}</td>
+                        <td className="p-2">{r.description}</td>
+                        <td className="p-2 text-right">{Number(r.qty || 0) || "—"}</td>
+                        <td className="p-2 text-right">{Number(r.qty_ml || 0) || "—"}</td>
+                        <td className="p-2 text-right">{Number(r.qty_gr || 0) || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {importPreview.rows.length > 50 && (
+                  <div className="border-t px-3 py-2 text-xs text-gray-500">
+                    Mostrate 50 righe su {importPreview.rows.length}.
+                  </div>
+                )}
+              </div>
+            )}
+
+            {(importPreview.missing_rows?.length || 0) > 0 && (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                Codici non trovati: {importPreview.missing_rows?.slice(0, 20).map((r: any) => r.code).join(", ")}
+                {(importPreview.missing_rows?.length || 0) > 20 ? "..." : ""}
+              </div>
+            )}
+
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+              <div className="text-xs text-gray-500">
+                Il salvataggio userà PV, data, operatore e nome categoria/nota impostati sopra.
+              </div>
+              <button
+                type="button"
+                className="rounded-xl bg-slate-900 text-white px-4 py-2 text-sm disabled:opacity-60"
+                disabled={!importPreview.rows?.length || importSaving || saving}
+                onClick={confirmImportExcel}
+              >
+                {importSaving ? "Salvo import..." : "Conferma import e salva"}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {inventoryMode === "rapid" ? (
