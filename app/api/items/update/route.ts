@@ -8,7 +8,7 @@ export const runtime = "nodejs";
 
 function isUuid(v: string | null) {
   if (!v) return false;
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v.trim());
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i.test(v.trim());
 }
 
 export async function PATCH(req: Request) {
@@ -30,9 +30,11 @@ export async function PATCH(req: Request) {
   const um = body?.um;
   const volume_ml_per_unit = body?.volume_ml_per_unit;
 
-  // ✅ NUOVI CAMPI
   const category_id = body?.category_id;
   const subcategory_id = body?.subcategory_id;
+
+  // ✅ Nuovo: preset Excel inventario
+  const preset_ids = body?.preset_ids;
 
   if (!id) {
     return NextResponse.json({ ok: false, error: "ID mancante" }, { status: 400 });
@@ -79,9 +81,6 @@ export async function PATCH(req: Request) {
 
   const patch: any = { updated_at: new Date().toISOString() };
 
-  // =========================================================
-  // CODICE (UNIVOCO GLOBALE)
-  // =========================================================
   if (code !== undefined) {
     const nextCode = String(code ?? "").trim();
     if (!nextCode) {
@@ -112,9 +111,6 @@ export async function PATCH(req: Request) {
     }
   }
 
-  // =========================================================
-  // CAMPPI STANDARD
-  // =========================================================
   if (typeof description === "string") patch.description = description.trim();
   if (typeof is_active === "boolean") patch.is_active = is_active;
 
@@ -138,9 +134,6 @@ export async function PATCH(req: Request) {
     patch.volume_ml_per_unit = nextVol && nextVol > 0 ? nextVol : null;
   }
 
-  // =========================================================
-  // CATEGORIA / SOTTOCATEGORIA
-  // =========================================================
   if (category_id !== undefined) {
     if (category_id === null || category_id === "") {
       patch.category_id = null;
@@ -162,9 +155,6 @@ export async function PATCH(req: Request) {
     }
   }
 
-  // =========================================================
-  // UPDATE
-  // =========================================================
   const { error } = await supabaseAdmin
     .from("items")
     .update(patch)
@@ -173,6 +163,52 @@ export async function PATCH(req: Request) {
   if (error) {
     console.error("[items/update] error:", error);
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+  }
+
+  // ✅ Se il frontend passa preset_ids, aggiorno le associazioni preset dell'articolo.
+  // Se preset_ids è undefined, non tocco nulla: così toggle active e update parziali restano invariati.
+  if (preset_ids !== undefined) {
+    if (!Array.isArray(preset_ids)) {
+      return NextResponse.json({ ok: false, error: "preset_ids deve essere un array" }, { status: 400 });
+    }
+
+    const cleanPresetIds = Array.from(
+      new Set(
+        preset_ids
+          .map((x: any) => String(x ?? "").trim())
+          .filter((x: string) => isUuid(x))
+      )
+    );
+
+    if (cleanPresetIds.length !== preset_ids.length) {
+      return NextResponse.json({ ok: false, error: "Uno o più preset non sono validi" }, { status: 400 });
+    }
+
+    const { error: delPresetErr } = await supabaseAdmin
+      .from("inventory_excel_preset_items")
+      .delete()
+      .eq("item_id", id);
+
+    if (delPresetErr) {
+      console.error("[items/update] delete preset links error:", delPresetErr);
+      return NextResponse.json({ ok: false, error: delPresetErr.message }, { status: 500 });
+    }
+
+    if (cleanPresetIds.length > 0) {
+      const payload = cleanPresetIds.map((preset_id) => ({
+        preset_id,
+        item_id: id,
+      }));
+
+      const { error: insPresetErr } = await supabaseAdmin
+        .from("inventory_excel_preset_items")
+        .insert(payload);
+
+      if (insPresetErr) {
+        console.error("[items/update] insert preset links error:", insPresetErr);
+        return NextResponse.json({ ok: false, error: insPresetErr.message }, { status: 500 });
+      }
+    }
   }
 
   return NextResponse.json({ ok: true });

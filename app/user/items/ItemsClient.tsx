@@ -5,6 +5,14 @@ import { useEffect, useMemo, useState } from "react";
 type Category = { id: string; name: string; slug: string; is_active: boolean };
 type Subcategory = { id: string; category_id: string; name: string; slug: string; is_active: boolean };
 
+type InventoryExcelPreset = {
+  id: string;
+  name: string;
+  slug: string;
+  is_active: boolean;
+  selected?: boolean;
+};
+
 type Item = {
   id: string;
   code: string;
@@ -187,6 +195,12 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
   const [editSubcategoryId, setEditSubcategoryId] = useState<string>("");
   const [editSubcategories, setEditSubcategories] = useState<Subcategory[]>([]);
 
+  // ✅ Preset Excel inventario associati all'articolo
+  const [excelPresets, setExcelPresets] = useState<InventoryExcelPreset[]>([]);
+  const [editPresetIds, setEditPresetIds] = useState<string[]>([]);
+  const [presetsLoading, setPresetsLoading] = useState(false);
+  const [presetsError, setPresetsError] = useState<string | null>(null);
+
   const [savingEdit, setSavingEdit] = useState(false);
 
   // ✅ MULTI-BARCODE (item_barcodes)
@@ -294,6 +308,37 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     });
     const json = await res.json().catch(() => null);
     if (res.ok && json?.ok && Array.isArray(json?.rows)) setEditSubcategories(json.rows);
+  }
+
+  async function loadInventoryExcelPresets(itemId?: string) {
+    if (!isAdmin) return;
+
+    setPresetsLoading(true);
+    setPresetsError(null);
+
+    try {
+      const qs = itemId ? `?item_id=${encodeURIComponent(itemId)}` : "";
+      const res = await fetch(`/api/inventory-excel-presets/list${qs}`, { cache: "no-store" });
+      const json = await res.json().catch(() => null);
+
+      if (!res.ok || !json?.ok) throw new Error(json?.error || "Errore caricamento preset Excel");
+
+      const list: InventoryExcelPreset[] = Array.isArray(json?.rows) ? json.rows : [];
+      setExcelPresets(list);
+      setEditPresetIds(list.filter((p) => p.selected).map((p) => p.id));
+    } catch (e: any) {
+      setExcelPresets([]);
+      setEditPresetIds([]);
+      setPresetsError(e?.message || "Errore caricamento preset Excel");
+    } finally {
+      setPresetsLoading(false);
+    }
+  }
+
+  function toggleEditPreset(presetId: string) {
+    setEditPresetIds((prev) =>
+      prev.includes(presetId) ? prev.filter((id) => id !== presetId) : [...prev, presetId]
+    );
   }
 
   async function loadItems() {
@@ -827,6 +872,11 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     setBarcodesError(null);
     loadBarcodesForItem(item.id, item.barcode == null ? "" : String(item.barcode));
 
+    setExcelPresets([]);
+    setEditPresetIds([]);
+    setPresetsError(null);
+    loadInventoryExcelPresets(item.id);
+
     setEditOpen(true);
   }
 
@@ -838,6 +888,9 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
     setNewExtraBarcode("");
     setBarcodesError(null);
     setEditGrMlPerPiece("");
+    setExcelPresets([]);
+    setEditPresetIds([]);
+    setPresetsError(null);
   }
 
   function normalizeNullableNumber(v: string): number | null {
@@ -918,6 +971,9 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
         // ✅ categoria/sottocategoria
         category_id: editCategoryId.trim() === "" ? null : editCategoryId.trim(),
         subcategory_id: editSubcategoryId.trim() === "" ? null : editSubcategoryId.trim(),
+
+        // ✅ Preset Excel inventario associati all'articolo
+        preset_ids: editPresetIds,
       };
 
       const res = await fetch("/api/items/update", {
@@ -1085,6 +1141,40 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
                     </option>
                   ))}
                 </select>
+              </div>
+
+              <div className="md:col-span-4 rounded-xl border bg-blue-50 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-blue-950">Preset Excel inventario</div>
+                    <div className="mt-1 text-xs text-blue-900">
+                      Seleziona in quali modelli Excel deve comparire questo articolo.
+                    </div>
+                  </div>
+                  {presetsLoading && <div className="text-xs text-blue-900">Carico...</div>}
+                </div>
+
+                {presetsError && <div className="mt-2 text-sm text-red-600">{presetsError}</div>}
+
+                {!presetsLoading && !presetsError && excelPresets.length === 0 && (
+                  <div className="mt-2 text-sm text-blue-900">Nessun preset Excel attivo trovato.</div>
+                )}
+
+                {excelPresets.length > 0 && (
+                  <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+                    {excelPresets.map((preset) => (
+                      <label key={preset.id} className="flex items-center gap-2 rounded-lg border bg-white px-3 py-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={editPresetIds.includes(preset.id)}
+                          onChange={() => toggleEditPreset(preset.id)}
+                          disabled={savingEdit}
+                        />
+                        <span>{preset.name}</span>
+                      </label>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div className="md:col-span-4">
