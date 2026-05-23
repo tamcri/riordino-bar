@@ -1053,7 +1053,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
       {/* MODAL MODIFICA */}
       {editOpen && editItem && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onMouseDown={closeEditModal}>
-          <div className="w-full max-w-xl rounded-2xl bg-white p-5 shadow-xl" onMouseDown={(e) => e.stopPropagation()}>
+          <div className="w-full max-w-xl max-h-[90vh] overflow-y-auto rounded-2xl bg-white p-5 shadow-xl" onMouseDown={(e) => e.stopPropagation()}>
             <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="text-lg font-semibold">Modifica articolo</div>
