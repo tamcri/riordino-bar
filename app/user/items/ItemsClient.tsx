@@ -264,6 +264,42 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
 
   const showTabacchiCols = useMemo(() => isTabacchiCategory(selectedCategory), [selectedCategory]);
 
+  function isUuidValue(v: string | null | undefined) {
+    if (!v) return false;
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i.test(String(v).trim());
+  }
+
+  function resolveCategoryId(value: string) {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    if (isUuidValue(raw)) return raw;
+
+    const found = categories.find((c) => {
+      const name = String(c.name || "").trim().toLowerCase();
+      const slug = String(c.slug || "").trim().toLowerCase();
+      const target = raw.toLowerCase();
+      return name === target || slug === target;
+    });
+
+    return found?.id || raw;
+  }
+
+  function resolveSubcategoryId(value: string, resolvedCategoryId: string) {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    if (isUuidValue(raw)) return raw;
+
+    const found = editSubcategories.find((s) => {
+      const name = String(s.name || "").trim().toLowerCase();
+      const slug = String(s.slug || "").trim().toLowerCase();
+      const target = raw.toLowerCase();
+      const sameCategory = !resolvedCategoryId || s.category_id === resolvedCategoryId;
+      return sameCategory && (name === target || slug === target);
+    });
+
+    return found?.id || raw;
+  }
+
   const qs = useMemo(() => {
     const p = new URLSearchParams();
     if (categoryId) p.set("category_id", categoryId);
@@ -955,6 +991,9 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
         nextVolumeMl = grmlInt;
       }
 
+      const resolvedCategoryId = resolveCategoryId(editCategoryId);
+      const resolvedSubcategoryId = resolveSubcategoryId(editSubcategoryId, resolvedCategoryId);
+
       const payload: any = {
         id: editItem.id,
         code: nextCode,
@@ -969,8 +1008,8 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
         volume_ml_per_unit: nextVolumeMl,
 
         // ✅ categoria/sottocategoria
-        category_id: editCategoryId.trim() === "" ? null : editCategoryId.trim(),
-        subcategory_id: editSubcategoryId.trim() === "" ? null : editSubcategoryId.trim(),
+        category_id: resolvedCategoryId.trim() === "" ? null : resolvedCategoryId.trim(),
+        subcategory_id: resolvedSubcategoryId.trim() === "" ? null : resolvedSubcategoryId.trim(),
 
         // ✅ Preset Excel inventario associati all'articolo
         preset_ids: editPresetIds,
@@ -1053,7 +1092,7 @@ export default function ItemsClient({ isAdmin }: { isAdmin: boolean }) {
       {/* MODAL MODIFICA */}
       {editOpen && editItem && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onMouseDown={closeEditModal}>
-          <div className="w-full max-w-xl max-h-[90vh] overflow-y-auto rounded-2xl bg-white p-5 shadow-xl" onMouseDown={(e) => e.stopPropagation()}>
+          <div className="w-full max-w-xl max-h-[90vh] overflow-y-auto rounded-2xl bg-white p-5 shadow-xl"onMouseDown={(e) => e.stopPropagation()}>
             <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="text-lg font-semibold">Modifica articolo</div>

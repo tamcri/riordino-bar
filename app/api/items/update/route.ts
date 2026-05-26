@@ -6,9 +6,54 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 export const runtime = "nodejs";
 
-function isUuid(v: string | null) {
-  if (!v) return false;
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i.test(v.trim());
+function isUuid(v: unknown) {
+  const s = String(v ?? "").trim();
+  if (!s) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+}
+
+function norm(v: any) {
+  return String(v ?? "").trim().toLowerCase();
+}
+
+async function resolveCategoryId(value: any): Promise<string | null> {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+
+  // Se è già un UUID, lo accettiamo direttamente.
+  if (isUuid(raw)) return raw;
+
+  const { data, error } = await supabaseAdmin
+    .from("categories")
+    .select("id, name, slug")
+    .order("name", { ascending: true });
+
+  if (error) throw error;
+
+  const found = (data || []).find(
+    (c: any) => norm(c.name) === norm(raw) || norm(c.slug) === norm(raw)
+  );
+
+  return found?.id ?? null;
+}
+
+async function resolveSubcategoryId(value: any): Promise<string | null> {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  if (isUuid(raw)) return raw;
+
+  const { data, error } = await supabaseAdmin
+    .from("subcategories")
+    .select("id, name, slug")
+    .order("name", { ascending: true });
+
+  if (error) throw error;
+
+  const found = (data || []).find(
+    (s: any) => norm(s.name) === norm(raw) || norm(s.slug) === norm(raw)
+  );
+
+  return found?.id ?? null;
 }
 
 export async function PATCH(req: Request) {
@@ -18,6 +63,7 @@ export async function PATCH(req: Request) {
   }
 
   const body = await req.json().catch(() => null);
+
 
   const id = String(body?.id ?? "").trim();
   const code = body?.code;
@@ -32,8 +78,6 @@ export async function PATCH(req: Request) {
 
   const category_id = body?.category_id;
   const subcategory_id = body?.subcategory_id;
-
-  // ✅ Nuovo: preset Excel inventario
   const preset_ids = body?.preset_ids;
 
   if (!id) {
@@ -135,54 +179,69 @@ export async function PATCH(req: Request) {
   }
 
   if (category_id !== undefined) {
-    if (category_id === null || category_id === "") {
-      patch.category_id = null;
-      patch.subcategory_id = null;
-    } else if (isUuid(String(category_id))) {
-      patch.category_id = category_id;
-    } else {
-      return NextResponse.json({ ok: false, error: "Categoria non valida" }, { status: 400 });
-    }
+  const resolvedCategoryId = await resolveCategoryId(category_id);
+
+  
+
+  if (category_id === null || category_id === "") {
+    patch.category_id = null;
+    patch.subcategory_id = null;
+  } else if (resolvedCategoryId) {
+    patch.category_id = resolvedCategoryId;
+  } else {
+   
+
+    return NextResponse.json({ ok: false, error: "Categoria non valida" }, { status: 400 });
   }
+}
 
   if (subcategory_id !== undefined) {
+    const resolvedSubcategoryId = await resolveSubcategoryId(subcategory_id);
+
     if (subcategory_id === null || subcategory_id === "") {
       patch.subcategory_id = null;
-    } else if (isUuid(String(subcategory_id))) {
-      patch.subcategory_id = subcategory_id;
+    } else if (resolvedSubcategoryId) {
+      patch.subcategory_id = resolvedSubcategoryId;
     } else {
       return NextResponse.json({ ok: false, error: "Sottocategoria non valida" }, { status: 400 });
     }
   }
 
-  const { error } = await supabaseAdmin
-    .from("items")
-    .update(patch)
-    .eq("id", id);
+  const { error } = await supabaseAdmin.from("items").update(patch).eq("id", id);
 
   if (error) {
     console.error("[items/update] error:", error);
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
 
-  // ✅ Se il frontend passa preset_ids, aggiorno le associazioni preset dell'articolo.
-  // Se preset_ids è undefined, non tocco nulla: così toggle active e update parziali restano invariati.
   if (preset_ids !== undefined) {
     if (!Array.isArray(preset_ids)) {
       return NextResponse.json({ ok: false, error: "preset_ids deve essere un array" }, { status: 400 });
     }
 
     const cleanPresetIds = Array.from(
-      new Set(
-        preset_ids
-          .map((x: any) => String(x ?? "").trim())
-          .filter((x: string) => isUuid(x))
-      )
-    );
+  new Set(
+    preset_ids
+      .map((x: any) => String(x ?? "").trim())
+      .filter((x: string) => isUuid(x))
+  )
+);
 
-    if (cleanPresetIds.length !== preset_ids.length) {
-      return NextResponse.json({ ok: false, error: "Uno o più preset non sono validi" }, { status: 400 });
-    }
+console.log("[items/update] PRESET DEBUG", {
+  preset_ids,
+  cleanPresetIds,
+  presetIdsLength: preset_ids.length,
+  cleanPresetIdsLength: cleanPresetIds.length,
+});
+
+if (cleanPresetIds.length !== preset_ids.length) {
+  console.log("[items/update] PRESET INVALID", {
+    preset_ids,
+    cleanPresetIds,
+  });
+
+  return NextResponse.json({ ok: false, error: "Uno o più preset non sono validi" }, { status: 400 });
+}
 
     const { error: delPresetErr } = await supabaseAdmin
       .from("inventory_excel_preset_items")
