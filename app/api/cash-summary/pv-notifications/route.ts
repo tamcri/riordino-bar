@@ -50,7 +50,6 @@ export async function GET() {
         summary_date,
         message,
         changed_fields,
-        field_comments,
         is_read,
         created_at,
         read_at
