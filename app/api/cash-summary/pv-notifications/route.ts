@@ -7,6 +7,7 @@ export const runtime = "nodejs";
 
 async function getPvIdFromSession(session: any) {
   const username = String(session?.username ?? "").trim();
+
   if (!username) return null;
 
   const tableCandidates = ["app_user", "app_users", "utenti", "users"];
@@ -21,10 +22,25 @@ async function getPvIdFromSession(session: any) {
     if (error) continue;
 
     const pvId = String((data as any)?.pv_id ?? "").trim();
+
     if (pvId) return pvId;
   }
 
-  return null;
+  // fallback tramite codice PV nello username
+  const code = username.split(/\s+/)[0]?.trim().toUpperCase();
+
+  if (!code) return null;
+
+  const { data: pvData, error: pvErr } = await supabaseAdmin
+    .from("pvs")
+    .select("id")
+    .eq("code", code)
+    .eq("is_active", true)
+    .maybeSingle();
+
+  if (pvErr) return null;
+
+  return String(pvData?.id ?? "").trim() || null;
 }
 
 export async function GET() {
