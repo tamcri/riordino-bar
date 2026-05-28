@@ -79,7 +79,7 @@ const FIELD_LABELS: Record<TrackedFieldKey, string> = {
   vendita_gv: "Vendita G&V",
   vendita_tabacchi: "Vendita Tabacchi",
   pos: "POS",
-  spese_extra: "Spese Extra",
+  spese_extra: "Prelievo",
   tot_versato: "Tot. Versato",
   fondo_cassa_iniziale: "Fondo Cassa Iniziale",
   parziale_1: "Parziale 1",
@@ -117,16 +117,6 @@ function normalizeFieldComments(value: unknown) {
         ALLOWED_COMMENT_FIELDS.has(row.field_key) &&
         row.comment_text.length > 0
     );
-}
-
-function commentsRowsToMap(rows: any[]) {
-  return (rows ?? []).reduce((acc: Record<string, string>, row: any) => {
-    const fieldKey = String(row?.field_key ?? "").trim();
-    const commentText = String(row?.comment_text ?? "").trim();
-    if (!fieldKey) return acc;
-    acc[fieldKey] = commentText;
-    return acc;
-  }, {});
 }
 
 function numbersEqual(a: number | null, b: number | null) {
@@ -229,20 +219,6 @@ export async function POST(req: Request) {
         { status: 404 }
       );
     }
-
-    const { data: existingCommentRows, error: existingCommentsErr } = await supabaseAdmin
-      .from("cash_summary_field_comments")
-      .select("field_key, comment_text")
-      .eq("summary_id", id);
-
-    if (existingCommentsErr) {
-      return NextResponse.json(
-        { ok: false, error: existingCommentsErr.message },
-        { status: 500 }
-      );
-    }
-
-    const existingCommentsMap = commentsRowsToMap(existingCommentRows ?? []);
 
     const incasso_totale = toNumber(body.incasso_totale);
     const gv_pagati = toNumber(body.gv_pagati);
@@ -357,6 +333,7 @@ export async function POST(req: Request) {
     );
 
     const changedFields: string[] = [];
+    const changedValues: Record<string, { old: number | null; new: number | null }> = {};
 
     const previousTrackedValues: Record<TrackedFieldKey, number | null> = {
       incasso_totale: toNumber(currentSummary.incasso_totale),
@@ -395,20 +372,11 @@ export async function POST(req: Request) {
     for (const fieldKey of TRACKED_NOTIFICATION_FIELDS) {
       if (!numbersEqual(previousTrackedValues[fieldKey], nextTrackedValues[fieldKey])) {
         changedFields.push(fieldKey);
-        continue;
+        changedValues[fieldKey] = {
+          old: previousTrackedValues[fieldKey],
+          new: nextTrackedValues[fieldKey],
+        };
       }
-
-      const previousComment = String(existingCommentsMap[fieldKey] ?? "").trim();
-      const nextComment = String(normalizedFieldCommentsMap[fieldKey] ?? "").trim();
-
-      if (previousComment !== nextComment) {
-        changedFields.push(fieldKey);
-      }
-    }
-
-    const previousStatus = String(currentSummary.status ?? "").trim().toLowerCase();
-    if (previousStatus !== status) {
-      changedFields.push("status");
     }
 
     const updatePayload = {
@@ -515,18 +483,8 @@ export async function POST(req: Request) {
 
     if (changedFields.length > 0) {
       const changedFieldLabels = changedFields.map(
-        (fieldKey) =>
-          FIELD_LABELS[fieldKey as TrackedFieldKey] ??
-          (fieldKey === "status" ? "Stato" : fieldKey)
+        (fieldKey) => FIELD_LABELS[fieldKey as TrackedFieldKey] ?? fieldKey
       );
-
-      const changedCommentsOnly = changedFields.reduce((acc: Record<string, string>, fieldKey) => {
-        const nextComment = String(normalizedFieldCommentsMap[fieldKey] ?? "").trim();
-        if (nextComment) {
-          acc[fieldKey] = nextComment;
-        }
-        return acc;
-      }, {});
 
       const notificationPayload = {
         summary_id: id,
@@ -534,7 +492,7 @@ export async function POST(req: Request) {
         summary_date: data,
         message: `Il riepilogo del ${data} è stato modificato dall'amministrazione.`,
         changed_fields: changedFieldLabels,
-        field_comments: changedCommentsOnly,
+        changed_values: changedValues,
         is_read: false,
       };
 
@@ -562,6 +520,7 @@ export async function POST(req: Request) {
       status,
       field_comments: normalizedFieldCommentsMap,
       changed_fields: changedFields,
+      changed_values: changedValues,
     });
   } catch (e: any) {
     return NextResponse.json(

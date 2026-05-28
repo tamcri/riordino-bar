@@ -23,6 +23,11 @@ type PvCashSummaryRow = {
   is_closed: boolean;
 };
 
+type ChangedValue = {
+  old: number | null;
+  new: number | null;
+};
+
 type NotificationRow = {
   id: string;
   summary_id: string;
@@ -30,7 +35,7 @@ type NotificationRow = {
   summary_date: string;
   message: string;
   changed_fields?: string[] | null;
-  field_comments?: Record<string, string> | null;
+  changed_values?: Record<string, ChangedValue> | null;
   is_read: boolean;
   created_at: string;
   read_at?: string | null;
@@ -51,7 +56,7 @@ const FIELD_LABELS: Record<string, string> = {
   vendita_gv: "Vendita G&V",
   vendita_tabacchi: "Vendita Tabacchi",
   pos: "POS",
-  spese_extra: "Spese Extra",
+  spese_extra: "Prelievo",
   tot_versato: "Tot. Versato",
   fondo_cassa_iniziale: "Fondo Cassa Iniziale",
   parziale_1: "Parziale 1",
@@ -175,6 +180,15 @@ function getPeriodPresetRange(preset: PeriodPresetKey) {
     default:
       return { start: null, end: null };
   }
+}
+
+function isChangedValue(value: unknown): value is ChangedValue {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    "old" in value &&
+    "new" in value
+  );
 }
 
 export default function RiepilogoIncassatoClient() {
@@ -330,10 +344,15 @@ export default function RiepilogoIncassatoClient() {
               ? notification.changed_fields
               : [];
 
-            const fieldComments =
-              notification.field_comments && typeof notification.field_comments === "object"
-                ? notification.field_comments
+            const changedValues =
+              notification.changed_values &&
+              typeof notification.changed_values === "object"
+                ? notification.changed_values
                 : {};
+
+            const changedValueEntries = Object.entries(changedValues).filter(
+              ([, value]) => isChangedValue(value)
+            );
 
             return (
               <div
@@ -362,31 +381,39 @@ export default function RiepilogoIncassatoClient() {
                   </button>
                 </div>
 
-                {changedFields.length > 0 && (
+                {changedValueEntries.length > 0 ? (
                   <div className="mt-3">
-                    <div className="text-sm font-medium text-blue-900">Campi aggiornati:</div>
+                    <div className="text-sm font-medium text-blue-900">
+                      Campi corretti:
+                    </div>
                     <ul className="mt-1 list-disc pl-5 text-sm text-blue-800">
-                      {changedFields.map((field, index) => (
-                        <li key={`${notification.id}-${field}-${index}`}>
-                          {getFieldLabel(field)}
-                        </li>
-                      ))}
+                      {changedValueEntries.map(([fieldKey, value]) => {
+                        const changedValue = value as ChangedValue;
+
+                        return (
+                          <li key={`${notification.id}-${fieldKey}`}>
+                            <span className="font-medium">{getFieldLabel(fieldKey)}:</span>{" "}
+                            <span>{formatEuro(changedValue.old)}</span>
+                            <span className="mx-1">→</span>
+                            <span className="font-semibold">{formatEuro(changedValue.new)}</span>
+                          </li>
+                        );
+                      })}
                     </ul>
                   </div>
-                )}
-
-                {Object.keys(fieldComments).length > 0 && (
-                  <div className="mt-3 rounded-xl border border-blue-200 bg-white p-3">
-                    <div className="text-sm font-medium text-slate-900">Note amministrazione</div>
-                    <div className="mt-2 space-y-2 text-sm text-slate-700">
-                      {Object.entries(fieldComments).map(([fieldKey, commentText]) => (
-                        <div key={`${notification.id}-${fieldKey}`}>
-                          <span className="font-medium">{getFieldLabel(fieldKey)}:</span>{" "}
-                          {String(commentText)}
-                        </div>
-                      ))}
+                ) : (
+                  changedFields.length > 0 && (
+                    <div className="mt-3">
+                      <div className="text-sm font-medium text-blue-900">Campi aggiornati:</div>
+                      <ul className="mt-1 list-disc pl-5 text-sm text-blue-800">
+                        {changedFields.map((field, index) => (
+                          <li key={`${notification.id}-${field}-${index}`}>
+                            {getFieldLabel(field)}
+                          </li>
+                        ))}
+                      </ul>
                     </div>
-                  </div>
+                  )
                 )}
               </div>
             );
