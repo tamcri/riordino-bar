@@ -198,13 +198,8 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     const session = await getSessionFromCookie();
-    if (!session || session.role !== "punto_vendita") {
+    if (!session || !["admin", "amministrativo", "punto_vendita"].includes(session.role)) {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
-    }
-
-    const manager = await requireShiftManagerAccess(session);
-    if (!manager.ok) {
-      return NextResponse.json({ ok: false, error: manager.error }, { status: manager.httpStatus });
     }
 
     const body = asRecord(await req.json().catch(() => null));
@@ -217,10 +212,35 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Troppe righe turno in una sola richiesta" }, { status: 400 });
     }
 
-    const pvLookup = await getPvIdForSession(session);
-    const pv_id = pvLookup.pv_id;
+    let pv_id: string | null = null;
+    let warning: string | null = null;
+
+    if (session.role === "punto_vendita") {
+      const manager = await requireShiftManagerAccess(session);
+      if (!manager.ok) {
+        return NextResponse.json({ ok: false, error: manager.error }, { status: manager.httpStatus });
+      }
+
+      const pvLookup = await getPvIdForSession(session);
+      pv_id = pvLookup.pv_id;
+      warning = pvLookup.warning ?? null;
+
+      if (!pv_id) {
+        return NextResponse.json({ ok: false, error: "Utente PV senza pv_id assegnato" }, { status: 400 });
+      }
+    } else {
+      const requestedPvId = String(body.pv_id ?? "").trim();
+      if (!isUuid(requestedPvId)) {
+        return NextResponse.json(
+          { ok: false, error: "Per salvare da admin devi selezionare un punto vendita valido" },
+          { status: 400 }
+        );
+      }
+      pv_id = requestedPvId;
+    }
+
     if (!pv_id) {
-      return NextResponse.json({ ok: false, error: "Utente PV senza pv_id assegnato" }, { status: 400 });
+      return NextResponse.json({ ok: false, error: "Punto vendita non valido" }, { status: 400 });
     }
 
     const employeeIds = Array.from(
@@ -361,7 +381,7 @@ export async function POST(req: Request) {
       week_end: addDaysISO(week_start, 6),
       saved: payload.length,
       rows: (data ?? []).map((row) => normalizeShift(row as unknown as ShiftDbRow)),
-      warning: pvLookup.warning ?? null,
+      warning,
     });
   } catch (e: unknown) {
     return NextResponse.json({ ok: false, error: getErrorMessage(e, "Errore server") }, { status: 500 });
