@@ -423,6 +423,18 @@ export default function AdminPage() {
                 Riepiloghi Incassato
               </Link>
 
+              <Link
+  href="/admin/cash-summary/supplier-downloads"
+  className="rounded-2xl border bg-white p-4 shadow-sm transition hover:bg-slate-50"
+>
+  <div className="text-base font-semibold text-slate-900">
+    Scarichi Fornitori
+  </div>
+  <div className="mt-1 text-sm text-slate-500">
+    Analizza frequenza, importi e passaggi dei fornitori nei PV.
+  </div>
+</Link>
+
               <div className="pt-3 mt-4 border-t">
                 <div className="text-xs font-bold uppercase tracking-wide text-gray-1000">
                   Roberta Matruglio
