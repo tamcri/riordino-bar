@@ -103,13 +103,8 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     const session = await getSessionFromCookie();
-    if (!session || session.role !== "punto_vendita") {
+    if (!session || !["admin", "amministrativo", "punto_vendita"].includes(session.role)) {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
-    }
-
-    const manager = await requireShiftManagerAccess(session);
-    if (!manager.ok) {
-      return NextResponse.json({ ok: false, error: manager.error }, { status: manager.httpStatus });
     }
 
     const body = asRecord(await req.json().catch(() => null));
@@ -119,10 +114,28 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Nome dipendente obbligatorio" }, { status: 400 });
     }
 
-    const pvLookup = await getPvIdForSession(session);
-    const pv_id = pvLookup.pv_id;
-    if (!pv_id) {
-      return NextResponse.json({ ok: false, error: "Utente PV senza pv_id assegnato" }, { status: 400 });
+    let pv_id: string | null = null;
+    let warning: string | null = null;
+
+    if (session.role === "punto_vendita") {
+      const manager = await requireShiftManagerAccess(session);
+      if (!manager.ok) {
+        return NextResponse.json({ ok: false, error: manager.error }, { status: manager.httpStatus });
+      }
+
+      const pvLookup = await getPvIdForSession(session);
+      pv_id = pvLookup.pv_id;
+      warning = pvLookup.warning ?? null;
+
+      if (!pv_id) {
+        return NextResponse.json({ ok: false, error: "Utente PV senza pv_id assegnato" }, { status: 400 });
+      }
+    } else {
+      const pvIdParam = String(body.pv_id ?? "").trim();
+      if (!isUuid(pvIdParam)) {
+        return NextResponse.json({ ok: false, error: "Seleziona un punto vendita valido" }, { status: 400 });
+      }
+      pv_id = pvIdParam;
     }
 
     const userId = await getAppUserIdByUsername(session.username);
@@ -144,7 +157,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: msg }, { status: 400 });
     }
 
-    return NextResponse.json({ ok: true, row: normalizeEmployee(data as unknown as EmployeeDbRow), warning: pvLookup.warning ?? null });
+    return NextResponse.json({ ok: true, row: normalizeEmployee(data as unknown as EmployeeDbRow), warning });
   } catch (e: unknown) {
     return NextResponse.json({ ok: false, error: getErrorMessage(e, "Errore server") }, { status: 500 });
   }
@@ -153,13 +166,8 @@ export async function POST(req: Request) {
 export async function PATCH(req: Request) {
   try {
     const session = await getSessionFromCookie();
-    if (!session || session.role !== "punto_vendita") {
+    if (!session || !["admin", "amministrativo", "punto_vendita"].includes(session.role)) {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
-    }
-
-    const manager = await requireShiftManagerAccess(session);
-    if (!manager.ok) {
-      return NextResponse.json({ ok: false, error: manager.error }, { status: manager.httpStatus });
     }
 
     const body = asRecord(await req.json().catch(() => null));
@@ -186,10 +194,28 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ ok: false, error: "Nessuna modifica da salvare" }, { status: 400 });
     }
 
-    const pvLookup = await getPvIdForSession(session);
-    const pv_id = pvLookup.pv_id;
-    if (!pv_id) {
-      return NextResponse.json({ ok: false, error: "Utente PV senza pv_id assegnato" }, { status: 400 });
+    let pv_id: string | null = null;
+    let warning: string | null = null;
+
+    if (session.role === "punto_vendita") {
+      const manager = await requireShiftManagerAccess(session);
+      if (!manager.ok) {
+        return NextResponse.json({ ok: false, error: manager.error }, { status: manager.httpStatus });
+      }
+
+      const pvLookup = await getPvIdForSession(session);
+      pv_id = pvLookup.pv_id;
+      warning = pvLookup.warning ?? null;
+
+      if (!pv_id) {
+        return NextResponse.json({ ok: false, error: "Utente PV senza pv_id assegnato" }, { status: 400 });
+      }
+    } else {
+      const pvIdParam = String(body.pv_id ?? "").trim();
+      if (!isUuid(pvIdParam)) {
+        return NextResponse.json({ ok: false, error: "Seleziona un punto vendita valido" }, { status: 400 });
+      }
+      pv_id = pvIdParam;
     }
 
     update.updated_by = await getAppUserIdByUsername(session.username);
@@ -211,7 +237,7 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ ok: false, error: "Dipendente non trovato" }, { status: 404 });
     }
 
-    return NextResponse.json({ ok: true, row: normalizeEmployee(data as unknown as EmployeeDbRow), warning: pvLookup.warning ?? null });
+    return NextResponse.json({ ok: true, row: normalizeEmployee(data as unknown as EmployeeDbRow), warning });
   } catch (e: unknown) {
     return NextResponse.json({ ok: false, error: getErrorMessage(e, "Errore server") }, { status: 500 });
   }

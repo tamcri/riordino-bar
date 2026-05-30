@@ -48,6 +48,7 @@ type PvsResponse = ApiResponseBase & {
 
 type EmployeesResponse = ApiResponseBase & {
   rows?: Employee[];
+  row?: Employee;
 };
 
 type ShiftRow = {
@@ -320,6 +321,10 @@ export default function TurniAdminClient() {
   const [editingEmployee, setEditingEmployee] = useState<Employee | null>(null);
   const [editCells, setEditCells] = useState<WeeklyEditCell[]>([]);
   const [editSaving, setEditSaving] = useState(false);
+  const [newEmployeeName, setNewEmployeeName] = useState("");
+  const [renameEmployeeId, setRenameEmployeeId] = useState("");
+  const [renameEmployeeName, setRenameEmployeeName] = useState("");
+  const [employeeManageLoading, setEmployeeManageLoading] = useState(false);
 
   const weekDates = useMemo(() => getWeekDates(weekStart), [weekStart]);
   const weekLabel = `${formatDateIT(weekDates[0])} - ${formatDateIT(weekDates[6])}`;
@@ -389,6 +394,11 @@ export default function TurniAdminClient() {
   const selectedWeeklyEmployee = useMemo(
     () => weeklyEmployees.find((employee) => employee.id === weeklyEmployeeId) ?? null,
     [weeklyEmployeeId, weeklyEmployees]
+  );
+
+  const selectedRenameEmployee = useMemo(
+    () => weeklyEmployees.find((employee) => employee.id === renameEmployeeId) ?? null,
+    [renameEmployeeId, weeklyEmployees]
   );
 
   const editWeekTotalHours = useMemo(
@@ -576,11 +586,114 @@ export default function TurniAdminClient() {
         setEditingEmployee(null);
         setEditCells([]);
       }
+
+      if (renameEmployeeId && !list.some((employee) => employee.id === renameEmployeeId)) {
+        setRenameEmployeeId("");
+        setRenameEmployeeName("");
+      }
     } catch (e: unknown) {
       setError(getErrorMessage(e, "Errore caricamento dipendenti per modifica admin"));
       setWeeklyEmployees([]);
     } finally {
       setWeeklyEmployeesLoading(false);
+    }
+  }
+
+  async function createAdminEmployee(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setMsg(null);
+
+    if (!pvId) {
+      setError("Per aggiungere un dipendente da admin devi selezionare un singolo punto vendita.");
+      return;
+    }
+
+    const name = newEmployeeName.trim();
+    if (!name) {
+      setError("Inserisci il nome del dipendente.");
+      return;
+    }
+
+    setEmployeeManageLoading(true);
+    try {
+      const res = await fetchJsonSafe<EmployeesResponse>("/api/work-shifts/employees", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          pv_id: pvId,
+          name,
+        }),
+      });
+
+      if (!res.ok) throw new Error(res.data?.error || res.rawText || `HTTP ${res.status}`);
+
+      const created = res.data?.row ?? null;
+      setNewEmployeeName("");
+      setMsg("Dipendente aggiunto correttamente.");
+
+      await loadWeeklyEmployees(pvId);
+      if (viewMode === "monthly") await loadEmployees(pvId);
+      if (created?.id) {
+        setWeeklyEmployeeId(created.id);
+        setRenameEmployeeId(created.id);
+        setRenameEmployeeName(created.name);
+      }
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, "Errore aggiunta dipendente"));
+    } finally {
+      setEmployeeManageLoading(false);
+    }
+  }
+
+  async function renameAdminEmployee(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setMsg(null);
+
+    if (!pvId) {
+      setError("Per rinominare un dipendente da admin devi selezionare un singolo punto vendita.");
+      return;
+    }
+
+    if (!renameEmployeeId) {
+      setError("Seleziona il dipendente da rinominare.");
+      return;
+    }
+
+    const name = renameEmployeeName.trim();
+    if (!name) {
+      setError("Inserisci il nuovo nome del dipendente.");
+      return;
+    }
+
+    setEmployeeManageLoading(true);
+    try {
+      const res = await fetchJsonSafe<EmployeesResponse>("/api/work-shifts/employees", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: renameEmployeeId,
+          pv_id: pvId,
+          name,
+        }),
+      });
+
+      if (!res.ok) throw new Error(res.data?.error || res.rawText || `HTTP ${res.status}`);
+
+      setMsg("Nome dipendente aggiornato correttamente.");
+      await loadWeeklyEmployees(pvId);
+      await loadRows();
+      if (viewMode === "monthly") await loadEmployees(pvId);
+
+      const updated = res.data?.row ?? null;
+      if (editingEmployee?.id === renameEmployeeId && updated) {
+        setEditingEmployee(updated);
+      }
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, "Errore rinomina dipendente"));
+    } finally {
+      setEmployeeManageLoading(false);
     }
   }
 
@@ -732,6 +845,9 @@ export default function TurniAdminClient() {
     setWeeklyEmployeeId("");
     setEditingEmployee(null);
     setEditCells([]);
+    setNewEmployeeName("");
+    setRenameEmployeeId("");
+    setRenameEmployeeName("");
 
     if (pvId) {
       void loadWeeklyEmployees(pvId);
@@ -1086,6 +1202,94 @@ export default function TurniAdminClient() {
                       </button>
                     </div>
                   </div>
+                </div>
+
+                <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-2">
+                  <form onSubmit={createAdminEmployee} className="rounded-2xl border bg-white p-4">
+                    <h4 className="font-semibold">Aggiungi dipendente</h4>
+                    <p className="mt-1 text-sm text-gray-600">
+                      Crea un nuovo dipendente nel PV selezionato e poi assegnagli i turni.
+                    </p>
+
+                    <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_auto] md:items-end">
+                      <div>
+                        <label className="block text-sm font-medium mb-2">Nome dipendente</label>
+                        <input
+                          className="w-full rounded-xl border bg-white p-3 disabled:opacity-60"
+                          value={newEmployeeName}
+                          maxLength={120}
+                          disabled={!pvId || employeeManageLoading}
+                          onChange={(e) => setNewEmployeeName(e.target.value)}
+                          placeholder={!pvId ? "Seleziona prima un PV" : "Es. Mario Rossi"}
+                        />
+                      </div>
+
+                      <button
+                        type="submit"
+                        className="rounded-xl bg-slate-900 px-4 py-3 text-white disabled:opacity-60"
+                        disabled={!pvId || employeeManageLoading || !newEmployeeName.trim()}
+                      >
+                        {employeeManageLoading ? "Salvo..." : "Aggiungi"}
+                      </button>
+                    </div>
+                  </form>
+
+                  <form onSubmit={renameAdminEmployee} className="rounded-2xl border bg-white p-4">
+                    <h4 className="font-semibold">Modifica nome dipendente</h4>
+                    <p className="mt-1 text-sm text-gray-600">
+                      Rinomina un dipendente esistente senza perdere lo storico turni.
+                    </p>
+
+                    <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_auto] md:items-end">
+                      <div>
+                        <label className="block text-sm font-medium mb-2">Dipendente</label>
+                        <select
+                          className="w-full rounded-xl border bg-white p-3 disabled:opacity-60"
+                          value={renameEmployeeId}
+                          disabled={!pvId || weeklyEmployeesLoading || employeeManageLoading}
+                          onChange={(e) => {
+                            const nextId = e.target.value;
+                            const employee = weeklyEmployees.find((item) => item.id === nextId) ?? null;
+                            setRenameEmployeeId(nextId);
+                            setRenameEmployeeName(employee?.name ?? "");
+                          }}
+                        >
+                          <option value="">
+                            {!pvId
+                              ? "Seleziona prima un PV"
+                              : weeklyEmployeesLoading
+                                ? "Caricamento..."
+                                : "Seleziona dipendente"}
+                          </option>
+                          {weeklyEmployees.map((employee) => (
+                            <option key={employee.id} value={employee.id}>
+                              {employee.name}{employee.active ? "" : " — non attivo"}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium mb-2">Nuovo nome</label>
+                        <input
+                          className="w-full rounded-xl border bg-white p-3 disabled:opacity-60"
+                          value={renameEmployeeName}
+                          maxLength={120}
+                          disabled={!renameEmployeeId || employeeManageLoading}
+                          onChange={(e) => setRenameEmployeeName(e.target.value)}
+                          placeholder={selectedRenameEmployee?.name ?? "Nuovo nome"}
+                        />
+                      </div>
+
+                      <button
+                        type="submit"
+                        className="rounded-xl bg-slate-900 px-4 py-3 text-white disabled:opacity-60"
+                        disabled={!pvId || !renameEmployeeId || employeeManageLoading || !renameEmployeeName.trim()}
+                      >
+                        {employeeManageLoading ? "Salvo..." : "Rinomina"}
+                      </button>
+                    </div>
+                  </form>
                 </div>
 
                 {editingEmployee && (
