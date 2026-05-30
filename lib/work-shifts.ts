@@ -1,4 +1,4 @@
-export type ShiftStatus = "work" | "split" | "rest" | "vacation" | "change";
+export type ShiftStatus = "work" | "split" | "rest" | "vacation" | "sick" | "change";
 
 export type WeekDay = {
   key: string;
@@ -6,7 +6,7 @@ export type WeekDay = {
   label: string;
 };
 
-export const SHIFT_STATUSES: ShiftStatus[] = ["work", "split", "rest", "vacation", "change"];
+export const SHIFT_STATUSES: ShiftStatus[] = ["work", "split", "rest", "vacation", "sick", "change"];
 
 export const WEEK_DAYS: WeekDay[] = [
   { key: "mon", shortLabel: "Lun", label: "Lunedì" },
@@ -60,7 +60,7 @@ export function normalizeTime(value: unknown): string | null {
 
 export function normalizeShiftStatus(value: unknown): ShiftStatus | null {
   const s = String(value ?? "").trim().toLowerCase();
-  if (s === "work" || s === "split" || s === "rest" || s === "vacation" || s === "change") return s;
+  if (s === "work" || s === "split" || s === "rest" || s === "vacation" || s === "sick" || s === "change") return s;
   return null;
 }
 
@@ -74,13 +74,15 @@ export function shiftStatusLabel(status: ShiftStatus) {
       return "Riposo";
     case "vacation":
       return "Ferie";
+    case "sick":
+      return "Malattia";
     case "change":
       return "Cambio turno";
   }
 }
 
 export function isNoTimeStatus(status: ShiftStatus) {
-  return status === "rest" || status === "vacation";
+  return status === "rest" || status === "vacation" || status === "sick";
 }
 
 export function requiresSecondShift(status: ShiftStatus) {
@@ -213,6 +215,8 @@ export function getShiftPublicLabel(args: {
       return "Riposo";
     case "vacation":
       return "Ferie";
+    case "sick":
+      return "Malattia";
     case "change":
       return "Cambio turno";
     case "work": {

@@ -1,35 +1,35 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
+import { COOKIE_NAME, parseSessionValue, type SessionData } from "@/lib/auth";
+import { getAppUserIdByUsername } from "@/lib/appUsers";
+import { getPvIdForSession } from "@/lib/pvLookup";
+import { requireShiftManagerAccess } from "@/lib/work-shifts-manager";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import { PdfReport, safePdfFilePart } from "@/lib/work-shifts-pdf";
 import {
+  addDaysISO,
   asRecord,
-  formatDateIT,
-  formatHours,
-  formatShiftTimeRange,
+  clampText,
+  currentWeekMondayISO,
   getErrorMessage,
+  getWeekDates,
+  getMondayISO,
+  getShiftPublicLabel,
   isDateOnly,
+  isNoTimeStatus,
   isUuid,
+  minutesBetween,
+  requiresSecondShift,
   normalizeShiftStatus,
+  shiftMinutesTotal,
   normalizeTime,
-  shiftHoursTotal,
-  shiftStatusLabel,
-  toDateOnlyUTC,
-  type ShiftStatus,
 } from "@/lib/work-shifts";
 
 export const runtime = "nodejs";
 
-type EmployeeDbRow = {
+type ShiftDbRow = {
   id?: unknown;
   pv_id?: unknown;
-  name?: unknown;
-  active?: unknown;
-  pvs?: unknown;
-};
-
-type ShiftDbRow = {
+  employee_id?: unknown;
   shift_date?: unknown;
   start_time?: unknown;
   end_time?: unknown;
@@ -37,262 +37,333 @@ type ShiftDbRow = {
   second_end_time?: unknown;
   status?: unknown;
   note?: unknown;
+  created_at?: unknown;
+  updated_at?: unknown;
+  employees?: unknown;
+  pvs?: unknown;
 };
 
-type MonthlyRow = {
-  shift_date: string;
-  weekday: string;
-  status: ShiftStatus | null;
-  start_time: string | null;
-  end_time: string | null;
-  second_start_time: string | null;
-  second_end_time: string | null;
-  shift_label: string;
-  note: string;
-  hours: number;
-};
-
-function employeeSelect() {
+function shiftSelect() {
   return `
     id,
     pv_id,
-    name,
-    active,
+    employee_id,
+    shift_date,
+    start_time,
+    end_time,
+    second_start_time,
+    second_end_time,
+    status,
+    note,
+    created_at,
+    updated_at,
+    employees:employees(id, name, active),
     pvs:pvs(code, name)
   `;
 }
 
-function isMonth(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  const m = /^(\d{4})-(\d{2})$/.exec(value.trim());
-  if (!m) return false;
-
-  const yyyy = Number(m[1]);
-  const mm = Number(m[2]);
-  return yyyy >= 2000 && yyyy <= 2100 && mm >= 1 && mm <= 12;
-}
-
-function monthBounds(month: string) {
-  const [yyyy, mm] = month.split("-").map(Number);
-  const start = new Date(Date.UTC(yyyy, mm - 1, 1));
-  const end = new Date(Date.UTC(yyyy, mm, 0));
-
-  return {
-    monthStart: toDateOnlyUTC(start),
-    monthEnd: toDateOnlyUTC(end),
-    days: Array.from({ length: end.getUTCDate() }, (_, index) => {
-      const d = new Date(Date.UTC(yyyy, mm - 1, index + 1));
-      return toDateOnlyUTC(d);
-    }),
-  };
-}
-
-function formatMonthIT(value: string) {
-  const [yyyy, mm] = value.split("-").map(Number);
-  const d = new Date(Number(yyyy), Number(mm) - 1, 1);
-  return new Intl.DateTimeFormat("it-IT", { month: "long", year: "numeric" }).format(d);
-}
-
-function weekdayLabel(dateISO: string) {
-  if (!isDateOnly(dateISO)) return "";
-  const [yyyy, mm, dd] = dateISO.split("-").map(Number);
-  const d = new Date(Date.UTC(yyyy, mm - 1, dd));
-  const labels = ["Dom", "Lun", "Mar", "Mer", "Gio", "Ven", "Sab"];
-  return labels[d.getUTCDay()] ?? "";
-}
-
-function normalizeEmployee(row: EmployeeDbRow) {
+function normalizeShift(row: ShiftDbRow) {
+  const startTime = normalizeTime(row?.start_time ?? "") ?? null;
+  const endTime = normalizeTime(row?.end_time ?? "") ?? null;
+  const secondStartTime = normalizeTime(row?.second_start_time ?? "") ?? null;
+  const secondEndTime = normalizeTime(row?.second_end_time ?? "") ?? null;
+  const employee = asRecord(row?.employees);
   const pv = asRecord(row?.pvs);
 
   return {
     id: String(row?.id ?? ""),
     pv_id: String(row?.pv_id ?? ""),
-    name: String(row?.name ?? ""),
-    active: row?.active !== false,
+    employee_id: String(row?.employee_id ?? ""),
+    employee_name: employee.name ? String(employee.name) : "",
+    employee_active: employee.active !== false,
     pv_code: pv.code ? String(pv.code) : null,
     pv_name: pv.name ? String(pv.name) : null,
-  };
-}
-
-function normalizeShift(row: ShiftDbRow) {
-  const status = normalizeShiftStatus(row?.status) ?? "rest";
-  const startTime = normalizeTime(row?.start_time ?? "") ?? null;
-  const endTime = normalizeTime(row?.end_time ?? "") ?? null;
-  const secondStartTime = normalizeTime(row?.second_start_time ?? "") ?? null;
-  const secondEndTime = normalizeTime(row?.second_end_time ?? "") ?? null;
-  const hours = shiftHoursTotal({
-    status,
-    start_time: startTime,
-    end_time: endTime,
-    second_start_time: secondStartTime,
-    second_end_time: secondEndTime,
-  });
-  const shiftLabel = formatShiftTimeRange({
-    status,
-    start_time: startTime,
-    end_time: endTime,
-    second_start_time: secondStartTime,
-    second_end_time: secondEndTime,
-  });
-
-  return {
     shift_date: String(row?.shift_date ?? ""),
-    status,
+    status: normalizeShiftStatus(row?.status) ?? "rest",
     start_time: startTime,
     end_time: endTime,
     second_start_time: secondStartTime,
     second_end_time: secondEndTime,
-    shift_label: shiftLabel,
     note: row?.note ? String(row.note) : "",
-    hours,
+    hours: shiftMinutesTotal({ status: normalizeShiftStatus(row?.status) ?? "rest", start_time: startTime, end_time: endTime, second_start_time: secondStartTime, second_end_time: secondEndTime }) / 60,
+    created_at: row?.created_at ? String(row.created_at) : null,
+    updated_at: row?.updated_at ? String(row.updated_at) : null,
   };
 }
 
-function shiftTime(row: MonthlyRow) {
-  return row.shift_label || "-";
+async function getSessionFromCookie() {
+  return parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
+}
+
+async function resolvePvIdForRequest(session: SessionData, pvIdParam: string) {
+  if (session.role === "punto_vendita") {
+    const r = await getPvIdForSession(session);
+    if (!r.pv_id) return { ok: false as const, error: "Utente PV senza pv_id", pv_id: null };
+    return { ok: true as const, pv_id: r.pv_id, warning: r.warning ?? null };
+  }
+
+  if (pvIdParam) {
+    if (!isUuid(pvIdParam)) return { ok: false as const, error: "pv_id non valido", pv_id: null };
+    return { ok: true as const, pv_id: pvIdParam, warning: null };
+  }
+
+  return { ok: true as const, pv_id: null, warning: null };
+}
+
+function validateWeekStart(value: unknown) {
+  const raw = String(value ?? "").trim();
+  const base = isDateOnly(raw) ? raw : currentWeekMondayISO();
+  return getMondayISO(base);
 }
 
 export async function GET(req: Request) {
   try {
-    const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
-
-    if (!session || !["admin", "amministrativo"].includes(session.role)) {
+    const session = await getSessionFromCookie();
+    if (!session || !["admin", "amministrativo", "punto_vendita"].includes(session.role)) {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
     }
 
+    if (session.role === "punto_vendita") {
+      const manager = await requireShiftManagerAccess(session);
+      if (!manager.ok) {
+        return NextResponse.json({ ok: false, error: manager.error }, { status: manager.httpStatus });
+      }
+    }
+
     const url = new URL(req.url);
-    const month = String(url.searchParams.get("month") ?? "").trim();
-    const pvId = String(url.searchParams.get("pv_id") ?? "").trim();
-    const employeeId = String(url.searchParams.get("employee_id") ?? "").trim();
+    const week_start = validateWeekStart(url.searchParams.get("week_start"));
+    const weekDates = getWeekDates(week_start);
+    const week_end = weekDates[6];
+    const pvIdParam = String(url.searchParams.get("pv_id") ?? "").trim();
 
-    if (!isMonth(month)) {
-      return NextResponse.json({ ok: false, error: "Mese non valido" }, { status: 400 });
+    const pvResolved = await resolvePvIdForRequest(session, pvIdParam);
+    if (!pvResolved.ok) {
+      return NextResponse.json({ ok: false, error: pvResolved.error }, { status: 400 });
     }
 
-    if (pvId && !isUuid(pvId)) {
-      return NextResponse.json({ ok: false, error: "pv_id non valido" }, { status: 400 });
-    }
-
-    if (!isUuid(employeeId)) {
-      return NextResponse.json({ ok: false, error: "employee_id non valido" }, { status: 400 });
-    }
-
-    let employeeQuery = supabaseAdmin
-      .from("employees")
-      .select(employeeSelect())
-      .eq("id", employeeId);
-
-    if (pvId) employeeQuery = employeeQuery.eq("pv_id", pvId);
-
-    const { data: employeeData, error: employeeError } = await employeeQuery.maybeSingle();
-
-    if (employeeError) {
-      return NextResponse.json({ ok: false, error: employeeError.message }, { status: 500 });
-    }
-
-    if (!employeeData) {
-      return NextResponse.json({ ok: false, error: "Dipendente non trovato" }, { status: 404 });
-    }
-
-    const employee = normalizeEmployee(employeeData as unknown as EmployeeDbRow);
-    const { monthStart, monthEnd, days } = monthBounds(month);
-
-    const { data: shiftsData, error: shiftsError } = await supabaseAdmin
+    let q = supabaseAdmin
       .from("work_shifts")
-      .select("shift_date, start_time, end_time, second_start_time, second_end_time, status, note")
-      .eq("employee_id", employeeId)
-      .eq("pv_id", employee.pv_id)
-      .gte("shift_date", monthStart)
-      .lte("shift_date", monthEnd)
-      .order("shift_date", { ascending: true });
+      .select(shiftSelect())
+      .gte("shift_date", week_start)
+      .lte("shift_date", week_end)
+      .order("shift_date", { ascending: true })
+      .order("employee_id", { ascending: true })
+      .limit(5000);
 
-    if (shiftsError) {
-      return NextResponse.json({ ok: false, error: shiftsError.message }, { status: 500 });
+    if (pvResolved.pv_id) q = q.eq("pv_id", pvResolved.pv_id);
+
+    const { data, error } = await q;
+    if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+
+    const normalizedRows = (data ?? []).map((row) => normalizeShift(row as unknown as ShiftDbRow));
+
+    const rows =
+      session.role === "punto_vendita"
+        ? normalizedRows.map((row) => ({
+            id: row.id,
+            pv_id: row.pv_id,
+            employee_id: row.employee_id,
+            employee_name: row.employee_name,
+            employee_active: row.employee_active,
+            pv_code: row.pv_code,
+            pv_name: row.pv_name,
+            shift_date: row.shift_date,
+            status: row.status,
+            start_time: null,
+            end_time: null,
+            second_start_time: null,
+            second_end_time: null,
+            note: "",
+            public_label: getShiftPublicLabel(row),
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+          }))
+        : normalizedRows;
+
+    return NextResponse.json({
+      ok: true,
+      week_start,
+      week_end,
+      week_dates: weekDates,
+      pv_id: pvResolved.pv_id,
+      rows,
+      pv_summary_only: session.role === "punto_vendita" && normalizedRows.length > 0,
+      warning: pvResolved.warning ?? null,
+    });
+  } catch (e: unknown) {
+    return NextResponse.json({ ok: false, error: getErrorMessage(e, "Errore server") }, { status: 500 });
+  }
+}
+
+export async function POST(req: Request) {
+  try {
+    const session = await getSessionFromCookie();
+    if (!session || session.role !== "punto_vendita") {
+      return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
     }
 
-    const shiftsByDate = new Map(
-      ((shiftsData ?? []) as unknown[]).map((row) => {
-        const shift = normalizeShift(row as unknown as ShiftDbRow);
-        return [shift.shift_date, shift] as const;
-      })
+    const manager = await requireShiftManagerAccess(session);
+    if (!manager.ok) {
+      return NextResponse.json({ ok: false, error: manager.error }, { status: manager.httpStatus });
+    }
+
+    const body = asRecord(await req.json().catch(() => null));
+    const week_start = validateWeekStart(body.week_start);
+    const weekDates = getWeekDates(week_start);
+    const weekDateSet = new Set(weekDates);
+    const shifts = Array.isArray(body.shifts) ? body.shifts.map(asRecord) : [];
+
+    if (shifts.length > 1000) {
+      return NextResponse.json({ ok: false, error: "Troppe righe turno in una sola richiesta" }, { status: 400 });
+    }
+
+    const pvLookup = await getPvIdForSession(session);
+    const pv_id = pvLookup.pv_id;
+    if (!pv_id) {
+      return NextResponse.json({ ok: false, error: "Utente PV senza pv_id assegnato" }, { status: 400 });
+    }
+
+    const employeeIds = Array.from(
+      new Set(shifts.map((row) => String(row.employee_id ?? "").trim()).filter(isUuid))
     );
 
-    const rows: MonthlyRow[] = days.map((date) => {
-      const shift = shiftsByDate.get(date) ?? null;
+    if (employeeIds.length === 0) {
+      return NextResponse.json({ ok: false, error: "Nessun dipendente valido da salvare" }, { status: 400 });
+    }
 
-      return {
-        shift_date: date,
-        weekday: weekdayLabel(date),
-        status: shift?.status ?? null,
-        start_time: shift?.start_time ?? null,
-        end_time: shift?.end_time ?? null,
-        second_start_time: shift?.second_start_time ?? null,
-        second_end_time: shift?.second_end_time ?? null,
-        shift_label: shift?.shift_label ?? "—",
-        note: shift?.note ?? "",
-        hours: shift?.hours ?? 0,
-      };
-    });
+    const { data: employeeRows, error: employeesError } = await supabaseAdmin
+      .from("employees")
+      .select("id, pv_id, active")
+      .eq("pv_id", pv_id)
+      .in("id", employeeIds);
 
-    const totalHours = rows.reduce((sum, row) => sum + row.hours, 0);
-    const totalWorkDays = rows.filter((row) => row.status === "work" || row.status === "split" || row.status === "change").length;
-    const totalSplitDays = rows.filter((row) => row.status === "split").length;
-    const totalRestDays = rows.filter((row) => row.status === "rest").length;
-    const totalVacationDays = rows.filter((row) => row.status === "vacation").length;
-    const totalChangeDays = rows.filter((row) => row.status === "change").length;
-    const pvLabel = [employee.pv_code, employee.pv_name].filter(Boolean).join(" - ") || "PV non indicato";
+    if (employeesError) {
+      return NextResponse.json({ ok: false, error: employeesError.message }, { status: 500 });
+    }
 
-    const report = await PdfReport.create({
-      title: "Scheda mensile turni",
-      subtitleLines: [
-        `Mese: ${formatMonthIT(month)}`,
-        `Punto vendita: ${pvLabel}`,
-        `Dipendente: ${employee.name}`,
-        `Totale ore: ${formatHours(totalHours)} h - Lavorati: ${totalWorkDays} - Spezzati: ${totalSplitDays} - Riposi: ${totalRestDays} - Ferie: ${totalVacationDays} - Cambi: ${totalChangeDays}`,
-      ],
-    });
+    const allowedEmployeeIds = new Set<string>();
+    for (const row of employeeRows ?? []) {
+      const rec = asRecord(row);
+      if (rec.id) allowedEmployeeIds.add(String(rec.id));
+    }
 
-    const widths = [62, 42, 78, 78, 45, 218];
-
-    report.tableRow(["Data", "Giorno", "Stato", "Turno", "Ore", "Note"], widths, {
-      header: true,
-      fontSize: 8,
-      lineHeight: 10,
-    });
-
-    for (const row of rows) {
-      report.tableRow(
-        [
-          formatDateIT(row.shift_date),
-          row.weekday,
-          row.status ? shiftStatusLabel(row.status) : "Nessun turno",
-          shiftTime(row),
-          `${formatHours(row.hours)} h`,
-          row.note || "-",
-        ],
-        widths,
-        { fontSize: 8, lineHeight: 10 }
+    if (allowedEmployeeIds.size !== employeeIds.length) {
+      return NextResponse.json(
+        { ok: false, error: "Uno o più dipendenti non appartengono al PV corrente" },
+        { status: 400 }
       );
     }
 
-    report.tableRow(
-      ["Totale mese", "", "", "", `${formatHours(totalHours)} h`, `Lavorati: ${totalWorkDays} - Riposi: ${totalRestDays} - Cambi: ${totalChangeDays}`],
-      widths,
-      { header: true, fontSize: 8, lineHeight: 10 }
-    );
+    const userId = await getAppUserIdByUsername(session.username);
+    const seen = new Set<string>();
+    const payload: Array<Record<string, unknown>> = [];
 
-    const pdfBytes = await report.save();
-    const fileName = `scheda-turni-${safePdfFilePart(employee.name)}-${month}.pdf`;
+    for (const row of shifts) {
+      const employee_id = String(row.employee_id ?? "").trim();
+      const shift_date = String(row.shift_date ?? "").trim();
+      const status = normalizeShiftStatus(row.status);
 
-    return new NextResponse(Buffer.from(pdfBytes), {
-      status: 200,
-      headers: {
-        "Content-Type": "application/pdf",
-        "Content-Disposition": `attachment; filename="${fileName}"`,
-        "Cache-Control": "no-store",
-      },
+      if (!isUuid(employee_id)) {
+        return NextResponse.json({ ok: false, error: "employee_id non valido" }, { status: 400 });
+      }
+      if (!allowedEmployeeIds.has(employee_id)) {
+        return NextResponse.json({ ok: false, error: "Dipendente non valido per questo PV" }, { status: 400 });
+      }
+      if (!isDateOnly(shift_date) || !weekDateSet.has(shift_date)) {
+        return NextResponse.json({ ok: false, error: "Data turno fuori dalla settimana selezionata" }, { status: 400 });
+      }
+      if (!status) {
+        return NextResponse.json({ ok: false, error: "Stato turno non valido" }, { status: 400 });
+      }
+
+      const key = `${employee_id}:${shift_date}`;
+      if (seen.has(key)) {
+        return NextResponse.json({ ok: false, error: "Turno duplicato per dipendente/giorno" }, { status: 400 });
+      }
+      seen.add(key);
+
+      let start_time: string | null = null;
+      let end_time: string | null = null;
+      let second_start_time: string | null = null;
+      let second_end_time: string | null = null;
+      const note = clampText(row.note, 500) || null;
+
+      if (!isNoTimeStatus(status)) {
+        start_time = normalizeTime(row.start_time ?? "");
+        end_time = normalizeTime(row.end_time ?? "");
+
+        if (!start_time || !end_time) {
+          return NextResponse.json(
+            { ok: false, error: "Ora inizio e ora fine sono obbligatorie per Turno, Spezzato e Cambio turno" },
+            { status: 400 }
+          );
+        }
+
+        if (minutesBetween(start_time, end_time) <= 0) {
+          return NextResponse.json(
+            { ok: false, error: "Ora fine deve essere diversa da ora inizio" },
+            { status: 400 }
+          );
+        }
+      }
+
+      if (requiresSecondShift(status)) {
+        second_start_time = normalizeTime(row.second_start_time ?? "");
+        second_end_time = normalizeTime(row.second_end_time ?? "");
+
+        if (!second_start_time || !second_end_time) {
+          return NextResponse.json(
+            { ok: false, error: "Per lo spezzato sono obbligatori anche inizio e fine pomeriggio" },
+            { status: 400 }
+          );
+        }
+
+        if (minutesBetween(second_start_time, second_end_time) <= 0) {
+          return NextResponse.json(
+            { ok: false, error: "Fine pomeriggio deve essere diversa da inizio pomeriggio" },
+            { status: 400 }
+          );
+        }
+
+        if (end_time && minutesBetween(end_time, second_start_time) <= 0) {
+          return NextResponse.json(
+            { ok: false, error: "Il turno pomeriggio deve iniziare dopo la fine del turno mattina" },
+            { status: 400 }
+          );
+        }
+      }
+
+      payload.push({
+        pv_id,
+        employee_id,
+        shift_date,
+        status,
+        start_time,
+        end_time,
+        second_start_time,
+        second_end_time,
+        note,
+        created_by: userId,
+        updated_by: userId,
+      });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from("work_shifts")
+      .upsert(payload, { onConflict: "pv_id,employee_id,shift_date" })
+      .select(shiftSelect());
+
+    if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+
+    return NextResponse.json({
+      ok: true,
+      week_start,
+      week_end: addDaysISO(week_start, 6),
+      saved: payload.length,
+      rows: (data ?? []).map((row) => normalizeShift(row as unknown as ShiftDbRow)),
+      warning: pvLookup.warning ?? null,
     });
   } catch (e: unknown) {
-    return NextResponse.json({ ok: false, error: getErrorMessage(e, "Errore generazione PDF") }, { status: 500 });
+    return NextResponse.json({ ok: false, error: getErrorMessage(e, "Errore server") }, { status: 500 });
   }
 }
