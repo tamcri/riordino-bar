@@ -48,7 +48,6 @@ type PvsResponse = ApiResponseBase & {
 
 type EmployeesResponse = ApiResponseBase & {
   rows?: Employee[];
-  row?: Employee;
 };
 
 type ShiftRow = {
@@ -72,6 +71,11 @@ type MonthlyRow = {
   shift_date: string;
   weekday: string;
   has_shift: boolean;
+  employee_id?: string | null;
+  employee_name?: string | null;
+  pv_id?: string | null;
+  pv_code?: string | null;
+  pv_name?: string | null;
   status: ShiftStatus | null;
   status_label: string;
   start_time: string | null;
@@ -98,6 +102,8 @@ type MonthlyResponse = ApiResponseBase & {
   month_end?: string;
   employee?: MonthlyEmployee;
   rows?: MonthlyRow[];
+  grouped_by_name?: boolean;
+  matched_employees_count?: number;
   totals?: {
     total_hours?: number;
     total_hours_label?: string;
@@ -105,6 +111,7 @@ type MonthlyResponse = ApiResponseBase & {
     total_split_days?: number;
     total_rest_days?: number;
     total_vacation_days?: number;
+    total_sick_days?: number;
     total_change_days?: number;
   };
 };
@@ -119,16 +126,6 @@ type GroupedRow = {
   employee_active: boolean;
   shiftsByDate: Record<string, ShiftRow>;
   totalHours: number;
-};
-
-type WeeklyEditCell = {
-  shift_date: string;
-  status: ShiftStatus;
-  start_time: string;
-  end_time: string;
-  second_start_time: string;
-  second_end_time: string;
-  note: string;
 };
 
 type WeekResponse = ApiResponseBase & {
@@ -158,8 +155,6 @@ function statusBadgeClass(status: ShiftStatus) {
       return "border-sky-200 bg-sky-50 text-sky-800";
     case "vacation":
       return "border-violet-200 bg-violet-50 text-violet-800";
-    case "sick":
-      return "border-rose-200 bg-rose-50 text-rose-800";
     case "change":
       return "border-amber-200 bg-amber-50 text-amber-800";
     case "rest":
@@ -226,56 +221,6 @@ function monthlyRowHours(row: MonthlyRow) {
   });
 }
 
-function makeEmptyWeeklyEditCell(shiftDate: string): WeeklyEditCell {
-  return {
-    shift_date: shiftDate,
-    status: "rest",
-    start_time: "",
-    end_time: "",
-    second_start_time: "",
-    second_end_time: "",
-    note: "",
-  };
-}
-
-function shiftToWeeklyEditCell(shiftDate: string, shift?: ShiftRow): WeeklyEditCell {
-  if (!shift) return makeEmptyWeeklyEditCell(shiftDate);
-
-  const status = normalizeShiftStatus(shift.status) ?? "rest";
-
-  return {
-    shift_date: shiftDate,
-    status,
-    start_time: normalizeTime(shift.start_time ?? "") ?? "",
-    end_time: normalizeTime(shift.end_time ?? "") ?? "",
-    second_start_time: normalizeTime(shift.second_start_time ?? "") ?? "",
-    second_end_time: normalizeTime(shift.second_end_time ?? "") ?? "",
-    note: shift.note ?? "",
-  };
-}
-
-function cleanWeeklyEditCellForStatus(cell: WeeklyEditCell): WeeklyEditCell {
-  if (cell.status === "rest" || cell.status === "vacation" || cell.status === "sick") {
-    return {
-      ...cell,
-      start_time: "",
-      end_time: "",
-      second_start_time: "",
-      second_end_time: "",
-    };
-  }
-
-  if (cell.status !== "split") {
-    return {
-      ...cell,
-      second_start_time: "",
-      second_end_time: "",
-    };
-  }
-
-  return cell;
-}
-
 async function fetchJsonSafe<T extends ApiResponseBase>(
   url: string,
   init?: RequestInit
@@ -306,6 +251,8 @@ export default function TurniAdminClient() {
   const [monthlyRows, setMonthlyRows] = useState<MonthlyRow[]>([]);
   const [monthlyEmployee, setMonthlyEmployee] = useState<MonthlyEmployee | null>(null);
   const [monthlyTotals, setMonthlyTotals] = useState<MonthlyResponse["totals"] | null>(null);
+  const [monthlyIncludeSameName, setMonthlyIncludeSameName] = useState(false);
+  const [monthlyMatchedEmployeesCount, setMonthlyMatchedEmployeesCount] = useState(0);
   const [loading, setLoading] = useState(false);
   const [monthlyLoading, setMonthlyLoading] = useState(false);
   const [employeesLoading, setEmployeesLoading] = useState(false);
@@ -317,16 +264,6 @@ export default function TurniAdminClient() {
   const [settingsCode, setSettingsCode] = useState("");
   const [settingsEnabled, setSettingsEnabled] = useState(true);
   const [settingsLoading, setSettingsLoading] = useState(false);
-  const [weeklyEmployees, setWeeklyEmployees] = useState<Employee[]>([]);
-  const [weeklyEmployeeId, setWeeklyEmployeeId] = useState("");
-  const [weeklyEmployeesLoading, setWeeklyEmployeesLoading] = useState(false);
-  const [editingEmployee, setEditingEmployee] = useState<Employee | null>(null);
-  const [editCells, setEditCells] = useState<WeeklyEditCell[]>([]);
-  const [editSaving, setEditSaving] = useState(false);
-  const [newEmployeeName, setNewEmployeeName] = useState("");
-  const [renameEmployeeId, setRenameEmployeeId] = useState("");
-  const [renameEmployeeName, setRenameEmployeeName] = useState("");
-  const [employeeManageLoading, setEmployeeManageLoading] = useState(false);
 
   const weekDates = useMemo(() => getWeekDates(weekStart), [weekStart]);
   const weekLabel = `${formatDateIT(weekDates[0])} - ${formatDateIT(weekDates[6])}`;
@@ -393,33 +330,6 @@ export default function TurniAdminClient() {
     [settingsPvId, settingsRows]
   );
 
-  const selectedWeeklyEmployee = useMemo(
-    () => weeklyEmployees.find((employee) => employee.id === weeklyEmployeeId) ?? null,
-    [weeklyEmployeeId, weeklyEmployees]
-  );
-
-  const selectedRenameEmployee = useMemo(
-    () => weeklyEmployees.find((employee) => employee.id === renameEmployeeId) ?? null,
-    [renameEmployeeId, weeklyEmployees]
-  );
-
-  const editWeekTotalHours = useMemo(
-    () =>
-      editCells.reduce(
-        (sum, cell) =>
-          sum +
-          shiftHoursTotal({
-            status: cell.status,
-            start_time: cell.start_time,
-            end_time: cell.end_time,
-            second_start_time: cell.second_start_time,
-            second_end_time: cell.second_end_time,
-          }),
-        0
-      ),
-    [editCells]
-  );
-
   const monthlyRowsTotalHours = useMemo(
     () => monthlyRows.reduce((sum, row) => sum + monthlyRowHours(row), 0),
     [monthlyRows]
@@ -431,6 +341,7 @@ export default function TurniAdminClient() {
   const monthlySplitDays = Number(monthlyTotals?.total_split_days ?? 0);
   const monthlyRestDays = Number(monthlyTotals?.total_rest_days ?? 0);
   const monthlyVacationDays = Number(monthlyTotals?.total_vacation_days ?? 0);
+  const monthlySickDays = Number(monthlyTotals?.total_sick_days ?? 0);
   const monthlyChangeDays = Number(monthlyTotals?.total_change_days ?? 0);
 
   async function loadPvs() {
@@ -551,236 +462,13 @@ export default function TurniAdminClient() {
         setMonthlyRows([]);
         setMonthlyEmployee(null);
         setMonthlyTotals(null);
+        setMonthlyMatchedEmployeesCount(0);
       }
     } catch (e: unknown) {
       setError(getErrorMessage(e, "Errore caricamento dipendenti"));
       setEmployees([]);
     } finally {
       setEmployeesLoading(false);
-    }
-  }
-
-  async function loadWeeklyEmployees(nextPvId = pvId) {
-    if (!nextPvId) {
-      setWeeklyEmployees([]);
-      setWeeklyEmployeeId("");
-      setEditingEmployee(null);
-      setEditCells([]);
-      return;
-    }
-
-    setWeeklyEmployeesLoading(true);
-    setError(null);
-
-    try {
-      const params = new URLSearchParams();
-      params.set("include_inactive", "1");
-      params.set("pv_id", nextPvId);
-
-      const res = await fetchJsonSafe<EmployeesResponse>(`/api/work-shifts/employees?${params.toString()}`);
-      if (!res.ok) throw new Error(res.data?.error || res.rawText || `HTTP ${res.status}`);
-
-      const list = Array.isArray(res.data?.rows) ? (res.data.rows as Employee[]) : [];
-      setWeeklyEmployees(list);
-
-      if (weeklyEmployeeId && !list.some((employee) => employee.id === weeklyEmployeeId)) {
-        setWeeklyEmployeeId("");
-        setEditingEmployee(null);
-        setEditCells([]);
-      }
-
-      if (renameEmployeeId && !list.some((employee) => employee.id === renameEmployeeId)) {
-        setRenameEmployeeId("");
-        setRenameEmployeeName("");
-      }
-    } catch (e: unknown) {
-      setError(getErrorMessage(e, "Errore caricamento dipendenti per modifica admin"));
-      setWeeklyEmployees([]);
-    } finally {
-      setWeeklyEmployeesLoading(false);
-    }
-  }
-
-  async function createAdminEmployee(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-    setMsg(null);
-
-    if (!pvId) {
-      setError("Per aggiungere un dipendente da admin devi selezionare un singolo punto vendita.");
-      return;
-    }
-
-    const name = newEmployeeName.trim();
-    if (!name) {
-      setError("Inserisci il nome del dipendente.");
-      return;
-    }
-
-    setEmployeeManageLoading(true);
-    try {
-      const res = await fetchJsonSafe<EmployeesResponse>("/api/work-shifts/employees", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          pv_id: pvId,
-          name,
-        }),
-      });
-
-      if (!res.ok) throw new Error(res.data?.error || res.rawText || `HTTP ${res.status}`);
-
-      const created = res.data?.row ?? null;
-      setNewEmployeeName("");
-      setMsg("Dipendente aggiunto correttamente.");
-
-      await loadWeeklyEmployees(pvId);
-      if (viewMode === "monthly") await loadEmployees(pvId);
-      if (created?.id) {
-        setWeeklyEmployeeId(created.id);
-        setRenameEmployeeId(created.id);
-        setRenameEmployeeName(created.name);
-      }
-    } catch (e: unknown) {
-      setError(getErrorMessage(e, "Errore aggiunta dipendente"));
-    } finally {
-      setEmployeeManageLoading(false);
-    }
-  }
-
-  async function renameAdminEmployee(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-    setMsg(null);
-
-    if (!pvId) {
-      setError("Per rinominare un dipendente da admin devi selezionare un singolo punto vendita.");
-      return;
-    }
-
-    if (!renameEmployeeId) {
-      setError("Seleziona il dipendente da rinominare.");
-      return;
-    }
-
-    const name = renameEmployeeName.trim();
-    if (!name) {
-      setError("Inserisci il nuovo nome del dipendente.");
-      return;
-    }
-
-    setEmployeeManageLoading(true);
-    try {
-      const res = await fetchJsonSafe<EmployeesResponse>("/api/work-shifts/employees", {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          id: renameEmployeeId,
-          pv_id: pvId,
-          name,
-        }),
-      });
-
-      if (!res.ok) throw new Error(res.data?.error || res.rawText || `HTTP ${res.status}`);
-
-      setMsg("Nome dipendente aggiornato correttamente.");
-      await loadWeeklyEmployees(pvId);
-      await loadRows();
-      if (viewMode === "monthly") await loadEmployees(pvId);
-
-      const updated = res.data?.row ?? null;
-      if (editingEmployee?.id === renameEmployeeId && updated) {
-        setEditingEmployee(updated);
-      }
-    } catch (e: unknown) {
-      setError(getErrorMessage(e, "Errore rinomina dipendente"));
-    } finally {
-      setEmployeeManageLoading(false);
-    }
-  }
-
-  function openWeeklyEditor() {
-    setError(null);
-    setMsg(null);
-
-    if (!pvId) {
-      setError("Per modificare i turni da admin devi selezionare un singolo punto vendita.");
-      return;
-    }
-
-    if (!selectedWeeklyEmployee) {
-      setError("Seleziona un dipendente da modificare.");
-      return;
-    }
-
-    const employeeRows = rows.filter((row) => row.employee_id === selectedWeeklyEmployee.id);
-    const shiftsByDate = new Map(employeeRows.map((row) => [row.shift_date, row]));
-
-    setEditingEmployee(selectedWeeklyEmployee);
-    setEditCells(weekDates.map((date) => shiftToWeeklyEditCell(date, shiftsByDate.get(date))));
-  }
-
-  function updateEditCell(index: number, patch: Partial<WeeklyEditCell>) {
-    setEditCells((current) =>
-      current.map((cell, cellIndex) =>
-        cellIndex === index ? cleanWeeklyEditCellForStatus({ ...cell, ...patch }) : cell
-      )
-    );
-  }
-
-  async function saveWeeklyEmployeeEdit() {
-    setError(null);
-    setMsg(null);
-
-    if (!pvId) {
-      setError("Per salvare da admin devi selezionare un punto vendita.");
-      return;
-    }
-
-    if (!editingEmployee) {
-      setError("Seleziona un dipendente da modificare.");
-      return;
-    }
-
-    if (editCells.length !== 7) {
-      setError("Settimana non valida: riapri la modifica del dipendente.");
-      return;
-    }
-
-    setEditSaving(true);
-    try {
-      const shifts = editCells.map((cell) => {
-        const clean = cleanWeeklyEditCellForStatus(cell);
-        return {
-          employee_id: editingEmployee.id,
-          shift_date: clean.shift_date,
-          status: clean.status,
-          start_time: clean.start_time || null,
-          end_time: clean.end_time || null,
-          second_start_time: clean.second_start_time || null,
-          second_end_time: clean.second_end_time || null,
-          note: clean.note || "",
-        };
-      });
-
-      const res = await fetchJsonSafe<WeekResponse>("/api/work-shifts/week", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          pv_id: pvId,
-          week_start: weekStart,
-          shifts,
-        }),
-      });
-
-      if (!res.ok) throw new Error(res.data?.error || res.rawText || `HTTP ${res.status}`);
-
-      setMsg("Turni modificati dall'admin e salvati correttamente.");
-      await loadRows();
-    } catch (e: unknown) {
-      setError(getErrorMessage(e, "Errore salvataggio turni admin"));
-    } finally {
-      setEditSaving(false);
     }
   }
 
@@ -794,6 +482,7 @@ export default function TurniAdminClient() {
         setMonthlyRows([]);
         setMonthlyEmployee(null);
         setMonthlyTotals(null);
+        setMonthlyMatchedEmployeesCount(0);
         setMsg("Seleziona un dipendente per visualizzare la scheda mensile.");
         return;
       }
@@ -802,6 +491,7 @@ export default function TurniAdminClient() {
       params.set("month", month);
       params.set("employee_id", employeeId);
       if (pvId) params.set("pv_id", pvId);
+      if (monthlyIncludeSameName) params.set("include_same_name", "1");
 
       const res = await fetchJsonSafe<MonthlyResponse>(`/api/work-shifts/monthly-employee?${params.toString()}`);
       if (!res.ok) throw new Error(res.data?.error || res.rawText || `HTTP ${res.status}`);
@@ -810,12 +500,14 @@ export default function TurniAdminClient() {
       setMonthlyRows(nextRows);
       setMonthlyEmployee(res.data?.employee ?? selectedEmployee ?? null);
       setMonthlyTotals(res.data?.totals ?? null);
+      setMonthlyMatchedEmployeesCount(Number(res.data?.matched_employees_count ?? 0));
       setMsg(nextRows.length === 0 ? "Nessun dato mensile trovato." : null);
     } catch (e: unknown) {
       setError(getErrorMessage(e, "Errore caricamento scheda mensile"));
       setMonthlyRows([]);
       setMonthlyEmployee(null);
       setMonthlyTotals(null);
+      setMonthlyMatchedEmployeesCount(0);
     } finally {
       setMonthlyLoading(false);
     }
@@ -841,36 +533,9 @@ export default function TurniAdminClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewMode, pvId]);
 
-  useEffect(() => {
-    if (viewMode !== "weekly") return;
-
-    setWeeklyEmployeeId("");
-    setEditingEmployee(null);
-    setEditCells([]);
-    setNewEmployeeName("");
-    setRenameEmployeeId("");
-    setRenameEmployeeName("");
-
-    if (pvId) {
-      void loadWeeklyEmployees(pvId);
-    } else {
-      setWeeklyEmployees([]);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewMode, pvId]);
-
-  useEffect(() => {
-    setEditingEmployee(null);
-    setEditCells([]);
-  }, [weekStart]);
-
   function resetWeeklyFilters() {
     setPvId("");
     setWeekStart(currentWeekMondayISO());
-    setWeeklyEmployees([]);
-    setWeeklyEmployeeId("");
-    setEditingEmployee(null);
-    setEditCells([]);
   }
 
   function resetMonthlyFilters() {
@@ -880,6 +545,8 @@ export default function TurniAdminClient() {
     setMonthlyRows([]);
     setMonthlyEmployee(null);
     setMonthlyTotals(null);
+    setMonthlyIncludeSameName(false);
+    setMonthlyMatchedEmployeesCount(0);
   }
 
   function openPdfReport(url: string) {
@@ -910,6 +577,7 @@ export default function TurniAdminClient() {
     params.set("month", month);
     params.set("employee_id", employeeId);
     if (pvId) params.set("pv_id", pvId);
+    if (monthlyIncludeSameName) params.set("include_same_name", "1");
 
     openPdfReport(`/api/work-shifts/pdf-monthly-employee?${params.toString()}`);
   }
@@ -1154,306 +822,6 @@ export default function TurniAdminClient() {
                   Reset filtri
                 </button>
               </div>
-
-              <div className="mt-5 rounded-2xl border bg-gray-50 p-4">
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-                  <div>
-                    <h3 className="font-semibold">Modifica turni admin</h3>
-                    <p className="mt-1 text-sm text-gray-600">
-                      Seleziona un singolo PV e un dipendente per inserire o correggere i turni della settimana.
-                    </p>
-                  </div>
-
-                  <div className="grid w-full grid-cols-1 gap-3 md:grid-cols-[1fr_auto] lg:max-w-2xl">
-                    <div>
-                      <label className="block text-sm font-medium mb-2">Dipendente</label>
-                      <select
-                        className="w-full rounded-xl border bg-white p-3 disabled:opacity-60"
-                        value={weeklyEmployeeId}
-                        disabled={!pvId || weeklyEmployeesLoading}
-                        onChange={(e) => {
-                          setWeeklyEmployeeId(e.target.value);
-                          setEditingEmployee(null);
-                          setEditCells([]);
-                        }}
-                      >
-                        <option value="">
-                          {!pvId
-                            ? "Seleziona prima un PV"
-                            : weeklyEmployeesLoading
-                              ? "Caricamento..."
-                              : "Seleziona dipendente"}
-                        </option>
-                        {weeklyEmployees.map((employee) => (
-                          <option key={employee.id} value={employee.id}>
-                            {employee.name}{employee.active ? "" : " — non attivo"}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="block text-sm font-medium mb-2 invisible">Azione</label>
-                      <button
-                        type="button"
-                        className="w-full rounded-xl bg-slate-900 px-4 py-3 text-white disabled:opacity-60"
-                        disabled={!pvId || !weeklyEmployeeId || weeklyEmployeesLoading}
-                        onClick={openWeeklyEditor}
-                      >
-                        Modifica settimana
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-2">
-                  <form onSubmit={createAdminEmployee} className="rounded-2xl border bg-white p-4">
-                    <h4 className="font-semibold">Aggiungi dipendente</h4>
-                    <p className="mt-1 text-sm text-gray-600">
-                      Crea un nuovo dipendente nel PV selezionato e poi assegnagli i turni.
-                    </p>
-
-                    <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_auto] md:items-end">
-                      <div>
-                        <label className="block text-sm font-medium mb-2">Nome dipendente</label>
-                        <input
-                          className="w-full rounded-xl border bg-white p-3 disabled:opacity-60"
-                          value={newEmployeeName}
-                          maxLength={120}
-                          disabled={!pvId || employeeManageLoading}
-                          onChange={(e) => setNewEmployeeName(e.target.value)}
-                          placeholder={!pvId ? "Seleziona prima un PV" : "Es. Mario Rossi"}
-                        />
-                      </div>
-
-                      <button
-                        type="submit"
-                        className="rounded-xl bg-slate-900 px-4 py-3 text-white disabled:opacity-60"
-                        disabled={!pvId || employeeManageLoading || !newEmployeeName.trim()}
-                      >
-                        {employeeManageLoading ? "Salvo..." : "Aggiungi"}
-                      </button>
-                    </div>
-                  </form>
-
-                  <form onSubmit={renameAdminEmployee} className="rounded-2xl border bg-white p-4">
-                    <h4 className="font-semibold">Modifica nome dipendente</h4>
-                    <p className="mt-1 text-sm text-gray-600">
-                      Rinomina un dipendente esistente senza perdere lo storico turni.
-                    </p>
-
-                    <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_auto] md:items-end">
-                      <div>
-                        <label className="block text-sm font-medium mb-2">Dipendente</label>
-                        <select
-                          className="w-full rounded-xl border bg-white p-3 disabled:opacity-60"
-                          value={renameEmployeeId}
-                          disabled={!pvId || weeklyEmployeesLoading || employeeManageLoading}
-                          onChange={(e) => {
-                            const nextId = e.target.value;
-                            const employee = weeklyEmployees.find((item) => item.id === nextId) ?? null;
-                            setRenameEmployeeId(nextId);
-                            setRenameEmployeeName(employee?.name ?? "");
-                          }}
-                        >
-                          <option value="">
-                            {!pvId
-                              ? "Seleziona prima un PV"
-                              : weeklyEmployeesLoading
-                                ? "Caricamento..."
-                                : "Seleziona dipendente"}
-                          </option>
-                          {weeklyEmployees.map((employee) => (
-                            <option key={employee.id} value={employee.id}>
-                              {employee.name}{employee.active ? "" : " — non attivo"}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-
-                      <div>
-                        <label className="block text-sm font-medium mb-2">Nuovo nome</label>
-                        <input
-                          className="w-full rounded-xl border bg-white p-3 disabled:opacity-60"
-                          value={renameEmployeeName}
-                          maxLength={120}
-                          disabled={!renameEmployeeId || employeeManageLoading}
-                          onChange={(e) => setRenameEmployeeName(e.target.value)}
-                          placeholder={selectedRenameEmployee?.name ?? "Nuovo nome"}
-                        />
-                      </div>
-
-                      <button
-                        type="submit"
-                        className="rounded-xl bg-slate-900 px-4 py-3 text-white disabled:opacity-60"
-                        disabled={!pvId || !renameEmployeeId || employeeManageLoading || !renameEmployeeName.trim()}
-                      >
-                        {employeeManageLoading ? "Salvo..." : "Rinomina"}
-                      </button>
-                    </div>
-                  </form>
-                </div>
-
-                {editingEmployee && (
-                  <div className="mt-5 rounded-2xl border bg-white p-4">
-                    <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                      <div>
-                        <div className="font-semibold">
-                          {editingEmployee.name} · {weekLabel}
-                        </div>
-                        <div className="text-sm text-gray-600">
-                          Totale modifiche: {formatHours(editWeekTotalHours)} h
-                        </div>
-                      </div>
-
-                      <button
-                        type="button"
-                        className="rounded-xl border bg-white px-4 py-2 hover:bg-gray-50"
-                        onClick={() => {
-                          setEditingEmployee(null);
-                          setEditCells([]);
-                        }}
-                      >
-                        Chiudi modifica
-                      </button>
-                    </div>
-
-                    <div className="mt-4 grid grid-cols-1 gap-3">
-                      {editCells.map((cell, index) => {
-                        const status = normalizeShiftStatus(cell.status) ?? "rest";
-                        const showTimeFields = status !== "rest" && status !== "vacation" && status !== "sick";
-                        const showSecondShift = status === "split";
-
-                        return (
-                          <div key={cell.shift_date} className="rounded-xl border p-3">
-                            <div className="grid grid-cols-1 gap-3 lg:grid-cols-[0.7fr_0.9fr_0.7fr_0.7fr_0.7fr_0.7fr_1.2fr] lg:items-end">
-                              <div>
-                                <div className="text-sm font-semibold">
-                                  {WEEK_DAYS[index]?.label ?? "Giorno"}
-                                </div>
-                                <div className="text-xs text-gray-500">{formatDateIT(cell.shift_date)}</div>
-                              </div>
-
-                              <div>
-                                <label className="mb-1 block text-xs font-medium text-gray-600">Stato</label>
-                                <select
-                                  className="w-full rounded-lg border bg-white p-2"
-                                  value={status}
-                                  onChange={(e) =>
-                                    updateEditCell(index, {
-                                      status: normalizeShiftStatus(e.target.value) ?? "rest",
-                                    })
-                                  }
-                                >
-                                  <option value="work">Turno</option>
-                                  <option value="split">Spezzato</option>
-                                  <option value="rest">Riposo</option>
-                                  <option value="vacation">Ferie</option>
-                                  <option value="sick">Malattia</option>
-                                  <option value="change">Cambio turno</option>
-                                </select>
-                              </div>
-
-                              <div>
-                                <label className="mb-1 block text-xs font-medium text-gray-600">
-                                  {showSecondShift ? "Mattina inizio" : "Inizio"}
-                                </label>
-                                <input
-                                  type="time"
-                                  className="w-full rounded-lg border p-2 disabled:bg-gray-100"
-                                  value={cell.start_time}
-                                  disabled={!showTimeFields}
-                                  onChange={(e) => updateEditCell(index, { start_time: e.target.value })}
-                                />
-                              </div>
-
-                              <div>
-                                <label className="mb-1 block text-xs font-medium text-gray-600">
-                                  {showSecondShift ? "Mattina fine" : "Fine"}
-                                </label>
-                                <input
-                                  type="time"
-                                  className="w-full rounded-lg border p-2 disabled:bg-gray-100"
-                                  value={cell.end_time}
-                                  disabled={!showTimeFields}
-                                  onChange={(e) => updateEditCell(index, { end_time: e.target.value })}
-                                />
-                              </div>
-
-                              <div>
-                                <label className="mb-1 block text-xs font-medium text-gray-600">Pomeriggio inizio</label>
-                                <input
-                                  type="time"
-                                  className="w-full rounded-lg border p-2 disabled:bg-gray-100"
-                                  value={cell.second_start_time}
-                                  disabled={!showSecondShift}
-                                  onChange={(e) => updateEditCell(index, { second_start_time: e.target.value })}
-                                />
-                              </div>
-
-                              <div>
-                                <label className="mb-1 block text-xs font-medium text-gray-600">Pomeriggio fine</label>
-                                <input
-                                  type="time"
-                                  className="w-full rounded-lg border p-2 disabled:bg-gray-100"
-                                  value={cell.second_end_time}
-                                  disabled={!showSecondShift}
-                                  onChange={(e) => updateEditCell(index, { second_end_time: e.target.value })}
-                                />
-                              </div>
-
-                              <div>
-                                <label className="mb-1 block text-xs font-medium text-gray-600">Nota</label>
-                                <input
-                                  className="w-full rounded-lg border p-2"
-                                  value={cell.note}
-                                  maxLength={500}
-                                  onChange={(e) => updateEditCell(index, { note: e.target.value })}
-                                  placeholder={status === "change" ? "Motivo cambio turno" : ""}
-                                />
-                              </div>
-                            </div>
-
-                            <div className="mt-2 text-right text-xs font-semibold text-gray-600">
-                              Ore giorno:{" "}
-                              {formatHours(
-                                shiftHoursTotal({
-                                  status,
-                                  start_time: cell.start_time,
-                                  end_time: cell.end_time,
-                                  second_start_time: cell.second_start_time,
-                                  second_end_time: cell.second_end_time,
-                                })
-                              )}{" "}
-                              h
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-
-                    <div className="mt-4 flex flex-wrap gap-3">
-                      <button
-                        type="button"
-                        className="rounded-xl bg-slate-900 px-4 py-2 text-white disabled:opacity-60"
-                        disabled={editSaving}
-                        onClick={saveWeeklyEmployeeEdit}
-                      >
-                        {editSaving ? "Salvataggio..." : "Salva modifiche admin"}
-                      </button>
-
-                      <button
-                        type="button"
-                        className="rounded-xl border bg-white px-4 py-2 hover:bg-gray-50"
-                        disabled={editSaving}
-                        onClick={openWeeklyEditor}
-                      >
-                        Annulla modifiche
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
             </section>
           </>
         ) : (
@@ -1508,6 +876,8 @@ export default function TurniAdminClient() {
                       setMonthlyRows([]);
                       setMonthlyEmployee(null);
                       setMonthlyTotals(null);
+                      setMonthlyMatchedEmployeesCount(0);
+                      setMonthlyMatchedEmployeesCount(0);
                     }}
                   >
                     <option value="">Tutti</option>
@@ -1530,6 +900,8 @@ export default function TurniAdminClient() {
                       setMonthlyRows([]);
                       setMonthlyEmployee(null);
                       setMonthlyTotals(null);
+                      setMonthlyMatchedEmployeesCount(0);
+                      setMonthlyMatchedEmployeesCount(0);
                     }}
                   >
                     <option value="">Seleziona dipendente</option>
@@ -1555,6 +927,28 @@ export default function TurniAdminClient() {
                   </div>
                 </div>
               </div>
+
+              <label className="mt-4 flex items-start gap-3 rounded-xl border bg-gray-50 p-3 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  className="mt-1 h-4 w-4"
+                  checked={monthlyIncludeSameName}
+                  disabled={!employeeId && monthlyRows.length === 0}
+                  onChange={(e) => {
+                    setMonthlyIncludeSameName(e.target.checked);
+                    setMonthlyRows([]);
+                    setMonthlyEmployee(null);
+                    setMonthlyTotals(null);
+                    setMonthlyMatchedEmployeesCount(0);
+                  }}
+                />
+                <span>
+                  <span className="font-medium">Includi stesso dipendente su altri PV</span>
+                  <span className="mt-1 block text-xs text-gray-500">
+                    Usa il nome normalizzato del dipendente selezionato e somma i turni trovati negli altri punti vendita. Nel report comparirà anche la colonna PV.
+                  </span>
+                </span>
+              </label>
 
               <div className="mt-4 flex flex-wrap gap-3">
                 <button
@@ -1700,9 +1094,11 @@ export default function TurniAdminClient() {
                     {(monthlyEmployee ?? selectedEmployee)?.name} — {formatMonthIT(month)}
                   </div>
                   <div className="text-gray-600 mt-1">
-                    {[(monthlyEmployee ?? selectedEmployee)?.pv_code, (monthlyEmployee ?? selectedEmployee)?.pv_name]
-                      .filter(Boolean)
-                      .join(" — ") || "PV non indicato"}
+                    {monthlyIncludeSameName && monthlyRows.length > 0
+                      ? `Report aggregato su ${monthlyMatchedEmployeesCount || 1} record dipendente`
+                      : [(monthlyEmployee ?? selectedEmployee)?.pv_code, (monthlyEmployee ?? selectedEmployee)?.pv_name]
+                          .filter(Boolean)
+                          .join(" — ") || "PV non indicato"}
                   </div>
                 </div>
               )}
@@ -1720,6 +1116,9 @@ export default function TurniAdminClient() {
                   <thead className="bg-gray-50 text-left">
                     <tr>
                       <th className="border-b px-3 py-3 font-semibold min-w-32">Data</th>
+                      {monthlyIncludeSameName && (
+                        <th className="border-b px-3 py-3 font-semibold min-w-36">PV</th>
+                      )}
                       <th className="border-b px-3 py-3 font-semibold min-w-24">Giorno</th>
                       <th className="border-b px-3 py-3 font-semibold min-w-40">Stato</th>
                       <th className="border-b px-3 py-3 font-semibold min-w-36">Turno</th>
@@ -1735,8 +1134,14 @@ export default function TurniAdminClient() {
                       const rowHours = monthlyRowHours(row);
 
                       return (
-                        <tr key={row.shift_date} className="align-top hover:bg-gray-50">
+                        <tr key={`${row.shift_date}:${row.pv_id ?? ""}:${row.employee_id ?? ""}`} className="align-top hover:bg-gray-50">
                           <td className="border-b px-3 py-3 font-medium">{formatDateIT(row.shift_date)}</td>
+                          {monthlyIncludeSameName && (
+                            <td className="border-b px-3 py-3">
+                              <div className="font-medium">{row.pv_code || "—"}</div>
+                              <div className="text-xs text-gray-500">{row.pv_name || ""}</div>
+                            </td>
+                          )}
                           <td className="border-b px-3 py-3 text-gray-600">{row.weekday}</td>
                           <td className="border-b px-3 py-3">
                             <span className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${monthlyStatusBadgeClass(status)}`}>
@@ -1755,12 +1160,12 @@ export default function TurniAdminClient() {
 
                   <tfoot className="bg-gray-50">
                     <tr>
-                      <td className="px-3 py-3 font-semibold" colSpan={4}>
+                      <td className="px-3 py-3 font-semibold" colSpan={monthlyIncludeSameName ? 5 : 4}>
                         Totale mese
                       </td>
                       <td className="px-3 py-3 text-right font-semibold">{formatHours(monthlyTotalHours)} h</td>
                       <td className="px-3 py-3 text-sm text-gray-600">
-                        Lavorati: {monthlyWorkDays} · Spezzati: {monthlySplitDays} · Riposi: {monthlyRestDays} · Ferie: {monthlyVacationDays} · Cambi: {monthlyChangeDays}
+                        Lavorati: {monthlyWorkDays} · Spezzati: {monthlySplitDays} · Riposi: {monthlyRestDays} · Ferie: {monthlyVacationDays} · Malattia: {monthlySickDays} · Cambi: {monthlyChangeDays}
                       </td>
                     </tr>
                   </tfoot>

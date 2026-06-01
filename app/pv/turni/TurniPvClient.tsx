@@ -89,11 +89,6 @@ type ManagerLoginResponse = ApiResponseBase & {
   unlocked?: boolean;
 };
 
-type CopyDaySource = {
-  employeeId: string;
-  date: string;
-};
-
 function cellKey(employeeId: string, date: string) {
   return `${employeeId}:${date}`;
 }
@@ -151,8 +146,6 @@ function statusCellClass(status: ShiftStatus) {
       return "border-sky-200 bg-sky-50";
     case "vacation":
       return "border-violet-200 bg-violet-50";
-    case "sick":
-      return "border-rose-200 bg-rose-50";
     case "change":
       return "border-amber-200 bg-amber-50";
     case "rest":
@@ -200,8 +193,6 @@ export default function TurniPvClient() {
   const [saving, setSaving] = useState(false);
   const [copying, setCopying] = useState(false);
   const [employeeLoading, setEmployeeLoading] = useState(false);
-  const [copyDaySource, setCopyDaySource] = useState<CopyDaySource | null>(null);
-  const [copyDayTargets, setCopyDayTargets] = useState<string[]>([]);
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -273,6 +264,39 @@ export default function TurniPvClient() {
     } finally {
       setLoading(false);
     }
+  }
+
+  async function refreshEmployeesPreservingDraft(nextRows?: Employee[]) {
+    let employeeRows = Array.isArray(nextRows) ? nextRows : null;
+
+    if (!employeeRows) {
+      const employeesRes = await fetchJsonSafe<EmployeesResponse>("/api/work-shifts/employees");
+      if (!employeesRes.ok) {
+        throw new Error(employeesRes.data?.error || employeesRes.rawText || `HTTP ${employeesRes.status}`);
+      }
+
+      employeeRows = Array.isArray(employeesRes.data?.rows)
+        ? (employeesRes.data.rows as Employee[])
+        : [];
+    }
+
+    const activeRows = employeeRows.filter((employee) => employee.active !== false);
+
+    setEmployees(activeRows);
+    setCells((prev) => {
+      const next = { ...prev };
+
+      for (const employee of activeRows) {
+        for (const date of weekDates) {
+          const key = cellKey(employee.id, date);
+          if (!next[key]) {
+            next[key] = emptyCell(employee.id, date);
+          }
+        }
+      }
+
+      return next;
+    });
   }
 
   async function checkManagerStatus(loadAfterUnlock = false) {
@@ -415,56 +439,6 @@ export default function TurniPvClient() {
     });
   }
 
-
-  function startCopyDay(employeeId: string, date: string) {
-    setCopyDaySource({ employeeId, date });
-    setCopyDayTargets([]);
-    setError(null);
-    setMsg(null);
-  }
-
-  function cancelCopyDay() {
-    setCopyDaySource(null);
-    setCopyDayTargets([]);
-  }
-
-  function toggleCopyDayTarget(date: string) {
-    setCopyDayTargets((prev) =>
-      prev.includes(date) ? prev.filter((item) => item !== date) : [...prev, date]
-    );
-  }
-
-  function applyCopyDay() {
-    if (!copyDaySource) return;
-
-    if (copyDayTargets.length === 0) {
-      setError("Seleziona almeno un giorno su cui applicare il turno.");
-      return;
-    }
-
-    const sourceKey = cellKey(copyDaySource.employeeId, copyDaySource.date);
-
-    setCells((prev) => {
-      const source = prev[sourceKey] ?? emptyCell(copyDaySource.employeeId, copyDaySource.date);
-      const next = { ...prev };
-
-      for (const targetDate of copyDayTargets) {
-        const targetKey = cellKey(copyDaySource.employeeId, targetDate);
-        next[targetKey] = {
-          ...source,
-          shift_date: targetDate,
-          public_label: "",
-        };
-      }
-
-      return next;
-    });
-
-    setMsg(`Turno applicato a ${copyDayTargets.length} giorn${copyDayTargets.length === 1 ? "o" : "i"}.`);
-    setError(null);
-    cancelCopyDay();
-  }
-
   async function addEmployee(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
@@ -488,7 +462,7 @@ export default function TurniPvClient() {
 
       setNewEmployeeName("");
       setMsg("Dipendente aggiunto.");
-      await loadData(weekStart);
+      await refreshEmployeesPreservingDraft(res.data?.rows);
     } catch (e: unknown) {
       setError(getErrorMessage(e, "Errore aggiunta dipendente"));
     } finally {
@@ -513,7 +487,7 @@ export default function TurniPvClient() {
       if (!res.ok) throw new Error(res.data?.error || res.rawText || `HTTP ${res.status}`);
 
       setMsg("Dipendente disattivato.");
-      await loadData(weekStart);
+      await refreshEmployeesPreservingDraft(res.data?.rows);
     } catch (e: unknown) {
       setError(getErrorMessage(e, "Errore disattivazione dipendente"));
     } finally {
@@ -539,7 +513,7 @@ export default function TurniPvClient() {
       if (!res.ok) throw new Error(res.data?.error || res.rawText || `HTTP ${res.status}`);
 
       setMsg("Nome dipendente aggiornato.");
-      await loadData(weekStart);
+      await refreshEmployeesPreservingDraft(res.data?.rows);
     } catch (e: unknown) {
       setError(getErrorMessage(e, "Errore modifica dipendente"));
     } finally {
@@ -1030,64 +1004,6 @@ export default function TurniPvClient() {
                                   maxLength={500}
                                   onChange={(e) => updateCell(employee.id, date, { note: e.target.value })}
                                 />
-                                <div className="mt-2 rounded-lg border border-dashed bg-white/70 p-2">
-                                  {copyDaySource?.employeeId === employee.id && copyDaySource.date === date ? (
-                                    <div className="space-y-2">
-                                      <div className="text-[11px] font-semibold text-slate-700">
-                                        Applica questo giorno a:
-                                      </div>
-                                      <div className="flex flex-wrap gap-1">
-                                        {weekDates.map((targetDate, targetIndex) => {
-                                          const isSource = targetDate === date;
-                                          const checked = copyDayTargets.includes(targetDate);
-
-                                          return (
-                                            <label
-                                              key={targetDate}
-                                              className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] ${
-                                                isSource ? "cursor-not-allowed bg-slate-100 text-slate-400" : "bg-white"
-                                              }`}
-                                            >
-                                              <input
-                                                type="checkbox"
-                                                disabled={isSource}
-                                                checked={checked}
-                                                onChange={() => toggleCopyDayTarget(targetDate)}
-                                              />
-                                              {WEEK_DAYS[targetIndex]?.shortLabel}
-                                            </label>
-                                          );
-                                        })}
-                                      </div>
-                                      <div className="flex gap-2">
-                                        <button
-                                          type="button"
-                                          className="rounded-lg bg-slate-900 px-3 py-1.5 text-[11px] font-semibold text-white disabled:opacity-60"
-                                          disabled={copyDayTargets.length === 0}
-                                          onClick={applyCopyDay}
-                                        >
-                                          Applica
-                                        </button>
-                                        <button
-                                          type="button"
-                                          className="rounded-lg border bg-white px-3 py-1.5 text-[11px] font-semibold hover:bg-gray-50"
-                                          onClick={cancelCopyDay}
-                                        >
-                                          Annulla
-                                        </button>
-                                      </div>
-                                    </div>
-                                  ) : (
-                                    <button
-                                      type="button"
-                                      className="w-full rounded-lg border bg-white px-3 py-1.5 text-[11px] font-semibold text-slate-700 hover:bg-gray-50"
-                                      onClick={() => startCopyDay(employee.id, date)}
-                                    >
-                                      Copia giorno
-                                    </button>
-                                  )}
-                                </div>
-
                               </>
                             )}
                           </div>

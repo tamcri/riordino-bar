@@ -5,8 +5,8 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import {
   asRecord,
   formatHours,
-  getErrorMessage,
   formatShiftTimeRange,
+  getErrorMessage,
   isDateOnly,
   isUuid,
   normalizeShiftStatus,
@@ -24,7 +24,7 @@ type EmployeeDbRow = {
   pv_id?: unknown;
   name?: unknown;
   active?: unknown;
-  pvs?: { code?: unknown; name?: unknown } | null;
+  pvs?: unknown;
 };
 
 type ShiftDbRow = {
@@ -83,14 +83,23 @@ function weekdayLabel(dateISO: string) {
   return labels[d.getUTCDay()] ?? "";
 }
 
+function normalizeName(value: unknown) {
+  return String(value ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLocaleUpperCase("it-IT");
+}
+
 function normalizeEmployee(row: EmployeeDbRow) {
+  const pv = asRecord(row?.pvs);
+
   return {
     id: String(row?.id ?? ""),
     pv_id: String(row?.pv_id ?? ""),
     name: String(row?.name ?? ""),
     active: row?.active !== false,
-    pv_code: row?.pvs?.code ? String(row.pvs.code) : null,
-    pv_name: row?.pvs?.name ? String(row.pvs.name) : null,
+    pv_code: pv.code ? String(pv.code) : null,
+    pv_name: pv.name ? String(pv.name) : null,
   };
 }
 
@@ -101,6 +110,13 @@ function normalizeShift(row: ShiftDbRow) {
   const secondStartTime = normalizeTime(row?.second_start_time ?? "") ?? null;
   const secondEndTime = normalizeTime(row?.second_end_time ?? "") ?? null;
   const hours = shiftHoursTotal({
+    status,
+    start_time: startTime,
+    end_time: endTime,
+    second_start_time: secondStartTime,
+    second_end_time: secondEndTime,
+  });
+  const shiftLabel = formatShiftTimeRange({
     status,
     start_time: startTime,
     end_time: endTime,
@@ -119,25 +135,73 @@ function normalizeShift(row: ShiftDbRow) {
     end_time: endTime,
     second_start_time: secondStartTime,
     second_end_time: secondEndTime,
-    shift_label: formatShiftTimeRange({
-      status,
-      start_time: startTime,
-      end_time: endTime,
-      second_start_time: secondStartTime,
-      second_end_time: secondEndTime,
-    }),
+    shift_label: shiftLabel,
     note: row?.note ? String(row.note) : "",
     hours,
   };
 }
 
-async function getSessionFromCookie() {
-  return parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
+function emptyMonthlyRow(date: string) {
+  return {
+    shift_date: date,
+    weekday: weekdayLabel(date),
+    has_shift: false,
+    employee_id: null,
+    employee_name: null,
+    pv_id: null,
+    pv_code: null,
+    pv_name: null,
+    status: null,
+    status_label: "Nessun turno",
+    start_time: null,
+    end_time: null,
+    second_start_time: null,
+    second_end_time: null,
+    shift_label: "—",
+    note: "",
+    hours: 0,
+  };
+}
+
+async function getMatchingEmployees(employee: ReturnType<typeof normalizeEmployee>, includeSameName: boolean) {
+  if (!includeSameName) return [employee];
+
+  const targetName = normalizeName(employee.name);
+  if (!targetName) return [employee];
+
+  const { data, error } = await supabaseAdmin
+    .from("employees")
+    .select(employeeSelect())
+    .limit(2000);
+
+  if (error) throw new Error(error.message);
+
+  const matches = ((data ?? []) as unknown[])
+    .map((row) => normalizeEmployee(row as EmployeeDbRow))
+    .filter((row) => row.id && normalizeName(row.name) === targetName);
+
+  return matches.length > 0 ? matches : [employee];
+}
+
+function computeTotals(rows: Array<{ status: ShiftStatus | null; hours: number; has_shift?: boolean }>) {
+  const visibleRows = rows.filter((row) => row.has_shift !== false);
+
+  return {
+    total_hours: visibleRows.reduce((sum, row) => sum + Number(row.hours || 0), 0),
+    total_hours_label: formatHours(visibleRows.reduce((sum, row) => sum + Number(row.hours || 0), 0)),
+    total_work_days: visibleRows.filter((row) => row.status === "work" || row.status === "split" || row.status === "change").length,
+    total_split_days: visibleRows.filter((row) => row.status === "split").length,
+    total_rest_days: visibleRows.filter((row) => row.status === "rest").length,
+    total_vacation_days: visibleRows.filter((row) => row.status === "vacation").length,
+    total_sick_days: visibleRows.filter((row) => row.status === "sick").length,
+    total_change_days: visibleRows.filter((row) => row.status === "change").length,
+  };
 }
 
 export async function GET(req: Request) {
   try {
-    const session = await getSessionFromCookie();
+    const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
+
     if (!session || !["admin", "amministrativo"].includes(session.role)) {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
     }
@@ -146,6 +210,7 @@ export async function GET(req: Request) {
     const month = String(url.searchParams.get("month") ?? "").trim();
     const pvId = String(url.searchParams.get("pv_id") ?? "").trim();
     const employeeId = String(url.searchParams.get("employee_id") ?? "").trim();
+    const includeSameName = String(url.searchParams.get("include_same_name") ?? "") === "1";
 
     if (!isMonth(month)) {
       return NextResponse.json({ ok: false, error: "Mese non valido" }, { status: 400 });
@@ -164,7 +229,7 @@ export async function GET(req: Request) {
       .select(employeeSelect())
       .eq("id", employeeId);
 
-    if (pvId) employeeQuery = employeeQuery.eq("pv_id", pvId);
+    if (pvId && !includeSameName) employeeQuery = employeeQuery.eq("pv_id", pvId);
 
     const { data: employeeData, error: employeeError } = await employeeQuery.maybeSingle();
     if (employeeError) {
@@ -175,14 +240,16 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: false, error: "Dipendente non trovato" }, { status: 404 });
     }
 
-    const employee = normalizeEmployee(employeeData as unknown as EmployeeDbRow);
+    const employee = normalizeEmployee(employeeData as EmployeeDbRow);
+    const matchedEmployees = await getMatchingEmployees(employee, includeSameName);
+    const employeeById = new Map(matchedEmployees.map((row) => [row.id, row]));
+    const employeeIds = matchedEmployees.map((row) => row.id).filter(isUuid);
     const { month_start, month_end, days } = monthBounds(month);
 
     const { data: shiftData, error: shiftError } = await supabaseAdmin
       .from("work_shifts")
       .select("id, pv_id, employee_id, shift_date, start_time, end_time, second_start_time, second_end_time, status, note")
-      .eq("employee_id", employeeId)
-      .eq("pv_id", employee.pv_id)
+      .in("employee_id", employeeIds)
       .gte("shift_date", month_start)
       .lte("shift_date", month_end)
       .order("shift_date", { ascending: true });
@@ -191,56 +258,84 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: false, error: shiftError.message }, { status: 500 });
     }
 
-    const shiftsByDate = new Map(
-      ((shiftData ?? []) as unknown[]).map((row) => {
-        const normalized = normalizeShift(row as unknown as ShiftDbRow);
-        return [normalized.shift_date, normalized] as const;
-      })
-    );
+    const normalizedShifts = ((shiftData ?? []) as unknown[])
+      .map((row) => normalizeShift(row as ShiftDbRow))
+      .filter((row) => employeeById.has(row.employee_id));
 
-    const rows = days.map((date) => {
-      const shift = shiftsByDate.get(date) ?? null;
-      const status = shift?.status ?? null;
+    const rows = includeSameName
+      ? normalizedShifts.map((shift) => {
+          const emp = employeeById.get(shift.employee_id) ?? employee;
+          return {
+            shift_date: shift.shift_date,
+            weekday: weekdayLabel(shift.shift_date),
+            has_shift: true,
+            employee_id: emp.id,
+            employee_name: emp.name,
+            pv_id: emp.pv_id,
+            pv_code: emp.pv_code,
+            pv_name: emp.pv_name,
+            status: shift.status,
+            status_label: shift.status_label,
+            start_time: shift.start_time,
+            end_time: shift.end_time,
+            second_start_time: shift.second_start_time,
+            second_end_time: shift.second_end_time,
+            shift_label: shift.shift_label,
+            note: shift.note,
+            hours: shift.hours,
+          };
+        })
+      : days.map((date) => {
+          const shift = normalizedShifts.find((row) => row.shift_date === date) ?? null;
+          return shift
+            ? {
+                shift_date: date,
+                weekday: weekdayLabel(date),
+                has_shift: true,
+                employee_id: employee.id,
+                employee_name: employee.name,
+                pv_id: employee.pv_id,
+                pv_code: employee.pv_code,
+                pv_name: employee.pv_name,
+                status: shift.status,
+                status_label: shift.status_label,
+                start_time: shift.start_time,
+                end_time: shift.end_time,
+                second_start_time: shift.second_start_time,
+                second_end_time: shift.second_end_time,
+                shift_label: shift.shift_label,
+                note: shift.note,
+                hours: shift.hours,
+              }
+            : emptyMonthlyRow(date);
+        });
 
-      return {
-        shift_date: date,
-        weekday: weekdayLabel(date),
-        has_shift: Boolean(shift),
-        status,
-        status_label: status ? shiftStatusLabel(status as ShiftStatus) : "Nessun turno",
-        start_time: shift?.start_time ?? null,
-        end_time: shift?.end_time ?? null,
-        second_start_time: shift?.second_start_time ?? null,
-        second_end_time: shift?.second_end_time ?? null,
-        shift_label: shift?.shift_label ?? "—",
-        note: shift?.note ?? "",
-        hours: shift?.hours ?? 0,
-      };
+    const sortedRows = rows.sort((a, b) => {
+      const dateCompare = a.shift_date.localeCompare(b.shift_date);
+      if (dateCompare !== 0) return dateCompare;
+      const pvCompare = `${a.pv_code ?? ""} ${a.pv_name ?? ""}`.localeCompare(`${b.pv_code ?? ""} ${b.pv_name ?? ""}`, "it");
+      if (pvCompare !== 0) return pvCompare;
+      return `${a.employee_name ?? ""}`.localeCompare(`${b.employee_name ?? ""}`, "it");
     });
 
-    const total_hours = rows.reduce((sum, row) => sum + row.hours, 0);
-    const total_work_days = rows.filter((row) => row.status === "work" || row.status === "split" || row.status === "change").length;
-    const total_split_days = rows.filter((row) => row.status === "split").length;
-    const total_rest_days = rows.filter((row) => row.status === "rest").length;
-    const total_vacation_days = rows.filter((row) => row.status === "vacation").length;
-    const total_change_days = rows.filter((row) => row.status === "change").length;
+    const totals = computeTotals(sortedRows);
 
     return NextResponse.json({
       ok: true,
       month,
       month_start,
       month_end,
-      employee,
-      rows,
-      totals: {
-        total_hours,
-        total_hours_label: `${formatHours(total_hours)} h`,
-        total_work_days,
-        total_split_days,
-        total_rest_days,
-        total_vacation_days,
-        total_change_days,
-      },
+      grouped_by_name: includeSameName,
+      matched_employees_count: matchedEmployees.length,
+      employee: includeSameName
+        ? {
+            ...employee,
+            pv_code: null,
+            pv_name: `Aggregato su ${matchedEmployees.length} record dipendente`,
+          }
+        : employee,
+      rows: sortedRows,
+      totals,
     });
   } catch (e: unknown) {
     return NextResponse.json({ ok: false, error: getErrorMessage(e, "Errore server") }, { status: 500 });
