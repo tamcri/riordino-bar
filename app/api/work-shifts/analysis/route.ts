@@ -50,6 +50,8 @@ type AnalysisRow = {
   mornings: number;
   afternoons: number;
   nights: number;
+  sunday_worked: number;
+  sunday_free: number;
   splits: number;
   rest_days: number;
   vacation_days: number;
@@ -141,29 +143,39 @@ function isOvernight(startTime: string | null, endTime: string | null) {
   return start !== null && end !== null && end < start;
 }
 
+function isSundayISODate(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  return new Date(`${value}T00:00:00.000Z`).getUTCDay() === 0;
+}
+
 function addShiftClassification(row: AnalysisRow, shift: ReturnType<typeof normalizeShift>) {
   const status = shift.status;
+  const isSunday = isSundayISODate(shift.shift_date);
 
   row.total_hours += shift.hours;
 
   if (status === "rest") {
     row.rest_days += 1;
+    if (isSunday) row.sunday_free += 1;
     return;
   }
 
   if (status === "vacation") {
     row.vacation_days += 1;
+    if (isSunday) row.sunday_free += 1;
     return;
   }
 
   if (status === "sick") {
     row.sick_days += 1;
+    if (isSunday) row.sunday_free += 1;
     return;
   }
 
   if (status === "split") {
     row.splits += 1;
     row.worked_days += 1;
+    if (isSunday) row.sunday_worked += 1;
     if (isOvernight(shift.start_time, shift.end_time) || isOvernight(shift.second_start_time, shift.second_end_time)) {
       row.nights += 1;
     }
@@ -173,8 +185,10 @@ function addShiftClassification(row: AnalysisRow, shift: ReturnType<typeof norma
   if (status === "change") {
     row.change_days += 1;
     row.worked_days += 1;
+    if (isSunday) row.sunday_worked += 1;
   } else if (status === "work") {
     row.worked_days += 1;
+    if (isSunday) row.sunday_worked += 1;
   }
 
   const start = timeToMinutes(shift.start_time);
@@ -308,6 +322,8 @@ export async function GET(req: Request) {
         mornings: 0,
         afternoons: 0,
         nights: 0,
+        sunday_worked: 0,
+        sunday_free: 0,
         splits: 0,
         rest_days: 0,
         vacation_days: 0,
@@ -339,6 +355,8 @@ export async function GET(req: Request) {
           rest_days: 0,
           vacation_days: 0,
           sick_days: 0,
+          sunday_worked: 0,
+          sunday_free: 0,
           change_days: 0,
         };
         rowsByEmployee.set(shift.employee_id, row);

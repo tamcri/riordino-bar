@@ -72,11 +72,6 @@ type MonthlyRow = {
   shift_date: string;
   weekday: string;
   has_shift: boolean;
-  employee_id?: string | null;
-  employee_name?: string | null;
-  pv_id?: string | null;
-  pv_code?: string | null;
-  pv_name?: string | null;
   status: ShiftStatus | null;
   status_label: string;
   start_time: string | null;
@@ -103,8 +98,6 @@ type MonthlyResponse = ApiResponseBase & {
   month_end?: string;
   employee?: MonthlyEmployee;
   rows?: MonthlyRow[];
-  grouped_by_name?: boolean;
-  matched_employees_count?: number;
   totals?: {
     total_hours?: number;
     total_hours_label?: string;
@@ -112,7 +105,6 @@ type MonthlyResponse = ApiResponseBase & {
     total_split_days?: number;
     total_rest_days?: number;
     total_vacation_days?: number;
-    total_sick_days?: number;
     total_change_days?: number;
   };
 };
@@ -125,7 +117,7 @@ type AnalysisRow = {
   pv_code: string | null;
   pv_name: string | null;
   total_hours: number;
-  total_hours_label: string;
+  total_hours_label?: string;
   worked_days: number;
   mornings: number;
   afternoons: number;
@@ -133,8 +125,12 @@ type AnalysisRow = {
   splits: number;
   rest_days: number;
   vacation_days: number;
-  sick_days: number;
+  sick_days?: number;
   change_days: number;
+  sunday_worked?: number;
+  sunday_free?: number;
+  sunday_worked_days?: number;
+  sunday_free_days?: number;
 };
 
 type AnalysisResponse = ApiResponseBase & {
@@ -153,6 +149,8 @@ type AnalysisResponse = ApiResponseBase & {
     avg_nights?: number;
     total_splits?: number;
     avg_splits?: number;
+    total_sunday_worked?: number;
+    total_sunday_free?: number;
   };
 };
 
@@ -353,8 +351,6 @@ export default function TurniAdminClient() {
   const [monthlyRows, setMonthlyRows] = useState<MonthlyRow[]>([]);
   const [monthlyEmployee, setMonthlyEmployee] = useState<MonthlyEmployee | null>(null);
   const [monthlyTotals, setMonthlyTotals] = useState<MonthlyResponse["totals"] | null>(null);
-  const [monthlyIncludeSameName, setMonthlyIncludeSameName] = useState(false);
-  const [monthlyMatchedEmployeesCount, setMonthlyMatchedEmployeesCount] = useState(0);
   const [loading, setLoading] = useState(false);
   const [monthlyLoading, setMonthlyLoading] = useState(false);
   const [employeesLoading, setEmployeesLoading] = useState(false);
@@ -485,7 +481,6 @@ export default function TurniAdminClient() {
   const monthlySplitDays = Number(monthlyTotals?.total_split_days ?? 0);
   const monthlyRestDays = Number(monthlyTotals?.total_rest_days ?? 0);
   const monthlyVacationDays = Number(monthlyTotals?.total_vacation_days ?? 0);
-  const monthlySickDays = Number(monthlyTotals?.total_sick_days ?? 0);
   const monthlyChangeDays = Number(monthlyTotals?.total_change_days ?? 0);
 
   async function loadPvs() {
@@ -857,7 +852,6 @@ export default function TurniAdminClient() {
       params.set("month", month);
       params.set("employee_id", employeeId);
       if (pvId) params.set("pv_id", pvId);
-      if (monthlyIncludeSameName) params.set("include_same_name", "1");
 
       const res = await fetchJsonSafe<MonthlyResponse>(`/api/work-shifts/monthly-employee?${params.toString()}`);
       if (!res.ok) throw new Error(res.data?.error || res.rawText || `HTTP ${res.status}`);
@@ -866,16 +860,47 @@ export default function TurniAdminClient() {
       setMonthlyRows(nextRows);
       setMonthlyEmployee(res.data?.employee ?? selectedEmployee ?? null);
       setMonthlyTotals(res.data?.totals ?? null);
-      setMonthlyMatchedEmployeesCount(Number(res.data?.matched_employees_count ?? 0));
       setMsg(nextRows.length === 0 ? "Nessun dato mensile trovato." : null);
     } catch (e: unknown) {
       setError(getErrorMessage(e, "Errore caricamento scheda mensile"));
       setMonthlyRows([]);
       setMonthlyEmployee(null);
       setMonthlyTotals(null);
-      setMonthlyMatchedEmployeesCount(0);
     } finally {
       setMonthlyLoading(false);
+    }
+  }
+
+  async function loadAnalysisRows() {
+    setAnalysisLoading(true);
+    setError(null);
+    setMsg(null);
+
+    try {
+      if (!analysisPvId) {
+        setAnalysisRows([]);
+        setAnalysisTotals(null);
+        setMsg("Seleziona un punto vendita per analizzare i turni.");
+        return;
+      }
+
+      const params = new URLSearchParams();
+      params.set("month", analysisMonth);
+      params.set("pv_id", analysisPvId);
+
+      const res = await fetchJsonSafe<AnalysisResponse>(`/api/work-shifts/analysis?${params.toString()}`);
+      if (!res.ok) throw new Error(res.data?.error || res.rawText || `HTTP ${res.status}`);
+
+      const nextRows = Array.isArray(res.data?.rows) ? res.data.rows : [];
+      setAnalysisRows(nextRows);
+      setAnalysisTotals(res.data?.totals ?? null);
+      setMsg(nextRows.length === 0 ? "Nessun dato trovato per l'analisi turni." : null);
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, "Errore caricamento analisi turni"));
+      setAnalysisRows([]);
+      setAnalysisTotals(null);
+    } finally {
+      setAnalysisLoading(false);
     }
   }
 
@@ -921,40 +946,6 @@ export default function TurniAdminClient() {
     setEditingEmployee(null);
     setEditCells([]);
   }, [weekStart]);
-
-
-  async function loadAnalysisRows() {
-    setAnalysisLoading(true);
-    setError(null);
-    setMsg(null);
-
-    try {
-      if (!analysisPvId) {
-        setAnalysisRows([]);
-        setAnalysisTotals(null);
-        setMsg("Seleziona un punto vendita per avviare l'analisi turni.");
-        return;
-      }
-
-      const params = new URLSearchParams();
-      params.set("month", analysisMonth);
-      params.set("pv_id", analysisPvId);
-
-      const res = await fetchJsonSafe<AnalysisResponse>(`/api/work-shifts/analysis?${params.toString()}`);
-      if (!res.ok) throw new Error(res.data?.error || res.rawText || `HTTP ${res.status}`);
-
-      const nextRows = Array.isArray(res.data?.rows) ? res.data.rows : [];
-      setAnalysisRows(nextRows);
-      setAnalysisTotals(res.data?.totals ?? null);
-      setMsg(nextRows.length === 0 ? "Nessun dato trovato per l'analisi turni." : null);
-    } catch (e: unknown) {
-      setError(getErrorMessage(e, "Errore analisi turni"));
-      setAnalysisRows([]);
-      setAnalysisTotals(null);
-    } finally {
-      setAnalysisLoading(false);
-    }
-  }
 
   function resetWeeklyFilters() {
     setPvId("");
@@ -1002,7 +993,6 @@ export default function TurniAdminClient() {
     params.set("month", month);
     params.set("employee_id", employeeId);
     if (pvId) params.set("pv_id", pvId);
-    if (monthlyIncludeSameName) params.set("include_same_name", "1");
 
     openPdfReport(`/api/work-shifts/pdf-monthly-employee?${params.toString()}`);
   }
@@ -1563,7 +1553,7 @@ export default function TurniAdminClient() {
               </div>
             </section>
           </>
-        ) : viewMode === "monthly" ? (
+        ) : (
           <>
             <section className="grid grid-cols-1 md:grid-cols-4 gap-4">
               <div className="rounded-2xl border bg-white p-4">
@@ -1615,7 +1605,6 @@ export default function TurniAdminClient() {
                       setMonthlyRows([]);
                       setMonthlyEmployee(null);
                       setMonthlyTotals(null);
-                      setMonthlyMatchedEmployeesCount(0);
                     }}
                   >
                     <option value="">Tutti</option>
@@ -1638,7 +1627,6 @@ export default function TurniAdminClient() {
                       setMonthlyRows([]);
                       setMonthlyEmployee(null);
                       setMonthlyTotals(null);
-                      setMonthlyMatchedEmployeesCount(0);
                     }}
                   >
                     <option value="">Seleziona dipendente</option>
@@ -1665,28 +1653,6 @@ export default function TurniAdminClient() {
                 </div>
               </div>
 
-              <label className="mt-4 flex items-start gap-3 rounded-xl border bg-gray-50 p-3 text-sm text-gray-700">
-                <input
-                  type="checkbox"
-                  className="mt-1 h-4 w-4"
-                  checked={monthlyIncludeSameName}
-                  disabled={!employeeId && monthlyRows.length === 0}
-                  onChange={(e) => {
-                    setMonthlyIncludeSameName(e.target.checked);
-                    setMonthlyRows([]);
-                    setMonthlyEmployee(null);
-                    setMonthlyTotals(null);
-                    setMonthlyMatchedEmployeesCount(0);
-                  }}
-                />
-                <span>
-                  <span className="font-medium">Includi stesso dipendente su altri PV</span>
-                  <span className="mt-1 block text-xs text-gray-500">
-                    Usa il nome normalizzato del dipendente selezionato e somma i turni trovati negli altri punti vendita. Nel report comparirà anche la colonna PV.
-                  </span>
-                </span>
-              </label>
-
               <div className="mt-4 flex flex-wrap gap-3">
                 <button
                   type="button"
@@ -1712,77 +1678,6 @@ export default function TurniAdminClient() {
                 >
                   Reset filtri
                 </button>
-              </div>
-            </section>
-          </>
-        ) : (
-          <>
-            <section className="grid grid-cols-1 md:grid-cols-4 gap-4">
-              <div className="rounded-2xl border bg-white p-4">
-                <div className="text-sm text-gray-500">Dipendenti analizzati</div>
-                <div className="text-2xl font-semibold mt-1">{analysisTotals?.employees_count ?? analysisRows.length}</div>
-              </div>
-
-              <div className="rounded-2xl border bg-white p-4">
-                <div className="text-sm text-gray-500">Ore totali</div>
-                <div className="text-2xl font-semibold mt-1">{analysisTotals?.total_hours_label ?? formatHours(Number(analysisTotals?.total_hours ?? 0))} h</div>
-              </div>
-
-              <div className="rounded-2xl border bg-white p-4">
-                <div className="text-sm text-gray-500">Media ore</div>
-                <div className="text-2xl font-semibold mt-1">{analysisTotals?.avg_hours_label ?? formatHours(Number(analysisTotals?.avg_hours ?? 0))} h</div>
-              </div>
-
-              <div className="rounded-2xl border bg-white p-4">
-                <div className="text-sm text-gray-500">Notti / Spezzati</div>
-                <div className="text-2xl font-semibold mt-1">{analysisTotals?.total_nights ?? 0} / {analysisTotals?.total_splits ?? 0}</div>
-              </div>
-            </section>
-
-            <section className="rounded-2xl border bg-white p-4">
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-sm font-medium mb-2">Mese</label>
-                  <input
-                    type="month"
-                    className="w-full rounded-xl border p-3 bg-white"
-                    value={analysisMonth}
-                    onChange={(e) => setAnalysisMonth(e.target.value)}
-                  />
-                  <p className="text-xs text-gray-500 mt-1">Periodo: {formatMonthIT(analysisMonth)}</p>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium mb-2">Punto Vendita</label>
-                  <select
-                    className="w-full rounded-xl border p-3 bg-white"
-                    value={analysisPvId}
-                    onChange={(e) => {
-                      setAnalysisPvId(e.target.value);
-                      setAnalysisRows([]);
-                      setAnalysisTotals(null);
-                    }}
-                  >
-                    <option value="">Seleziona PV</option>
-                    {pvs.map((pv) => (
-                      <option key={pv.id} value={pv.id}>
-                        {pv.code} — {pv.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium mb-2 invisible">Azione</label>
-                  <button
-                    type="button"
-                    className="rounded-xl bg-slate-900 text-white px-4 py-3 disabled:opacity-60"
-                    disabled={analysisLoading || !analysisPvId}
-                    onClick={loadAnalysisRows}
-                  >
-                    {analysisLoading ? "Analisi..." : "Analizza"}
-                  </button>
-                </div>
               </div>
             </section>
           </>
@@ -1902,11 +1797,9 @@ export default function TurniAdminClient() {
                     {(monthlyEmployee ?? selectedEmployee)?.name} — {formatMonthIT(month)}
                   </div>
                   <div className="text-gray-600 mt-1">
-                    {monthlyIncludeSameName && monthlyRows.length > 0
-                      ? `Report aggregato su ${monthlyMatchedEmployeesCount || 1} record dipendente`
-                      : [(monthlyEmployee ?? selectedEmployee)?.pv_code, (monthlyEmployee ?? selectedEmployee)?.pv_name]
-                          .filter(Boolean)
-                          .join(" — ") || "PV non indicato"}
+                    {[(monthlyEmployee ?? selectedEmployee)?.pv_code, (monthlyEmployee ?? selectedEmployee)?.pv_name]
+                      .filter(Boolean)
+                      .join(" — ") || "PV non indicato"}
                   </div>
                 </div>
               )}
@@ -1924,9 +1817,6 @@ export default function TurniAdminClient() {
                   <thead className="bg-gray-50 text-left">
                     <tr>
                       <th className="border-b px-3 py-3 font-semibold min-w-32">Data</th>
-                      {monthlyIncludeSameName && (
-                        <th className="border-b px-3 py-3 font-semibold min-w-36">PV</th>
-                      )}
                       <th className="border-b px-3 py-3 font-semibold min-w-24">Giorno</th>
                       <th className="border-b px-3 py-3 font-semibold min-w-40">Stato</th>
                       <th className="border-b px-3 py-3 font-semibold min-w-36">Turno</th>
@@ -1942,14 +1832,8 @@ export default function TurniAdminClient() {
                       const rowHours = monthlyRowHours(row);
 
                       return (
-                        <tr key={`${row.shift_date}:${row.pv_id ?? ""}:${row.employee_id ?? ""}`} className="align-top hover:bg-gray-50">
+                        <tr key={row.shift_date} className="align-top hover:bg-gray-50">
                           <td className="border-b px-3 py-3 font-medium">{formatDateIT(row.shift_date)}</td>
-                          {monthlyIncludeSameName && (
-                            <td className="border-b px-3 py-3">
-                              <div className="font-medium">{row.pv_code || "—"}</div>
-                              <div className="text-xs text-gray-500">{row.pv_name || ""}</div>
-                            </td>
-                          )}
                           <td className="border-b px-3 py-3 text-gray-600">{row.weekday}</td>
                           <td className="border-b px-3 py-3">
                             <span className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${monthlyStatusBadgeClass(status)}`}>
@@ -1968,12 +1852,12 @@ export default function TurniAdminClient() {
 
                   <tfoot className="bg-gray-50">
                     <tr>
-                      <td className="px-3 py-3 font-semibold" colSpan={monthlyIncludeSameName ? 5 : 4}>
+                      <td className="px-3 py-3 font-semibold" colSpan={4}>
                         Totale mese
                       </td>
                       <td className="px-3 py-3 text-right font-semibold">{formatHours(monthlyTotalHours)} h</td>
                       <td className="px-3 py-3 text-sm text-gray-600">
-                        Lavorati: {monthlyWorkDays} · Spezzati: {monthlySplitDays} · Riposi: {monthlyRestDays} · Ferie: {monthlyVacationDays} · Malattia: {monthlySickDays} · Cambi: {monthlyChangeDays}
+                        Lavorati: {monthlyWorkDays} · Spezzati: {monthlySplitDays} · Riposi: {monthlyRestDays} · Ferie: {monthlyVacationDays} · Cambi: {monthlyChangeDays}
                       </td>
                     </tr>
                   </tfoot>
@@ -1986,56 +1870,127 @@ export default function TurniAdminClient() {
             <div className="border-b p-4">
               <h2 className="text-lg font-semibold">Analisi turni</h2>
               <p className="text-sm text-gray-600 mt-1">
-                Confronta ore e tipologie di turno tra i dipendenti del PV selezionato.
+                Analizza la distribuzione mensile dei turni per singolo punto vendita, incluse le domeniche lavorate e libere.
               </p>
             </div>
 
-            {!analysisPvId ? (
-              <div className="p-6 text-sm text-gray-600">Seleziona un punto vendita per avviare l'analisi.</div>
-            ) : analysisLoading ? (
-              <div className="p-6 text-sm text-gray-600">Analisi turni in corso...</div>
-            ) : analysisRows.length === 0 ? (
-              <div className="p-6 text-sm text-gray-600">Nessun dato di analisi caricato.</div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full text-sm">
-                  <thead className="bg-gray-50 text-left">
-                    <tr>
-                      <th className="border-b px-3 py-3 font-semibold min-w-44">Dipendente</th>
-                      <th className="border-b px-3 py-3 font-semibold text-right">Ore</th>
-                      <th className="border-b px-3 py-3 font-semibold text-right">Giorni</th>
-                      <th className="border-b px-3 py-3 font-semibold text-right">Mattine</th>
-                      <th className="border-b px-3 py-3 font-semibold text-right">Pomeriggi</th>
-                      <th className="border-b px-3 py-3 font-semibold text-right">Notti</th>
-                      <th className="border-b px-3 py-3 font-semibold text-right">Spezzati</th>
-                      <th className="border-b px-3 py-3 font-semibold text-right">Riposi</th>
-                      <th className="border-b px-3 py-3 font-semibold text-right">Ferie</th>
-                      <th className="border-b px-3 py-3 font-semibold text-right">Malattia</th>
-                      <th className="border-b px-3 py-3 font-semibold text-right">Cambi</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {analysisRows.map((row) => (
-                      <tr key={row.employee_id} className="hover:bg-gray-50">
-                        <td className="border-b px-3 py-3">
-                          <div className="font-medium">{row.employee_name}</div>
-                          {!row.employee_active && <div className="mt-1 text-xs text-gray-500">Non attivo</div>}
-                        </td>
-                        <td className="border-b px-3 py-3 text-right font-semibold">{row.total_hours_label ?? formatHours(row.total_hours)} h</td>
-                        <td className="border-b px-3 py-3 text-right">{row.worked_days}</td>
-                        <td className="border-b px-3 py-3 text-right">{row.mornings}</td>
-                        <td className="border-b px-3 py-3 text-right">{row.afternoons}</td>
-                        <td className="border-b px-3 py-3 text-right">{row.nights}</td>
-                        <td className="border-b px-3 py-3 text-right">{row.splits}</td>
-                        <td className="border-b px-3 py-3 text-right">{row.rest_days}</td>
-                        <td className="border-b px-3 py-3 text-right">{row.vacation_days}</td>
-                        <td className="border-b px-3 py-3 text-right">{row.sick_days}</td>
-                        <td className="border-b px-3 py-3 text-right">{row.change_days}</td>
-                      </tr>
+            <div className="border-b p-4">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-[0.8fr_1.4fr_auto] md:items-end">
+                <div>
+                  <label className="block text-sm font-medium mb-2">Mese</label>
+                  <input
+                    type="month"
+                    className="w-full rounded-xl border bg-white p-3"
+                    value={analysisMonth}
+                    onChange={(e) => setAnalysisMonth(e.target.value)}
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2">Punto Vendita</label>
+                  <select
+                    className="w-full rounded-xl border bg-white p-3"
+                    value={analysisPvId}
+                    onChange={(e) => setAnalysisPvId(e.target.value)}
+                  >
+                    <option value="">Seleziona PV</option>
+                    {pvs.map((pv) => (
+                      <option key={pv.id} value={pv.id}>
+                        {pv.code} — {pv.name}
+                      </option>
                     ))}
-                  </tbody>
-                </table>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 invisible">Azione</label>
+                  <button
+                    type="button"
+                    className="rounded-xl bg-slate-900 px-4 py-3 text-white disabled:opacity-60"
+                    disabled={analysisLoading || !analysisPvId}
+                    onClick={loadAnalysisRows}
+                  >
+                    {analysisLoading ? "Analisi..." : "Analizza"}
+                  </button>
+                </div>
               </div>
+            </div>
+
+            {analysisLoading ? (
+              <div className="p-6 text-sm text-gray-600">Caricamento analisi turni...</div>
+            ) : analysisRows.length === 0 ? (
+              <div className="p-6 text-sm text-gray-600">Nessuna analisi caricata.</div>
+            ) : (
+              <>
+                <div className="grid grid-cols-1 gap-4 border-b bg-gray-50 p-4 md:grid-cols-4">
+                  <div className="rounded-2xl border bg-white p-4">
+                    <div className="text-sm text-gray-500">Dipendenti analizzati</div>
+                    <div className="mt-1 text-2xl font-semibold">{analysisTotals?.employees_count ?? analysisRows.length}</div>
+                  </div>
+                  <div className="rounded-2xl border bg-white p-4">
+                    <div className="text-sm text-gray-500">Ore totali</div>
+                    <div className="mt-1 text-2xl font-semibold">{formatHours(Number(analysisTotals?.total_hours ?? 0))} h</div>
+                  </div>
+                  <div className="rounded-2xl border bg-white p-4">
+                    <div className="text-sm text-gray-500">Notti totali</div>
+                    <div className="mt-1 text-2xl font-semibold">{analysisTotals?.total_nights ?? 0}</div>
+                  </div>
+                  <div className="rounded-2xl border bg-white p-4">
+                    <div className="text-sm text-gray-500">Spezzati totali</div>
+                    <div className="mt-1 text-2xl font-semibold">{analysisTotals?.total_splits ?? 0}</div>
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-sm">
+                    <thead className="bg-gray-50 text-left">
+                      <tr>
+                        <th className="border-b px-3 py-3 font-semibold min-w-48">Dipendente</th>
+                        <th className="border-b px-3 py-3 font-semibold text-right">Ore</th>
+                        <th className="border-b px-3 py-3 font-semibold text-right">Mattine</th>
+                        <th className="border-b px-3 py-3 font-semibold text-right">Pomeriggi</th>
+                        <th className="border-b px-3 py-3 font-semibold text-right">Notti</th>
+                        <th className="border-b px-3 py-3 font-semibold text-right">Spezzati</th>
+                        <th className="border-b px-3 py-3 font-semibold text-right">Riposi</th>
+                        <th className="border-b px-3 py-3 font-semibold text-right">Ferie</th>
+                        <th className="border-b px-3 py-3 font-semibold text-right">Malattia</th>
+                        <th className="border-b px-3 py-3 font-semibold text-right">Cambi</th>
+                        <th className="border-b px-3 py-3 font-semibold text-right">Dom. Lav.</th>
+                        <th className="border-b px-3 py-3 font-semibold text-right">Dom. Lib.</th>
+                      </tr>
+                    </thead>
+
+                    <tbody>
+                      {analysisRows.map((row) => {
+                        const sundayWorked = row.sunday_worked_days ?? row.sunday_worked ?? 0;
+                        const sundayFree = row.sunday_free_days ?? row.sunday_free ?? 0;
+
+                        return (
+                          <tr key={row.employee_id} className="hover:bg-gray-50">
+                            <td className="border-b px-3 py-3">
+                              <div className="font-medium">{row.employee_name}</div>
+                              <div className="text-xs text-gray-500">
+                                {row.employee_active ? "Attivo" : "Disattivato"}
+                              </div>
+                            </td>
+                            <td className="border-b px-3 py-3 text-right font-semibold">{formatHours(Number(row.total_hours ?? 0))} h</td>
+                            <td className="border-b px-3 py-3 text-right">{row.mornings}</td>
+                            <td className="border-b px-3 py-3 text-right">{row.afternoons}</td>
+                            <td className="border-b px-3 py-3 text-right">{row.nights}</td>
+                            <td className="border-b px-3 py-3 text-right">{row.splits}</td>
+                            <td className="border-b px-3 py-3 text-right">{row.rest_days}</td>
+                            <td className="border-b px-3 py-3 text-right">{row.vacation_days}</td>
+                            <td className="border-b px-3 py-3 text-right">{row.sick_days ?? 0}</td>
+                            <td className="border-b px-3 py-3 text-right">{row.change_days}</td>
+                            <td className="border-b px-3 py-3 text-right font-semibold">{sundayWorked}</td>
+                            <td className="border-b px-3 py-3 text-right font-semibold">{sundayFree}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </>
             )}
           </section>
         )}
