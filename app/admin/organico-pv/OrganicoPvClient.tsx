@@ -7,6 +7,7 @@ type EmployeeRow = {
   id: string;
   name: string;
   active: boolean;
+  counts_in_staff?: boolean;
   created_at?: string | null;
   updated_at?: string | null;
 };
@@ -18,9 +19,11 @@ type StaffPvRow = {
   min_employees: number | null;
   note: string | null;
   active_count: number;
+  support_count?: number;
   shortage: number;
   status: "ok" | "shortage" | "not_configured";
   active_employees: EmployeeRow[];
+  support_employees?: EmployeeRow[];
   inactive_employees: EmployeeRow[];
 };
 
@@ -212,7 +215,7 @@ export default function OrganicoPvClient() {
             <div>
               <h2 className="text-lg font-semibold">Riepilogo punti vendita</h2>
               <p className="text-sm text-gray-600 mt-1">
-                L&apos;alert scatta quando i dipendenti attivi sono meno dell&apos;organico minimo impostato.
+                L&apos;alert scatta quando i dipendenti di organico stabile sono meno dell&apos;organico minimo impostato.
               </p>
             </div>
 
@@ -231,7 +234,8 @@ export default function OrganicoPvClient() {
               <thead className="bg-slate-50 text-slate-700">
                 <tr>
                   <th className="px-3 py-2 text-left">PV</th>
-                  <th className="px-3 py-2 text-right">Dipendenti attivi</th>
+                  <th className="px-3 py-2 text-right">Organico stabile</th>
+                  <th className="px-3 py-2 text-right">Supporti</th>
                   <th className="px-3 py-2 text-right">Organico minimo</th>
                   <th className="px-3 py-2 text-left">Stato</th>
                 </tr>
@@ -245,6 +249,7 @@ export default function OrganicoPvClient() {
                   >
                     <td className="px-3 py-2 font-medium">{pvLabel(row)}</td>
                     <td className="px-3 py-2 text-right">{row.active_count}</td>
+                    <td className="px-3 py-2 text-right">{row.support_count ?? 0}</td>
                     <td className="px-3 py-2 text-right">{row.min_employees ?? "-"}</td>
                     <td className="px-3 py-2">
                       <span className={`inline-flex rounded-full border px-2 py-1 text-xs font-semibold ${statusClass(row)}`}>
@@ -256,7 +261,7 @@ export default function OrganicoPvClient() {
 
                 {!loading && rows.length === 0 && (
                   <tr>
-                    <td colSpan={4} className="px-3 py-6 text-center text-gray-500">
+                    <td colSpan={5} className="px-3 py-6 text-center text-gray-500">
                       Nessun punto vendita trovato.
                     </td>
                   </tr>
@@ -272,7 +277,9 @@ export default function OrganicoPvClient() {
               <div>
                 <h2 className="text-lg font-semibold">Dettaglio {pvLabel(selectedRow)}</h2>
                 <p className="text-sm text-gray-600 mt-1">
-                  Dipendenti attivi: <b>{selectedRow.active_count}</b> · Organico minimo: <b>{selectedRow.min_employees ?? "non configurato"}</b>
+                  Organico stabile: <b>{selectedRow.active_count}</b> · Supporti temporanei:{" "}
+                  <b>{selectedRow.support_count ?? 0}</b> · Organico minimo:{" "}
+                  <b>{selectedRow.min_employees ?? "non configurato"}</b>
                 </p>
                 <div className="mt-2">
                   <span className={`inline-flex rounded-full border px-2 py-1 text-xs font-semibold ${statusClass(selectedRow)}`}>
@@ -333,7 +340,7 @@ export default function OrganicoPvClient() {
                   <div>
                     <h3 className="font-semibold">Dipendenti del PV</h3>
                     <p className="text-sm text-gray-600 mt-1">
-                      Nel PDF vengono stampati solo i dipendenti attivi.
+                      L&apos;organico stabile viene confrontato con il minimo impostato. I supporti temporanei restano utilizzabili nei turni ma non contano nell&apos;organico.
                     </p>
                   </div>
 
@@ -352,6 +359,7 @@ export default function OrganicoPvClient() {
                     <thead className="bg-slate-50 text-slate-700">
                       <tr>
                         <th className="px-3 py-2 text-left">Dipendente</th>
+                        <th className="px-3 py-2 text-left">Tipo</th>
                         <th className="px-3 py-2 text-left">Stato</th>
                       </tr>
                     </thead>
@@ -359,6 +367,17 @@ export default function OrganicoPvClient() {
                       {employeesToShow.map((employee) => (
                         <tr key={employee.id} className="border-t">
                           <td className="px-3 py-2 font-medium">{employee.name}</td>
+                          <td className="px-3 py-2">
+                            <span
+                              className={`inline-flex rounded-full border px-2 py-1 text-xs font-semibold ${
+                                employee.counts_in_staff === false
+                                  ? "border-amber-200 bg-amber-50 text-amber-800"
+                                  : "border-blue-200 bg-blue-50 text-blue-800"
+                              }`}
+                            >
+                              {employee.counts_in_staff === false ? "Supporto temporaneo" : "Organico stabile"}
+                            </span>
+                          </td>
                           <td className="px-3 py-2">
                             <span
                               className={`inline-flex rounded-full border px-2 py-1 text-xs font-semibold ${
@@ -375,7 +394,7 @@ export default function OrganicoPvClient() {
 
                       {employeesToShow.length === 0 && (
                         <tr>
-                          <td colSpan={2} className="px-3 py-6 text-center text-gray-500">
+                          <td colSpan={3} className="px-3 py-6 text-center text-gray-500">
                             Nessun dipendente da mostrare.
                           </td>
                         </tr>
@@ -383,6 +402,38 @@ export default function OrganicoPvClient() {
                     </tbody>
                   </table>
                 </div>
+
+                {selectedRow.support_employees && selectedRow.support_employees.length > 0 && (
+                  <div className="mt-6">
+                    <h3 className="font-semibold">Supporti temporanei</h3>
+                    <p className="mt-1 text-sm text-slate-600">
+                      Questi dipendenti possono essere usati nei turni del PV, ma non vengono conteggiati nell&apos;organico minimo.
+                    </p>
+
+                    <div className="mt-3 overflow-x-auto rounded-2xl border">
+                      <table className="min-w-full text-sm">
+                        <thead className="bg-slate-50 text-left text-slate-600">
+                          <tr>
+                            <th className="px-4 py-3">Dipendente</th>
+                            <th className="px-4 py-3">Tipo</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y">
+                          {selectedRow.support_employees.map((employee) => (
+                            <tr key={employee.id}>
+                              <td className="px-4 py-3 font-medium">{employee.name}</td>
+                              <td className="px-4 py-3">
+                                <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-800">
+                                  Supporto temporaneo
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </section>

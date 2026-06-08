@@ -37,6 +37,7 @@ type Employee = {
   pv_id: string;
   name: string;
   active: boolean;
+  counts_in_staff?: boolean;
   pv_code: string | null;
   pv_name: string | null;
 };
@@ -72,6 +73,11 @@ type MonthlyRow = {
   shift_date: string;
   weekday: string;
   has_shift: boolean;
+  employee_id?: string | null;
+  employee_name?: string | null;
+  pv_id?: string | null;
+  pv_code?: string | null;
+  pv_name?: string | null;
   status: ShiftStatus | null;
   status_label: string;
   start_time: string | null;
@@ -98,6 +104,8 @@ type MonthlyResponse = ApiResponseBase & {
   month_end?: string;
   employee?: MonthlyEmployee;
   rows?: MonthlyRow[];
+  grouped_by_name?: boolean;
+  matched_employees_count?: number;
   totals?: {
     total_hours?: number;
     total_hours_label?: string;
@@ -105,6 +113,7 @@ type MonthlyResponse = ApiResponseBase & {
     total_split_days?: number;
     total_rest_days?: number;
     total_vacation_days?: number;
+    total_sick_days?: number;
     total_change_days?: number;
   };
 };
@@ -351,6 +360,8 @@ export default function TurniAdminClient() {
   const [monthlyRows, setMonthlyRows] = useState<MonthlyRow[]>([]);
   const [monthlyEmployee, setMonthlyEmployee] = useState<MonthlyEmployee | null>(null);
   const [monthlyTotals, setMonthlyTotals] = useState<MonthlyResponse["totals"] | null>(null);
+  const [monthlyIncludeSameName, setMonthlyIncludeSameName] = useState(false);
+  const [monthlyMatchedEmployeesCount, setMonthlyMatchedEmployeesCount] = useState(0);
   const [loading, setLoading] = useState(false);
   const [monthlyLoading, setMonthlyLoading] = useState(false);
   const [employeesLoading, setEmployeesLoading] = useState(false);
@@ -369,8 +380,10 @@ export default function TurniAdminClient() {
   const [editCells, setEditCells] = useState<WeeklyEditCell[]>([]);
   const [editSaving, setEditSaving] = useState(false);
   const [newEmployeeName, setNewEmployeeName] = useState("");
+  const [newEmployeeCountsInStaff, setNewEmployeeCountsInStaff] = useState(true);
   const [renameEmployeeId, setRenameEmployeeId] = useState("");
   const [renameEmployeeName, setRenameEmployeeName] = useState("");
+  const [renameEmployeeCountsInStaff, setRenameEmployeeCountsInStaff] = useState(true);
   const [employeeManageLoading, setEmployeeManageLoading] = useState(false);
   const [analysisMonth, setAnalysisMonth] = useState(currentMonthValue());
   const [analysisPvId, setAnalysisPvId] = useState("");
@@ -640,8 +653,9 @@ export default function TurniAdminClient() {
       }
 
       if (renameEmployeeId && !list.some((employee) => employee.id === renameEmployeeId)) {
-        setRenameEmployeeId("");
-        setRenameEmployeeName("");
+       setRenameEmployeeId("");
+       setRenameEmployeeName("");
+       setRenameEmployeeCountsInStaff(true);
       }
     } catch (e: unknown) {
       setError(getErrorMessage(e, "Errore caricamento dipendenti per modifica admin"));
@@ -673,15 +687,17 @@ export default function TurniAdminClient() {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          pv_id: pvId,
-          name,
-        }),
+        pv_id: pvId,
+       name,
+       counts_in_staff: newEmployeeCountsInStaff,
+      }),
       });
 
       if (!res.ok) throw new Error(res.data?.error || res.rawText || `HTTP ${res.status}`);
 
       const created = res.data?.row ?? null;
       setNewEmployeeName("");
+      setNewEmployeeCountsInStaff(true);
       setMsg("Dipendente aggiunto correttamente.");
 
       await loadWeeklyEmployees(pvId);
@@ -725,10 +741,11 @@ export default function TurniAdminClient() {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          id: renameEmployeeId,
-          pv_id: pvId,
-          name,
-        }),
+        id: renameEmployeeId,
+       pv_id: pvId,
+        name,
+      counts_in_staff: renameEmployeeCountsInStaff,
+      }),
       });
 
       if (!res.ok) throw new Error(res.data?.error || res.rawText || `HTTP ${res.status}`);
@@ -844,6 +861,7 @@ export default function TurniAdminClient() {
         setMonthlyRows([]);
         setMonthlyEmployee(null);
         setMonthlyTotals(null);
+        setMonthlyMatchedEmployeesCount(0);
         setMsg("Seleziona un dipendente per visualizzare la scheda mensile.");
         return;
       }
@@ -852,6 +870,7 @@ export default function TurniAdminClient() {
       params.set("month", month);
       params.set("employee_id", employeeId);
       if (pvId) params.set("pv_id", pvId);
+      if (monthlyIncludeSameName) params.set("include_same_name", "1");
 
       const res = await fetchJsonSafe<MonthlyResponse>(`/api/work-shifts/monthly-employee?${params.toString()}`);
       if (!res.ok) throw new Error(res.data?.error || res.rawText || `HTTP ${res.status}`);
@@ -860,12 +879,14 @@ export default function TurniAdminClient() {
       setMonthlyRows(nextRows);
       setMonthlyEmployee(res.data?.employee ?? selectedEmployee ?? null);
       setMonthlyTotals(res.data?.totals ?? null);
+      setMonthlyMatchedEmployeesCount(Number(res.data?.matched_employees_count ?? 0));
       setMsg(nextRows.length === 0 ? "Nessun dato mensile trovato." : null);
     } catch (e: unknown) {
       setError(getErrorMessage(e, "Errore caricamento scheda mensile"));
       setMonthlyRows([]);
       setMonthlyEmployee(null);
       setMonthlyTotals(null);
+      setMonthlyMatchedEmployeesCount(0);
     } finally {
       setMonthlyLoading(false);
     }
@@ -963,6 +984,8 @@ export default function TurniAdminClient() {
     setMonthlyRows([]);
     setMonthlyEmployee(null);
     setMonthlyTotals(null);
+    setMonthlyIncludeSameName(false);
+    setMonthlyMatchedEmployeesCount(0);
   }
 
   function openPdfReport(url: string) {
@@ -993,6 +1016,7 @@ export default function TurniAdminClient() {
     params.set("month", month);
     params.set("employee_id", employeeId);
     if (pvId) params.set("pv_id", pvId);
+    if (monthlyIncludeSameName) params.set("include_same_name", "1");
 
     openPdfReport(`/api/work-shifts/pdf-monthly-employee?${params.toString()}`);
   }
@@ -1022,10 +1046,24 @@ export default function TurniAdminClient() {
                 viewMode === "weekly" ? "bg-slate-900 text-white" : "border bg-white hover:bg-gray-50"
               }`}
               onClick={() => {
-                setViewMode("weekly");
-                setMsg(null);
-                setError(null);
-              }}
+  setViewMode("weekly");
+
+  // Pulizia dati mensili/analisi quando torno alla vista settimanale.
+  setMonthlyRows([]);
+  setMonthlyEmployee(null);
+  setMonthlyTotals(null);
+  setMonthlyMatchedEmployeesCount(0);
+
+  setAnalysisRows([]);
+  setAnalysisTotals(null);
+
+  setMsg(null);
+  setError(null);
+
+  setTimeout(() => {
+    void loadRows();
+  }, 0);
+}}
             >
               Vista settimanale
             </button>
@@ -1036,10 +1074,20 @@ export default function TurniAdminClient() {
                 viewMode === "monthly" ? "bg-slate-900 text-white" : "border bg-white hover:bg-gray-50"
               }`}
               onClick={() => {
-                setViewMode("monthly");
-                setMsg(null);
-                setError(null);
-              }}
+  setViewMode("monthly");
+
+  // Pulizia dati settimanali quando entro nella scheda mensile.
+  setRows([]);
+  setEditingEmployee(null);
+  setEditCells([]);
+  setWeeklyEmployeeId("");
+
+  setAnalysisRows([]);
+  setAnalysisTotals(null);
+
+  setMsg(null);
+  setError(null);
+}}
             >
               Scheda mensile dipendente
             </button>
@@ -1050,10 +1098,22 @@ export default function TurniAdminClient() {
                 viewMode === "analysis" ? "bg-slate-900 text-white" : "border bg-white hover:bg-gray-50"
               }`}
               onClick={() => {
-                setViewMode("analysis");
-                setMsg(null);
-                setError(null);
-              }}
+  setViewMode("analysis");
+
+  // Pulizia dati settimanali e mensili quando entro in Analisi turni.
+  setRows([]);
+  setEditingEmployee(null);
+  setEditCells([]);
+  setWeeklyEmployeeId("");
+
+  setMonthlyRows([]);
+  setMonthlyEmployee(null);
+  setMonthlyTotals(null);
+  setMonthlyMatchedEmployeesCount(0);
+
+  setMsg(null);
+  setError(null);
+}}
             >
               Analisi turni
             </button>
@@ -1283,7 +1343,9 @@ export default function TurniAdminClient() {
                         </option>
                         {weeklyEmployees.map((employee) => (
                           <option key={employee.id} value={employee.id}>
-                            {employee.name}{employee.active ? "" : " — non attivo"}
+                            {employee.name}
+                            {employee.counts_in_staff === false ? " — supporto temporaneo" : ""}
+                            {employee.active ? "" : " — non attivo"}
                           </option>
                         ))}
                       </select>
@@ -1310,7 +1372,7 @@ export default function TurniAdminClient() {
                       Crea un nuovo dipendente nel PV selezionato e poi assegnagli i turni.
                     </p>
 
-                    <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_auto] md:items-end">
+                    <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_0.8fr_auto] md:items-end">
                       <div>
                         <label className="block text-sm font-medium mb-2">Nome dipendente</label>
                         <input
@@ -1321,6 +1383,19 @@ export default function TurniAdminClient() {
                           onChange={(e) => setNewEmployeeName(e.target.value)}
                           placeholder={!pvId ? "Seleziona prima un PV" : "Es. Mario Rossi"}
                         />
+                      </div>
+
+                      <div>
+                      <label className="block text-sm font-medium mb-2">Tipo dipendente</label>
+                       <select
+                       className="w-full rounded-xl border bg-white p-3 disabled:opacity-60"
+                       value={newEmployeeCountsInStaff ? "staff" : "support"}
+                       disabled={!pvId || employeeManageLoading}
+                       onChange={(e) => setNewEmployeeCountsInStaff(e.target.value === "staff")}
+                       >
+                        <option value="staff">Organico stabile</option>
+                        <option value="support">Supporto temporaneo</option>
+                       </select>
                       </div>
 
                       <button
@@ -1339,7 +1414,7 @@ export default function TurniAdminClient() {
                       Rinomina un dipendente esistente senza perdere lo storico turni.
                     </p>
 
-                    <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_auto] md:items-end">
+                    <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_0.8fr_auto] md:items-end">
                       <div>
                         <label className="block text-sm font-medium mb-2">Dipendente</label>
                         <select
@@ -1347,10 +1422,11 @@ export default function TurniAdminClient() {
                           value={renameEmployeeId}
                           disabled={!pvId || weeklyEmployeesLoading || employeeManageLoading}
                           onChange={(e) => {
-                            const nextId = e.target.value;
-                            const employee = weeklyEmployees.find((item) => item.id === nextId) ?? null;
-                            setRenameEmployeeId(nextId);
-                            setRenameEmployeeName(employee?.name ?? "");
+                          const nextId = e.target.value;
+                         const employee = weeklyEmployees.find((item) => item.id === nextId) ?? null;
+                         setRenameEmployeeId(nextId);
+                         setRenameEmployeeName(employee?.name ?? "");
+                         setRenameEmployeeCountsInStaff(employee?.counts_in_staff !== false);
                           }}
                         >
                           <option value="">
@@ -1362,7 +1438,9 @@ export default function TurniAdminClient() {
                           </option>
                           {weeklyEmployees.map((employee) => (
                             <option key={employee.id} value={employee.id}>
-                              {employee.name}{employee.active ? "" : " — non attivo"}
+                              {employee.name}
+                              {employee.counts_in_staff === false ? " — supporto temporaneo" : ""}
+                              {employee.active ? "" : " — non attivo"}
                             </option>
                           ))}
                         </select>
@@ -1379,6 +1457,19 @@ export default function TurniAdminClient() {
                           placeholder={selectedRenameEmployee?.name ?? "Nuovo nome"}
                         />
                       </div>
+
+                      <div>
+  <label className="block text-sm font-medium mb-2">Tipo dipendente</label>
+  <select
+    className="w-full rounded-xl border bg-white p-3 disabled:opacity-60"
+    value={renameEmployeeCountsInStaff ? "staff" : "support"}
+    disabled={!renameEmployeeId || employeeManageLoading}
+    onChange={(e) => setRenameEmployeeCountsInStaff(e.target.value === "staff")}
+  >
+    <option value="staff">Organico stabile</option>
+    <option value="support">Supporto temporaneo</option>
+  </select>
+</div>
 
                       <button
                         type="submit"
@@ -1553,9 +1644,9 @@ export default function TurniAdminClient() {
               </div>
             </section>
           </>
-        ) : (
-          <>
-            <section className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        ) : viewMode === "monthly" ? (
+  <>
+    <section className="grid grid-cols-1 md:grid-cols-4 gap-4">
               <div className="rounded-2xl border bg-white p-4">
                 <div className="text-sm text-gray-500">Dipendente</div>
                 <div className="text-lg font-semibold mt-1 truncate">
@@ -1605,6 +1696,7 @@ export default function TurniAdminClient() {
                       setMonthlyRows([]);
                       setMonthlyEmployee(null);
                       setMonthlyTotals(null);
+                      setMonthlyMatchedEmployeesCount(0);
                     }}
                   >
                     <option value="">Tutti</option>
@@ -1627,6 +1719,7 @@ export default function TurniAdminClient() {
                       setMonthlyRows([]);
                       setMonthlyEmployee(null);
                       setMonthlyTotals(null);
+                      setMonthlyMatchedEmployeesCount(0);
                     }}
                   >
                     <option value="">Seleziona dipendente</option>
@@ -1652,6 +1745,30 @@ export default function TurniAdminClient() {
                   </div>
                 </div>
               </div>
+
+              <div className="mt-3 max-w-3xl">
+  <label className="flex items-start gap-2 rounded-xl border bg-slate-50 p-3 text-sm text-slate-700">
+    <input
+      type="checkbox"
+      className="mt-1"
+      checked={monthlyIncludeSameName}
+      disabled={!employeeId || monthlyLoading}
+      onChange={(e) => {
+        setMonthlyIncludeSameName(e.target.checked);
+        setMonthlyRows([]);
+        setMonthlyEmployee(null);
+        setMonthlyTotals(null);
+        setMonthlyMatchedEmployeesCount(0);
+      }}
+    />
+    <span className="leading-snug">
+      <span className="font-medium">Includi stesso dipendente su altri PV</span>
+      <span className="block text-xs text-slate-500">
+        Usa il nome normalizzato per sommare anche eventuali copie presenti su altri punti vendita.
+      </span>
+    </span>
+  </label>
+</div>
 
               <div className="mt-4 flex flex-wrap gap-3">
                 <button
@@ -1680,8 +1797,8 @@ export default function TurniAdminClient() {
                 </button>
               </div>
             </section>
-          </>
-        )}
+                    </>
+        ) : null}
 
         {error && (
           <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
@@ -1801,6 +1918,12 @@ export default function TurniAdminClient() {
                       .filter(Boolean)
                       .join(" — ") || "PV non indicato"}
                   </div>
+                  {monthlyIncludeSameName && (
+                    <div className="mt-2 text-xs text-slate-600">
+                      Report aggregato per stesso nome dipendente
+                      {monthlyMatchedEmployeesCount > 0 ? ` · Dipendenti collegati: ${monthlyMatchedEmployeesCount}` : ""}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1818,6 +1941,9 @@ export default function TurniAdminClient() {
                     <tr>
                       <th className="border-b px-3 py-3 font-semibold min-w-32">Data</th>
                       <th className="border-b px-3 py-3 font-semibold min-w-24">Giorno</th>
+                      {monthlyIncludeSameName && (
+                        <th className="border-b px-3 py-3 font-semibold min-w-36">PV</th>
+                      )}
                       <th className="border-b px-3 py-3 font-semibold min-w-40">Stato</th>
                       <th className="border-b px-3 py-3 font-semibold min-w-36">Turno</th>
                       <th className="border-b px-3 py-3 font-semibold min-w-24 text-right">Ore</th>
@@ -1835,6 +1961,11 @@ export default function TurniAdminClient() {
                         <tr key={row.shift_date} className="align-top hover:bg-gray-50">
                           <td className="border-b px-3 py-3 font-medium">{formatDateIT(row.shift_date)}</td>
                           <td className="border-b px-3 py-3 text-gray-600">{row.weekday}</td>
+                          {monthlyIncludeSameName && (
+                            <td className="border-b px-3 py-3 text-gray-700">
+                              {[row.pv_code, row.pv_name].filter(Boolean).join(" — ") || "—"}
+                            </td>
+                          )}
                           <td className="border-b px-3 py-3">
                             <span className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${monthlyStatusBadgeClass(status)}`}>
                               {status ? shiftStatusLabel(status) : "Nessun turno"}
@@ -1852,7 +1983,7 @@ export default function TurniAdminClient() {
 
                   <tfoot className="bg-gray-50">
                     <tr>
-                      <td className="px-3 py-3 font-semibold" colSpan={4}>
+                      <td className="px-3 py-3 font-semibold" colSpan={monthlyIncludeSameName ? 5 : 4}>
                         Totale mese
                       </td>
                       <td className="px-3 py-3 text-right font-semibold">{formatHours(monthlyTotalHours)} h</td>

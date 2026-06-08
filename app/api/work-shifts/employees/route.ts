@@ -14,6 +14,7 @@ type EmployeeDbRow = {
   pv_id?: unknown;
   name?: unknown;
   active?: unknown;
+  counts_in_staff?: unknown;
   created_at?: unknown;
   updated_at?: unknown;
   pvs?: { code?: unknown; name?: unknown } | null;
@@ -25,6 +26,7 @@ function employeeSelect() {
     pv_id,
     name,
     active,
+    counts_in_staff,
     created_at,
     updated_at,
     pvs:pvs(code, name)
@@ -37,6 +39,7 @@ function normalizeEmployee(row: EmployeeDbRow) {
     pv_id: String(row?.pv_id ?? ""),
     name: String(row?.name ?? ""),
     active: row?.active !== false,
+    counts_in_staff: row?.counts_in_staff !== false,
     created_at: row?.created_at ? String(row.created_at) : null,
     updated_at: row?.updated_at ? String(row.updated_at) : null,
     pv_code: row?.pvs?.code ? String(row.pvs.code) : null,
@@ -143,11 +146,12 @@ export async function POST(req: Request) {
     const { data, error } = await supabaseAdmin
       .from("employees")
       .insert({
-        pv_id,
-        name,
-        active: true,
-        created_by: userId,
-        updated_by: userId,
+       pv_id,
+       name,
+       active: true,
+       counts_in_staff: body.counts_in_staff !== false,
+       created_by: userId,
+       updated_by: userId,
       })
       .select(employeeSelect())
       .single();
@@ -188,6 +192,10 @@ export async function PATCH(req: Request) {
 
     if (Object.prototype.hasOwnProperty.call(body, "active")) {
       update.active = body.active !== false;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body, "counts_in_staff")) {
+      update.counts_in_staff = body.counts_in_staff !== false;
     }
 
     if (Object.keys(update).length === 0) {

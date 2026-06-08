@@ -8,6 +8,7 @@ type EmployeeRow = {
   pv_id: string;
   name: string | null;
   active: boolean | null;
+  counts_in_staff: boolean | null;
   created_at?: string | null;
   updated_at?: string | null;
 };
@@ -27,9 +28,9 @@ export async function GET() {
       await Promise.all([
         supabaseAdmin.from("pvs").select("id, code, name").order("code", { ascending: true }),
         supabaseAdmin
-          .from("employees")
-          .select("id, pv_id, name, active, created_at, updated_at")
-          .order("name", { ascending: true }),
+        .from("employees")
+        .select("id, pv_id, name, active, counts_in_staff, created_at, updated_at")
+        .order("name", { ascending: true }),
         supabaseAdmin.from("pv_staff_settings").select("pv_id, min_employees, note"),
       ]);
 
@@ -45,13 +46,25 @@ export async function GET() {
 
     const rows = ((pvs ?? []) as PvRow[]).map((pv) => {
       const pvEmployees = employeeRows.filter((employee) => employee.pv_id === pv.id);
-      const activeEmployees = pvEmployees.filter((employee) => employee.active !== false).sort(employeeNameSort);
-      const inactiveEmployees = pvEmployees.filter((employee) => employee.active === false).sort(employeeNameSort);
-      const setting = settingMap.get(pv.id) ?? null;
-      const minEmployees = setting?.min_employees ?? null;
-      const activeCount = activeEmployees.length;
-      const shortage = minEmployees !== null && minEmployees > activeCount ? minEmployees - activeCount : 0;
-      const status = minEmployees === null ? "not_configured" : shortage > 0 ? "shortage" : "ok";
+
+const staffEmployees = pvEmployees
+  .filter((employee) => employee.active !== false && employee.counts_in_staff !== false)
+  .sort(employeeNameSort);
+
+const supportEmployees = pvEmployees
+  .filter((employee) => employee.active !== false && employee.counts_in_staff === false)
+  .sort(employeeNameSort);
+
+const inactiveEmployees = pvEmployees
+  .filter((employee) => employee.active === false)
+  .sort(employeeNameSort);
+
+const setting = settingMap.get(pv.id) ?? null;
+const minEmployees = setting?.min_employees ?? null;
+const activeCount = staffEmployees.length;
+const supportCount = supportEmployees.length;
+const shortage = minEmployees !== null && minEmployees > activeCount ? minEmployees - activeCount : 0;
+const status = minEmployees === null ? "not_configured" : shortage > 0 ? "shortage" : "ok";
 
       return {
         pv_id: pv.id,
@@ -60,22 +73,33 @@ export async function GET() {
         min_employees: minEmployees,
         note: setting?.note ?? null,
         active_count: activeCount,
-        shortage,
-        status,
-        active_employees: activeEmployees.map((employee) => ({
-          id: employee.id,
-          name: employee.name ?? "",
-          active: employee.active !== false,
-          created_at: employee.created_at ?? null,
-          updated_at: employee.updated_at ?? null,
-        })),
-        inactive_employees: inactiveEmployees.map((employee) => ({
-          id: employee.id,
-          name: employee.name ?? "",
-          active: false,
-          created_at: employee.created_at ?? null,
-          updated_at: employee.updated_at ?? null,
-        })),
+support_count: supportCount,
+shortage,
+status,
+active_employees: staffEmployees.map((employee) => ({
+  id: employee.id,
+  name: employee.name ?? "",
+  active: employee.active !== false,
+  counts_in_staff: employee.counts_in_staff !== false,
+  created_at: employee.created_at ?? null,
+  updated_at: employee.updated_at ?? null,
+})),
+support_employees: supportEmployees.map((employee) => ({
+  id: employee.id,
+  name: employee.name ?? "",
+  active: employee.active !== false,
+  counts_in_staff: false,
+  created_at: employee.created_at ?? null,
+  updated_at: employee.updated_at ?? null,
+})),
+inactive_employees: inactiveEmployees.map((employee) => ({
+  id: employee.id,
+  name: employee.name ?? "",
+  active: false,
+  counts_in_staff: employee.counts_in_staff !== false,
+  created_at: employee.created_at ?? null,
+  updated_at: employee.updated_at ?? null,
+})),
       };
     });
 
