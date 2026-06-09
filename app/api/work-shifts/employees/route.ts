@@ -15,10 +15,21 @@ type EmployeeDbRow = {
   name?: unknown;
   active?: unknown;
   counts_in_staff?: unknown;
+  contract_type?: unknown;
   created_at?: unknown;
   updated_at?: unknown;
   pvs?: { code?: unknown; name?: unknown } | null;
 };
+
+type EmployeeContractType = "full_time" | "part_time";
+
+function normalizeContractType(value: unknown): EmployeeContractType {
+  return value === "part_time" ? "part_time" : "full_time";
+}
+
+function isValidContractType(value: unknown): value is EmployeeContractType {
+  return value === "full_time" || value === "part_time";
+}
 
 function employeeSelect() {
   return `
@@ -27,6 +38,7 @@ function employeeSelect() {
     name,
     active,
     counts_in_staff,
+    contract_type,
     created_at,
     updated_at,
     pvs:pvs(code, name)
@@ -40,6 +52,7 @@ function normalizeEmployee(row: EmployeeDbRow) {
     name: String(row?.name ?? ""),
     active: row?.active !== false,
     counts_in_staff: row?.counts_in_staff !== false,
+    contract_type: normalizeContractType(row?.contract_type),
     created_at: row?.created_at ? String(row.created_at) : null,
     updated_at: row?.updated_at ? String(row.updated_at) : null,
     pv_code: row?.pvs?.code ? String(row.pvs.code) : null,
@@ -112,9 +125,17 @@ export async function POST(req: Request) {
 
     const body = asRecord(await req.json().catch(() => null));
     const name = clampText(body.name, 120);
+    const contractType = normalizeContractType(body.contract_type);
 
     if (!name) {
       return NextResponse.json({ ok: false, error: "Nome dipendente obbligatorio" }, { status: 400 });
+    }
+
+    if (
+      Object.prototype.hasOwnProperty.call(body, "contract_type") &&
+      !isValidContractType(body.contract_type)
+    ) {
+      return NextResponse.json({ ok: false, error: "Tipo contratto non valido" }, { status: 400 });
     }
 
     let pv_id: string | null = null;
@@ -150,6 +171,7 @@ export async function POST(req: Request) {
        name,
        active: true,
        counts_in_staff: body.counts_in_staff !== false,
+       contract_type: contractType,
        created_by: userId,
        updated_by: userId,
       })
@@ -194,8 +216,16 @@ export async function PATCH(req: Request) {
       update.active = body.active !== false;
     }
 
-    if (Object.prototype.hasOwnProperty.call(body, "counts_in_staff")) {
+        if (Object.prototype.hasOwnProperty.call(body, "counts_in_staff")) {
       update.counts_in_staff = body.counts_in_staff !== false;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body, "contract_type")) {
+      if (!isValidContractType(body.contract_type)) {
+        return NextResponse.json({ ok: false, error: "Tipo contratto non valido" }, { status: 400 });
+      }
+
+      update.contract_type = body.contract_type;
     }
 
     if (Object.keys(update).length === 0) {

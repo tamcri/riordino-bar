@@ -9,6 +9,7 @@ type EmployeeRow = {
   name: string | null;
   active: boolean | null;
   counts_in_staff: boolean | null;
+  contract_type?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
 };
@@ -16,6 +17,10 @@ type SettingRow = { pv_id: string; min_employees: number | null; note: string | 
 
 function employeeNameSort(a: EmployeeRow, b: EmployeeRow) {
   return String(a.name ?? "").localeCompare(String(b.name ?? ""), "it", { sensitivity: "base" });
+}
+
+function normalizeContractType(value: unknown) {
+  return value === "part_time" ? "part_time" : "full_time";
 }
 
 export const dynamic = "force-dynamic";
@@ -29,7 +34,7 @@ export async function GET() {
         supabaseAdmin.from("pvs").select("id, code, name").order("code", { ascending: true }),
         supabaseAdmin
         .from("employees")
-        .select("id, pv_id, name, active, counts_in_staff, created_at, updated_at")
+        .select("id, pv_id, name, active, counts_in_staff, contract_type, created_at, updated_at")
         .order("name", { ascending: true }),
         supabaseAdmin.from("pv_staff_settings").select("pv_id, min_employees, note"),
       ]);
@@ -81,6 +86,7 @@ active_employees: staffEmployees.map((employee) => ({
   name: employee.name ?? "",
   active: employee.active !== false,
   counts_in_staff: employee.counts_in_staff !== false,
+  contract_type: normalizeContractType(employee.contract_type),
   created_at: employee.created_at ?? null,
   updated_at: employee.updated_at ?? null,
 })),
@@ -89,6 +95,7 @@ support_employees: supportEmployees.map((employee) => ({
   name: employee.name ?? "",
   active: employee.active !== false,
   counts_in_staff: false,
+  contract_type: normalizeContractType(employee.contract_type),
   created_at: employee.created_at ?? null,
   updated_at: employee.updated_at ?? null,
 })),
@@ -97,6 +104,7 @@ inactive_employees: inactiveEmployees.map((employee) => ({
   name: employee.name ?? "",
   active: false,
   counts_in_staff: employee.counts_in_staff !== false,
+  contract_type: normalizeContractType(employee.contract_type),
   created_at: employee.created_at ?? null,
   updated_at: employee.updated_at ?? null,
 })),

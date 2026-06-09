@@ -8,6 +8,7 @@ type EmployeeRow = {
   name: string;
   active: boolean;
   counts_in_staff?: boolean;
+  contract_type?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
 };
@@ -41,6 +42,10 @@ function statusClass(row: StaffPvRow) {
   if (row.status === "shortage") return "border-red-200 bg-red-50 text-red-800";
   if (row.status === "not_configured") return "border-slate-200 bg-slate-100 text-slate-700";
   return "border-emerald-200 bg-emerald-50 text-emerald-800";
+}
+
+function contractTypeLabel(value?: string | null) {
+  return value === "part_time" ? "Part Time" : "Full Time";
 }
 
 function safeFilePart(value: string) {
@@ -358,9 +363,10 @@ export default function OrganicoPvClient() {
                   <table className="min-w-full text-sm">
                     <thead className="bg-slate-50 text-slate-700">
                       <tr>
-                        <th className="px-3 py-2 text-left">Dipendente</th>
-                        <th className="px-3 py-2 text-left">Tipo</th>
-                        <th className="px-3 py-2 text-left">Stato</th>
+                       <th className="px-3 py-2 text-left">Dipendente</th>
+                       <th className="px-3 py-2 text-left">Tipo</th>
+                       <th className="px-3 py-2 text-left">Stato</th>
+                       <th className="px-3 py-2 text-left">Contratto</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -389,12 +395,15 @@ export default function OrganicoPvClient() {
                               {employee.active ? "Attivo" : "Disattivato"}
                             </span>
                           </td>
+                            <td className="px-3 py-2">
+                            {contractTypeLabel(employee.contract_type)}
+                          </td>
                         </tr>
                       ))}
 
                       {employeesToShow.length === 0 && (
                         <tr>
-                          <td colSpan={3} className="px-3 py-6 text-center text-gray-500">
+                          <td colSpan={4} className="px-3 py-6 text-center text-gray-500">
                             Nessun dipendente da mostrare.
                           </td>
                         </tr>
@@ -414,8 +423,9 @@ export default function OrganicoPvClient() {
                       <table className="min-w-full text-sm">
                         <thead className="bg-slate-50 text-left text-slate-600">
                           <tr>
-                            <th className="px-4 py-3">Dipendente</th>
-                            <th className="px-4 py-3">Tipo</th>
+                           <th className="px-4 py-3">Dipendente</th>
+                          <th className="px-4 py-3">Tipo</th>
+                          <th className="px-4 py-3">Contratto</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y">
@@ -426,6 +436,9 @@ export default function OrganicoPvClient() {
                                 <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-800">
                                   Supporto temporaneo
                                 </span>
+                              </td>
+                                <td className="px-4 py-3">
+                                {contractTypeLabel(employee.contract_type)}
                               </td>
                             </tr>
                           ))}

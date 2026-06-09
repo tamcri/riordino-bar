@@ -18,6 +18,10 @@ function todayIT() {
   }).format(new Date());
 }
 
+function contractTypeLabel(value: unknown) {
+  return value === "part_time" ? "Part Time" : "Full Time";
+}
+
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
@@ -43,7 +47,7 @@ export async function GET(req: Request) {
 
       supabaseAdmin
         .from("employees")
-        .select("id, name, active, counts_in_staff")
+        .select("id, name, active, counts_in_staff, contract_type")
         .eq("pv_id", pvId)
         .eq("active", true)
         .order("name", { ascending: true }),
@@ -66,15 +70,17 @@ export async function GET(req: Request) {
       );
     }
 
-    const allActiveEmployees = ((employees ?? []) as {
+        const allActiveEmployees = ((employees ?? []) as {
       id: string;
       name: string | null;
       active: boolean | null;
       counts_in_staff: boolean | null;
+      contract_type?: string | null;
     }[]).map((employee) => ({
       id: employee.id,
       name: employee.name ?? "",
       counts_in_staff: employee.counts_in_staff !== false,
+      contract_type: employee.contract_type ?? "full_time",
     }));
 
     const staffEmployees = allActiveEmployees.filter(
@@ -118,20 +124,22 @@ export async function GET(req: Request) {
     report.text("Dipendenti organico stabile", { font: "bold" });
     report.spacer(4);
 
-    report.tableRow(["#", "Dipendente"], [45, report.contentWidth - 45], {
+    report.tableRow(["#", "Dipendente", "Contratto"], [35, report.contentWidth - 135, 100], {
       header: true,
       fontSize: 9,
     });
 
     if (staffEmployees.length === 0) {
-      report.tableRow(["-", "Nessun dipendente stabile attivo"], [45, report.contentWidth - 45], {
+       report.tableRow(["-", "Nessun dipendente stabile attivo", "-"], [35, report.contentWidth - 135, 100], {
         fontSize: 9,
       });
     } else {
       staffEmployees.forEach((employee, index) => {
-        report.tableRow([String(index + 1), employee.name], [45, report.contentWidth - 45], {
-          fontSize: 9,
-        });
+          report.tableRow(
+          [String(index + 1), employee.name, contractTypeLabel(employee.contract_type)],
+          [35, report.contentWidth - 135, 100],
+          { fontSize: 9 }
+        );
       });
     }
 
@@ -141,20 +149,22 @@ export async function GET(req: Request) {
     report.text("Supporti temporanei", { font: "bold" });
     report.spacer(4);
 
-    report.tableRow(["#", "Dipendente"], [45, report.contentWidth - 45], {
+        report.tableRow(["#", "Dipendente", "Contratto"], [35, report.contentWidth - 135, 100], {
       header: true,
       fontSize: 9,
     });
 
     if (supportEmployees.length === 0) {
-      report.tableRow(["-", "Nessun supporto temporaneo attivo"], [45, report.contentWidth - 45], {
-        fontSize: 9,
+      report.tableRow(["-", "Nessun supporto temporaneo attivo", "-"], [35, report.contentWidth - 135, 100], {
+      fontSize: 9,
       });
     } else {
       supportEmployees.forEach((employee, index) => {
-        report.tableRow([String(index + 1), employee.name], [45, report.contentWidth - 45], {
-          fontSize: 9,
-        });
+          report.tableRow(
+          [String(index + 1), employee.name, contractTypeLabel(employee.contract_type)],
+          [35, report.contentWidth - 135, 100],
+          { fontSize: 9 }
+        );
       });
     }
 

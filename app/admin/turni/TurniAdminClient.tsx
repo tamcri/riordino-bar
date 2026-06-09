@@ -38,6 +38,7 @@ type Employee = {
   name: string;
   active: boolean;
   counts_in_staff?: boolean;
+  contract_type?: "full_time" | "part_time";
   pv_code: string | null;
   pv_name: string | null;
 };
@@ -247,6 +248,10 @@ function employeeOptionLabel(employee: Employee) {
   return pvLabel ? `${employee.name} (${pvLabel})` : employee.name;
 }
 
+function contractTypeLabel(value?: string) {
+  return value === "part_time" ? "Part Time" : "Full Time";
+}
+
 function timeRangeLabel(startTime: string | null, endTime: string | null) {
   const start = normalizeTime(startTime ?? "");
   const end = normalizeTime(endTime ?? "");
@@ -379,11 +384,13 @@ export default function TurniAdminClient() {
   const [editingEmployee, setEditingEmployee] = useState<Employee | null>(null);
   const [editCells, setEditCells] = useState<WeeklyEditCell[]>([]);
   const [editSaving, setEditSaving] = useState(false);
-  const [newEmployeeName, setNewEmployeeName] = useState("");
+    const [newEmployeeName, setNewEmployeeName] = useState("");
   const [newEmployeeCountsInStaff, setNewEmployeeCountsInStaff] = useState(true);
+  const [newEmployeeContractType, setNewEmployeeContractType] = useState<"full_time" | "part_time">("full_time");
   const [renameEmployeeId, setRenameEmployeeId] = useState("");
   const [renameEmployeeName, setRenameEmployeeName] = useState("");
   const [renameEmployeeCountsInStaff, setRenameEmployeeCountsInStaff] = useState(true);
+  const [renameEmployeeContractType, setRenameEmployeeContractType] = useState<"full_time" | "part_time">("full_time");
   const [employeeManageLoading, setEmployeeManageLoading] = useState(false);
   const [analysisMonth, setAnalysisMonth] = useState(currentMonthValue());
   const [analysisPvId, setAnalysisPvId] = useState("");
@@ -656,6 +663,7 @@ export default function TurniAdminClient() {
        setRenameEmployeeId("");
        setRenameEmployeeName("");
        setRenameEmployeeCountsInStaff(true);
+       setRenameEmployeeContractType("full_time");
       }
     } catch (e: unknown) {
       setError(getErrorMessage(e, "Errore caricamento dipendenti per modifica admin"));
@@ -690,6 +698,7 @@ export default function TurniAdminClient() {
         pv_id: pvId,
        name,
        counts_in_staff: newEmployeeCountsInStaff,
+       contract_type: newEmployeeContractType,
       }),
       });
 
@@ -698,6 +707,7 @@ export default function TurniAdminClient() {
       const created = res.data?.row ?? null;
       setNewEmployeeName("");
       setNewEmployeeCountsInStaff(true);
+      setNewEmployeeContractType("full_time");
       setMsg("Dipendente aggiunto correttamente.");
 
       await loadWeeklyEmployees(pvId);
@@ -706,6 +716,7 @@ export default function TurniAdminClient() {
         setWeeklyEmployeeId(created.id);
         setRenameEmployeeId(created.id);
         setRenameEmployeeName(created.name);
+        setRenameEmployeeContractType(created.contract_type ?? "full_time");
       }
     } catch (e: unknown) {
       setError(getErrorMessage(e, "Errore aggiunta dipendente"));
@@ -740,11 +751,12 @@ export default function TurniAdminClient() {
       const res = await fetchJsonSafe<EmployeesResponse>("/api/work-shifts/employees", {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
+       body: JSON.stringify({
         id: renameEmployeeId,
        pv_id: pvId,
         name,
       counts_in_staff: renameEmployeeCountsInStaff,
+      contract_type: renameEmployeeContractType,
       }),
       });
 
@@ -952,8 +964,12 @@ export default function TurniAdminClient() {
     setEditingEmployee(null);
     setEditCells([]);
     setNewEmployeeName("");
+    setNewEmployeeCountsInStaff(true);
+    setNewEmployeeContractType("full_time");
     setRenameEmployeeId("");
     setRenameEmployeeName("");
+    setRenameEmployeeCountsInStaff(true);
+    setRenameEmployeeContractType("full_time");
 
     if (pvId) {
       void loadWeeklyEmployees(pvId);
@@ -1345,6 +1361,8 @@ export default function TurniAdminClient() {
                           <option key={employee.id} value={employee.id}>
                             {employee.name}
                             {employee.counts_in_staff === false ? " — supporto temporaneo" : ""}
+                            {" — "}
+                            {contractTypeLabel(employee.contract_type)}
                             {employee.active ? "" : " — non attivo"}
                           </option>
                         ))}
@@ -1372,7 +1390,7 @@ export default function TurniAdminClient() {
                       Crea un nuovo dipendente nel PV selezionato e poi assegnagli i turni.
                     </p>
 
-                    <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_0.8fr_auto] md:items-end">
+                     <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_0.8fr_0.8fr_auto] md:items-end">
                       <div>
                         <label className="block text-sm font-medium mb-2">Nome dipendente</label>
                         <input
@@ -1398,6 +1416,21 @@ export default function TurniAdminClient() {
                        </select>
                       </div>
 
+                       <div>
+                        <label className="block text-sm font-medium mb-2">Contratto</label>
+                        <select
+                          className="w-full rounded-xl border bg-white p-3 disabled:opacity-60"
+                          value={newEmployeeContractType}
+                          disabled={!pvId || employeeManageLoading}
+                          onChange={(e) =>
+                            setNewEmployeeContractType(e.target.value === "part_time" ? "part_time" : "full_time")
+                          }
+                        >
+                          <option value="full_time">Full Time</option>
+                          <option value="part_time">Part Time</option>
+                        </select>
+                      </div>
+
                       <button
                         type="submit"
                         className="rounded-xl bg-slate-900 px-4 py-3 text-white disabled:opacity-60"
@@ -1414,7 +1447,7 @@ export default function TurniAdminClient() {
                       Rinomina un dipendente esistente senza perdere lo storico turni.
                     </p>
 
-                    <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_0.8fr_auto] md:items-end">
+                     <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_0.8fr_0.8fr_auto] md:items-end">
                       <div>
                         <label className="block text-sm font-medium mb-2">Dipendente</label>
                         <select
@@ -1427,6 +1460,7 @@ export default function TurniAdminClient() {
                          setRenameEmployeeId(nextId);
                          setRenameEmployeeName(employee?.name ?? "");
                          setRenameEmployeeCountsInStaff(employee?.counts_in_staff !== false);
+                         setRenameEmployeeContractType(employee?.contract_type ?? "full_time");
                           }}
                         >
                           <option value="">
@@ -1440,6 +1474,8 @@ export default function TurniAdminClient() {
                             <option key={employee.id} value={employee.id}>
                               {employee.name}
                               {employee.counts_in_staff === false ? " — supporto temporaneo" : ""}
+                              {" — "}
+                              {contractTypeLabel(employee.contract_type)}
                               {employee.active ? "" : " — non attivo"}
                             </option>
                           ))}
@@ -1468,6 +1504,21 @@ export default function TurniAdminClient() {
   >
     <option value="staff">Organico stabile</option>
     <option value="support">Supporto temporaneo</option>
+  </select>
+</div>
+
+<div>
+  <label className="block text-sm font-medium mb-2">Contratto</label>
+  <select
+    className="w-full rounded-xl border bg-white p-3 disabled:opacity-60"
+    value={renameEmployeeContractType}
+    disabled={!renameEmployeeId || employeeManageLoading}
+    onChange={(e) =>
+      setRenameEmployeeContractType(e.target.value === "part_time" ? "part_time" : "full_time")
+    }
+  >
+    <option value="full_time">Full Time</option>
+    <option value="part_time">Part Time</option>
   </select>
 </div>
 
