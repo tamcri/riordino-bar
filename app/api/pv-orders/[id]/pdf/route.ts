@@ -9,6 +9,7 @@ import {
 } from "pdf-lib";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { getPvIdForSession } from "@/lib/pvLookup";
 import { isUuid, summarizePvOrderRows } from "@/lib/pv-orders";
 
 export const runtime = "nodejs";
@@ -64,10 +65,16 @@ function safeFileName(value: string) {
     .slice(0, 80);
 }
 
-function ellipsize(text: string, maxLen: number) {
-  const s = String(text || "");
-  if (s.length <= maxLen) return s;
-  return `${s.slice(0, Math.max(0, maxLen - 1))}…`;
+function fitText(text: string, font: PDFFont, size: number, maxWidth: number) {
+  const raw = String(text || "");
+  if (!raw) return "";
+  if (font.widthOfTextAtSize(raw, size) <= maxWidth) return raw;
+
+  let out = raw;
+  while (out.length > 1 && font.widthOfTextAtSize(`${out}…`, size) > maxWidth) {
+    out = out.slice(0, -1);
+  }
+  return `${out}…`;
 }
 
 function drawRect(
@@ -87,18 +94,6 @@ function drawRect(
     borderColor: rgb(0.82, 0.85, 0.88),
     color: fill ? rgb(fill[0], fill[1], fill[2]) : undefined,
   });
-}
-
-function fitText(text: string, font: PDFFont, size: number, maxWidth: number) {
-  const raw = String(text || "");
-  if (!raw) return "";
-  if (font.widthOfTextAtSize(raw, size) <= maxWidth) return raw;
-
-  let out = raw;
-  while (out.length > 1 && font.widthOfTextAtSize(`${out}…`, size) > maxWidth) {
-    out = out.slice(0, -1);
-  }
-  return `${out}…`;
 }
 
 function drawTextInCell(args: {
@@ -147,17 +142,16 @@ function drawTextInCell(args: {
   });
 }
 
-function norm(v: unknown) {
-  return String(v ?? "").trim();
-}
-
-export async function GET(_req: Request, context: RouteContext) {
+export async function GET(req: Request, context: RouteContext) {
   try {
     const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
 
-    if (!session || !["admin", "amministrativo"].includes(session.role)) {
+    if (!session || !["admin", "amministrativo", "punto_vendita"].includes(session.role)) {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
     }
+
+    const url = new URL(req.url);
+    const requestedPvView = url.searchParams.get("view") === "pv";
 
     const orderId = String(context.params?.id ?? "").trim();
     if (!isUuid(orderId)) {
@@ -187,6 +181,21 @@ export async function GET(_req: Request, context: RouteContext) {
     if (!header) {
       return NextResponse.json({ ok: false, error: "Ordine non trovato" }, { status: 404 });
     }
+
+    if (session.role === "punto_vendita") {
+      const r = await getPvIdForSession(session);
+      const pv_id = r.pv_id;
+
+      if (!pv_id) {
+        return NextResponse.json({ ok: false, error: "Utente PV senza pv_id" }, { status: 400 });
+      }
+
+      if (String((header as any).pv_id) !== String(pv_id)) {
+        return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 403 });
+      }
+    }
+
+    const isPvPdf = session.role === "punto_vendita" || requestedPvView;
 
     const { data: rowsData, error: rowsError } = await supabaseAdmin
       .from("pv_order_rows")
@@ -234,7 +243,6 @@ export async function GET(_req: Request, context: RouteContext) {
     const fontRegular = await pdf.embedFont(StandardFonts.Helvetica);
     const fontBold = await pdf.embedFont(StandardFonts.HelveticaBold);
 
-    // A4 verticale
     const pageWidth = 595;
     const pageHeight = 842;
     const margin = 24;
@@ -260,13 +268,19 @@ export async function GET(_req: Request, context: RouteContext) {
         (header as any)?.pvs?.name ? ` — ${String((header as any).pvs.name)}` : ""
       }`;
 
-      const infoLines = [
-        `PV: ${pvLabel || "—"}`,
-        `Operatore: ${String((header as any)?.operatore ?? "") || "—"}`,
-        `Data ordine: ${formatDateIT(String((header as any)?.order_date ?? ""))}`,
-        `Stato ordine: ${orderStatusLabel(summary.order_status)}`,
-        `Stato spedizione: ${shippingStatusLabel(String((header as any)?.shipping_status ?? ""))}`,
-      ];
+      const infoLines = isPvPdf
+        ? [
+            `PV: ${pvLabel || "—"}`,
+            `Operatore: ${String((header as any)?.operatore ?? "") || "—"}`,
+            `Data ordine: ${formatDateIT(String((header as any)?.order_date ?? ""))}`,
+          ]
+        : [
+            `PV: ${pvLabel || "—"}`,
+            `Operatore: ${String((header as any)?.operatore ?? "") || "—"}`,
+            `Data ordine: ${formatDateIT(String((header as any)?.order_date ?? ""))}`,
+            `Stato ordine: ${orderStatusLabel(summary.order_status)}`,
+            `Stato spedizione: ${shippingStatusLabel(String((header as any)?.shipping_status ?? ""))}`,
+          ];
 
       for (const line of infoLines) {
         page.drawText(line, {
@@ -279,58 +293,66 @@ export async function GET(_req: Request, context: RouteContext) {
         y -= 14;
       }
 
-      y -= 8;
+      y -= 12;
 
-      const kpiBoxWidth = (usableWidth - 16) / 3;
-      const kpiY = y;
+      if (!isPvPdf) {
+        const kpiBoxWidth = (usableWidth - 16) / 3;
+        const kpiY = y;
 
-      const kpis = [
-        ["Righe ordine", String(summary.total_rows)],
-        ["Righe evase", String(summary.evaded_rows)],
-        ["Righe da ordinare", String(summary.pending_rows)],
-      ];
+        const kpis = [
+          ["Righe ordine", String(summary.total_rows)],
+          ["Righe evase", String(summary.evaded_rows)],
+          ["Righe da ordinare", String(summary.pending_rows)],
+        ];
 
-      for (let i = 0; i < kpis.length; i++) {
-        const [label, value] = kpis[i];
-        const x = margin + i * (kpiBoxWidth + 8);
+        for (let i = 0; i < kpis.length; i++) {
+          const [label, value] = kpis[i];
+          const x = margin + i * (kpiBoxWidth + 8);
 
-        page.drawRectangle({
-          x,
-          y: kpiY - 36,
-          width: kpiBoxWidth,
-          height: 36,
-          borderWidth: 0.8,
-          borderColor: rgb(0.85, 0.88, 0.91),
-          color: rgb(0.97, 0.98, 0.99),
-        });
+          page.drawRectangle({
+            x,
+            y: kpiY - 36,
+            width: kpiBoxWidth,
+            height: 36,
+            borderWidth: 0.8,
+            borderColor: rgb(0.85, 0.88, 0.91),
+            color: rgb(0.97, 0.98, 0.99),
+          });
 
-        page.drawText(label, {
-          x: x + 8,
-          y: kpiY - 12,
-          size: 9,
-          font: fontRegular,
-          color: rgb(0.39, 0.45, 0.52),
-        });
+          page.drawText(label, {
+            x: x + 8,
+            y: kpiY - 12,
+            size: 9,
+            font: fontRegular,
+            color: rgb(0.39, 0.45, 0.52),
+          });
 
-        page.drawText(value, {
-          x: x + 8,
-          y: kpiY - 26,
-          size: 13,
-          font: fontBold,
-          color: rgb(0.06, 0.09, 0.13),
-        });
+          page.drawText(value, {
+            x: x + 8,
+            y: kpiY - 26,
+            size: 13,
+            font: fontBold,
+            color: rgb(0.06, 0.09, 0.13),
+          });
+        }
+
+        y = kpiY - 52;
       }
 
-      y = kpiY - 52;
-
-      const columns = [
-        { key: "code", label: "Codice", width: 78, align: "left" as const },
-        { key: "description", label: "Descrizione", width: 218, align: "left" as const },
-        { key: "qty", label: "Pz", width: 44, align: "center" as const },
-        { key: "qty_ml", label: "ML", width: 44, align: "center" as const },
-        { key: "qty_gr", label: "GR", width: 44, align: "center" as const },
-        { key: "status", label: "Stato riga", width: 119, align: "center" as const },
-      ];
+      const columns = isPvPdf
+        ? [
+            { key: "code", label: "Codice", width: 105, align: "left" as const },
+            { key: "description", label: "Descrizione", width: 367, align: "left" as const },
+            { key: "qty", label: "Pz", width: 75, align: "center" as const },
+          ]
+        : [
+            { key: "code", label: "Codice", width: 78, align: "left" as const },
+            { key: "description", label: "Descrizione", width: 218, align: "left" as const },
+            { key: "qty", label: "Pz", width: 44, align: "center" as const },
+            { key: "qty_ml", label: "ML", width: 44, align: "center" as const },
+            { key: "qty_gr", label: "GR", width: 44, align: "center" as const },
+            { key: "status", label: "Stato riga", width: 119, align: "center" as const },
+          ];
 
       let x = margin;
       for (const col of columns) {
@@ -369,14 +391,20 @@ export async function GET(_req: Request, context: RouteContext) {
       const fill: [number, number, number] | undefined =
         i % 2 === 0 ? [1, 1, 1] : [0.985, 0.99, 0.995];
 
-      const values = [
-        ellipsize(row.item_code || "—", 22),
-        ellipsize(row.item_description || "—", 48),
-        String(row.qty || 0),
-        String(row.qty_ml || 0),
-        String(row.qty_gr || 0),
-        rowStatusLabel(row.row_status),
-      ];
+      const values = isPvPdf
+        ? [
+            row.item_code || "—",
+            row.item_description || "—",
+            String(row.qty || 0),
+          ]
+        : [
+            row.item_code || "—",
+            row.item_description || "—",
+            String(row.qty || 0),
+            String(row.qty_ml || 0),
+            String(row.qty_gr || 0),
+            rowStatusLabel(row.row_status),
+          ];
 
       let x = margin;
       for (let c = 0; c < columns.length; c++) {
