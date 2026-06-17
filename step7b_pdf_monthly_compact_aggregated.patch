@@ -1,0 +1,144 @@
+--- a/app/api/work-shifts/pdf-monthly-employee/route.ts	2026-06-17 20:17:11.706322917 +0000
++++ b/app/api/work-shifts/pdf-monthly-employee/route.ts	2026-06-17 20:17:05.594416277 +0000
+@@ -268,6 +268,73 @@
+   return rows.filter((row) => row.has_shift && row.status === status).length;
+ }
+ 
++type CompactMonthlyPdfRow = {
++  shift_date: string;
++  weekday: string;
++  status_label: string;
++  shift_label: string;
++  note: string;
++  hours: number;
++};
++
++function rowPvLabel(row: MonthlyRow) {
++  return pvLabel(row.pv_code, row.pv_name);
++}
++
++function compactShiftLine(row: MonthlyRow) {
++  if (!row.has_shift || !row.status) return "-";
++
++  if (row.status === "rest" || row.status === "vacation" || row.status === "sick") {
++    return `${rowPvLabel(row)}: ${shiftStatusLabel(row.status)}`;
++  }
++
++  const label = rowShiftTime(row);
++  return label && label !== "-" ? label : `${rowPvLabel(row)}: ${shiftStatusLabel(row.status)}`;
++}
++
++function uniqueNonEmpty(values: string[]) {
++  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
++}
++
++function buildCompactMonthlyPdfRows(rows: MonthlyRow[]): CompactMonthlyPdfRow[] {
++  const byDate = new Map<string, MonthlyRow[]>();
++
++  for (const row of rows) {
++    const current = byDate.get(row.shift_date) ?? [];
++    current.push(row);
++    byDate.set(row.shift_date, current);
++  }
++
++  return Array.from(byDate.entries())
++    .sort(([a], [b]) => a.localeCompare(b))
++    .map(([date, dayRows]) => {
++      const sortedRows = [...dayRows].sort((a, b) => {
++        const pvCompare = `${a.pv_code ?? ""} ${a.pv_name ?? ""}`.localeCompare(`${b.pv_code ?? ""} ${b.pv_name ?? ""}`, "it");
++        if (pvCompare !== 0) return pvCompare;
++        return `${a.employee_name ?? ""}`.localeCompare(`${b.employee_name ?? ""}`, "it");
++      });
++
++      const statusLabels = uniqueNonEmpty(
++        sortedRows.map((row) => (row.status ? shiftStatusLabel(row.status) : "Nessun turno"))
++      );
++      const shiftLines = uniqueNonEmpty(sortedRows.map((row) => compactShiftLine(row)));
++      const noteLines = uniqueNonEmpty(
++        sortedRows
++          .filter((row) => row.note.trim())
++          .map((row) => `${rowPvLabel(row)}: ${row.note.trim()}`)
++      );
++
++      return {
++        shift_date: date,
++        weekday: sortedRows[0]?.weekday ?? weekdayLabel(date),
++        status_label: statusLabels.join(" / ") || "Nessun turno",
++        shift_label: shiftLines.join("\n") || "-",
++        note: noteLines.join("\n") || "-",
++        hours: sortedRows.reduce((sum, row) => sum + Number(row.hours || 0), 0),
++      };
++    });
++}
++
+ function buildMonthlyRow(date: string, employee: ReturnType<typeof normalizeEmployee>, shift: ReturnType<typeof normalizeShift>): MonthlyRow {
+   const hasSecondBlock = Boolean(shift.second_start_time && shift.second_end_time);
+   const firstWorkPvId = shift.work_pv_id || employee.pv_id || null;
+@@ -420,42 +487,52 @@
+       ],
+     });
+ 
+-    const widths = includeSameName ? [54, 58, 36, 72, 120, 42, 130] : [62, 42, 78, 135, 45, 160];
++    const compactRows = includeSameName ? buildCompactMonthlyPdfRows(rows) : [];
++    const widths = includeSameName ? [62, 36, 72, 210, 42, 90] : [62, 42, 78, 135, 45, 160];
+ 
+     report.tableRow(
+       includeSameName
+-        ? ["Data", "PV", "Giorno", "Stato", "Turno / PV lavoro", "Ore", "Note"]
++        ? ["Data", "Giorno", "Stato", "Turno / PV lavoro", "Ore", "Note"]
+         : ["Data", "Giorno", "Stato", "Turno / PV lavoro", "Ore", "Note"],
+       widths,
+       { header: true, fontSize: 8, lineHeight: 10 }
+     );
+ 
+-    for (const row of rows) {
+-      const values = includeSameName
+-        ? [
++    if (includeSameName) {
++      for (const row of compactRows) {
++        report.tableRow(
++          [
+             formatDateIT(row.shift_date),
+-            [row.pv_code || "-", row.pv_name || ""].filter(Boolean).join("\n"),
+             row.weekday,
+-            row.status ? shiftStatusLabel(row.status) : "Nessun turno",
+-            rowShiftTime(row),
++            row.status_label,
++            row.shift_label,
+             `${formatHours(row.hours)} h`,
+-            row.note || "-",
+-          ]
+-        : [
++            row.note,
++          ],
++          widths,
++          { fontSize: 8, lineHeight: 10 }
++        );
++      }
++    } else {
++      for (const row of rows) {
++        report.tableRow(
++          [
+             formatDateIT(row.shift_date),
+             row.weekday,
+             row.status ? shiftStatusLabel(row.status) : "Nessun turno",
+             rowShiftTime(row),
+             `${formatHours(row.hours)} h`,
+             row.note || "-",
+-          ];
+-
+-      report.tableRow(values, widths, { fontSize: 8, lineHeight: 10 });
++          ],
++          widths,
++          { fontSize: 8, lineHeight: 10 }
++        );
++      }
+     }
+ 
+     report.tableRow(
+       includeSameName
+-        ? ["Totale mese", "", "", "", "", `${formatHours(totalHours)} h`, `Lavorati: ${totalWorkDays} - Riposi: ${totalRestDays} - Ferie: ${totalVacationDays} - Malattia: ${totalSickDays} - Cambi: ${totalChangeDays}`]
++        ? ["Totale mese", "", "", "", `${formatHours(totalHours)} h`, `Lavorati: ${totalWorkDays} - Riposi: ${totalRestDays} - Ferie: ${totalVacationDays} - Malattia: ${totalSickDays} - Cambi: ${totalChangeDays}`]
+         : ["Totale mese", "", "", "", `${formatHours(totalHours)} h`, `Lavorati: ${totalWorkDays} - Riposi: ${totalRestDays} - Ferie: ${totalVacationDays} - Malattia: ${totalSickDays} - Cambi: ${totalChangeDays}`],
+       widths,
+       { header: true, fontSize: 8, lineHeight: 10 }
