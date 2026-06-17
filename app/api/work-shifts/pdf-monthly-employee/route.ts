@@ -38,8 +38,12 @@ type ShiftDbRow = {
   end_time?: unknown;
   second_start_time?: unknown;
   second_end_time?: unknown;
+  work_pv_id?: unknown;
+  second_work_pv_id?: unknown;
   status?: unknown;
   note?: unknown;
+  work_pvs?: unknown;
+  second_work_pvs?: unknown;
 };
 
 type MonthlyRow = {
@@ -51,6 +55,12 @@ type MonthlyRow = {
   pv_id: string | null;
   pv_code: string | null;
   pv_name: string | null;
+  work_pv_id: string | null;
+  work_pv_code: string | null;
+  work_pv_name: string | null;
+  second_work_pv_id: string | null;
+  second_work_pv_code: string | null;
+  second_work_pv_name: string | null;
   status: ShiftStatus | null;
   start_time: string | null;
   end_time: string | null;
@@ -136,6 +146,8 @@ function normalizeShift(row: ShiftDbRow) {
   const endTime = normalizeTime(row?.end_time ?? "") ?? null;
   const secondStartTime = normalizeTime(row?.second_start_time ?? "") ?? null;
   const secondEndTime = normalizeTime(row?.second_end_time ?? "") ?? null;
+  const workPv = asRecord(row?.work_pvs);
+  const secondWorkPv = asRecord(row?.second_work_pvs);
   const hours = shiftHoursTotal({
     status,
     start_time: startTime,
@@ -156,6 +168,12 @@ function normalizeShift(row: ShiftDbRow) {
     pv_id: String(row?.pv_id ?? ""),
     employee_id: String(row?.employee_id ?? ""),
     shift_date: String(row?.shift_date ?? ""),
+    work_pv_id: row?.work_pv_id ? String(row.work_pv_id) : null,
+    work_pv_code: workPv.code ? String(workPv.code) : null,
+    work_pv_name: workPv.name ? String(workPv.name) : null,
+    second_work_pv_id: row?.second_work_pv_id ? String(row.second_work_pv_id) : null,
+    second_work_pv_code: secondWorkPv.code ? String(secondWorkPv.code) : null,
+    second_work_pv_name: secondWorkPv.name ? String(secondWorkPv.name) : null,
     status,
     start_time: startTime,
     end_time: endTime,
@@ -177,6 +195,12 @@ function emptyMonthlyRow(date: string): MonthlyRow {
     pv_id: null,
     pv_code: null,
     pv_name: null,
+    work_pv_id: null,
+    work_pv_code: null,
+    work_pv_name: null,
+    second_work_pv_id: null,
+    second_work_pv_code: null,
+    second_work_pv_name: null,
     status: null,
     start_time: null,
     end_time: null,
@@ -208,12 +232,72 @@ async function getMatchingEmployees(employee: ReturnType<typeof normalizeEmploye
   return matches.length > 0 ? matches : [employee];
 }
 
+function timeRangeLabel(startTime: string | null, endTime: string | null) {
+  const start = normalizeTime(startTime ?? "");
+  const end = normalizeTime(endTime ?? "");
+
+  if (!start || !end) return null;
+
+  return `${start} - ${end}`;
+}
+
+function pvLabel(code: string | null, name: string | null) {
+  const label = [code, name].filter(Boolean).join(" - ");
+  return label || "PV non indicato";
+}
+
 function rowShiftTime(row: MonthlyRow) {
-  return row.shift_label || "—";
+  if (!row.has_shift || !row.status) return row.shift_label || "-";
+
+  const firstRange = timeRangeLabel(row.start_time, row.end_time);
+  const secondRange = timeRangeLabel(row.second_start_time, row.second_end_time);
+  const lines: string[] = [];
+
+  if (firstRange) {
+    lines.push(`${pvLabel(row.work_pv_code ?? row.pv_code, row.work_pv_name ?? row.pv_name)}: ${firstRange}`);
+  }
+
+  if (secondRange) {
+    lines.push(`${pvLabel(row.second_work_pv_code ?? row.work_pv_code ?? row.pv_code, row.second_work_pv_name ?? row.work_pv_name ?? row.pv_name)}: ${secondRange}`);
+  }
+
+  return lines.length > 0 ? lines.join("\n") : row.shift_label || "-";
 }
 
 function countRows(rows: MonthlyRow[], status: ShiftStatus) {
   return rows.filter((row) => row.has_shift && row.status === status).length;
+}
+
+function buildMonthlyRow(date: string, employee: ReturnType<typeof normalizeEmployee>, shift: ReturnType<typeof normalizeShift>): MonthlyRow {
+  const hasSecondBlock = Boolean(shift.second_start_time && shift.second_end_time);
+  const firstWorkPvId = shift.work_pv_id || employee.pv_id || null;
+  const firstWorkPvCode = shift.work_pv_code || employee.pv_code || null;
+  const firstWorkPvName = shift.work_pv_name || employee.pv_name || null;
+
+  return {
+    shift_date: date,
+    weekday: weekdayLabel(date),
+    has_shift: true,
+    employee_id: employee.id,
+    employee_name: employee.name,
+    pv_id: employee.pv_id,
+    pv_code: employee.pv_code,
+    pv_name: employee.pv_name,
+    work_pv_id: firstWorkPvId,
+    work_pv_code: firstWorkPvCode,
+    work_pv_name: firstWorkPvName,
+    second_work_pv_id: hasSecondBlock ? shift.second_work_pv_id || firstWorkPvId : null,
+    second_work_pv_code: hasSecondBlock ? shift.second_work_pv_code || firstWorkPvCode : null,
+    second_work_pv_name: hasSecondBlock ? shift.second_work_pv_name || firstWorkPvName : null,
+    status: shift.status,
+    start_time: shift.start_time,
+    end_time: shift.end_time,
+    second_start_time: shift.second_start_time,
+    second_end_time: shift.second_end_time,
+    shift_label: shift.shift_label,
+    note: shift.note,
+    hours: shift.hours,
+  };
 }
 
 export async function GET(req: Request) {
@@ -266,7 +350,22 @@ export async function GET(req: Request) {
 
     const { data: shiftsData, error: shiftsError } = await supabaseAdmin
       .from("work_shifts")
-      .select("id, pv_id, employee_id, shift_date, start_time, end_time, second_start_time, second_end_time, status, note")
+      .select(`
+        id,
+        pv_id,
+        employee_id,
+        shift_date,
+        start_time,
+        end_time,
+        second_start_time,
+        second_end_time,
+        work_pv_id,
+        second_work_pv_id,
+        status,
+        note,
+        work_pvs:pvs!work_shifts_work_pv_fk(code, name),
+        second_work_pvs:pvs!work_shifts_second_work_pv_fk(code, name)
+      `)
       .in("employee_id", employeeIds)
       .gte("shift_date", monthStart)
       .lte("shift_date", monthEnd)
@@ -283,46 +382,12 @@ export async function GET(req: Request) {
     const rows: MonthlyRow[] = includeSameName
       ? normalizedShifts.map((shift) => {
           const emp = employeeById.get(shift.employee_id) ?? employee;
-          return {
-            shift_date: shift.shift_date,
-            weekday: weekdayLabel(shift.shift_date),
-            has_shift: true,
-            employee_id: emp.id,
-            employee_name: emp.name,
-            pv_id: emp.pv_id,
-            pv_code: emp.pv_code,
-            pv_name: emp.pv_name,
-            status: shift.status,
-            start_time: shift.start_time,
-            end_time: shift.end_time,
-            second_start_time: shift.second_start_time,
-            second_end_time: shift.second_end_time,
-            shift_label: shift.shift_label,
-            note: shift.note,
-            hours: shift.hours,
-          };
+          return buildMonthlyRow(shift.shift_date, emp, shift);
         })
       : days.map((date) => {
           const shift = normalizedShifts.find((row) => row.shift_date === date) ?? null;
           if (!shift) return emptyMonthlyRow(date);
-          return {
-            shift_date: date,
-            weekday: weekdayLabel(date),
-            has_shift: true,
-            employee_id: employee.id,
-            employee_name: employee.name,
-            pv_id: employee.pv_id,
-            pv_code: employee.pv_code,
-            pv_name: employee.pv_name,
-            status: shift.status,
-            start_time: shift.start_time,
-            end_time: shift.end_time,
-            second_start_time: shift.second_start_time,
-            second_end_time: shift.second_end_time,
-            shift_label: shift.shift_label,
-            note: shift.note,
-            hours: shift.hours,
-          };
+          return buildMonthlyRow(date, employee, shift);
         });
 
     rows.sort((a, b) => {
@@ -355,12 +420,12 @@ export async function GET(req: Request) {
       ],
     });
 
-    const widths = includeSameName ? [54, 58, 36, 72, 72, 42, 178] : [62, 42, 78, 78, 45, 218];
+    const widths = includeSameName ? [54, 58, 36, 72, 120, 42, 130] : [62, 42, 78, 135, 45, 160];
 
     report.tableRow(
       includeSameName
-        ? ["Data", "PV", "Giorno", "Stato", "Turno", "Ore", "Note"]
-        : ["Data", "Giorno", "Stato", "Turno", "Ore", "Note"],
+        ? ["Data", "PV", "Giorno", "Stato", "Turno / PV lavoro", "Ore", "Note"]
+        : ["Data", "Giorno", "Stato", "Turno / PV lavoro", "Ore", "Note"],
       widths,
       { header: true, fontSize: 8, lineHeight: 10 }
     );

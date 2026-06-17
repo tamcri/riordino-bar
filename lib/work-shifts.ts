@@ -6,6 +6,17 @@ export type WeekDay = {
   label: string;
 };
 
+export type WorkShiftPvFields = {
+  pv_id?: string | null;
+  work_pv_id?: string | null;
+  second_work_pv_id?: string | null;
+};
+
+export type PvLabelParts = {
+  code?: string | null;
+  name?: string | null;
+};
+
 export const SHIFT_STATUSES: ShiftStatus[] = ["work", "split", "rest", "vacation", "sick", "change"];
 
 export const WEEK_DAYS: WeekDay[] = [
@@ -23,6 +34,27 @@ export function isUuid(value: unknown): value is string {
     typeof value === "string" &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.trim())
   );
+}
+
+export function isOptionalUuid(value: unknown) {
+  if (value === null || value === undefined) return true;
+  const raw = String(value).trim();
+  return raw === "" || isUuid(raw);
+}
+
+export function normalizeOptionalUuid(value: unknown) {
+  if (value === null || value === undefined) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  return isUuid(raw) ? raw : null;
+}
+
+export function resolveWorkPvId(args: WorkShiftPvFields) {
+  return normalizeOptionalUuid(args.work_pv_id) ?? normalizeOptionalUuid(args.pv_id);
+}
+
+export function resolveSecondWorkPvId(args: WorkShiftPvFields) {
+  return normalizeOptionalUuid(args.second_work_pv_id) ?? resolveWorkPvId(args);
 }
 
 export function isDateOnly(value: unknown): value is string {
@@ -130,6 +162,22 @@ export function formatDateIT(value: string) {
   return `${dd}/${mm}/${yyyy}`;
 }
 
+function firstNonBlank(...values: Array<string | null | undefined>) {
+  for (const value of values) {
+    const text = String(value ?? "").trim();
+    if (text) return text;
+  }
+
+  return null;
+}
+
+export function formatPvLabel(args: PvLabelParts) {
+  return [args.code, args.name]
+    .map((value) => String(value ?? "").trim())
+    .filter(Boolean)
+    .join(" — ");
+}
+
 export function timeToMinutes(value: string | null | undefined) {
   const t = normalizeTime(value ?? "");
   if (!t) return null;
@@ -197,6 +245,45 @@ export function formatShiftTimeRange(args: {
   const secondStart = normalizeTime(args.second_start_time ?? "") ?? "--:--";
   const secondEnd = normalizeTime(args.second_end_time ?? "") ?? "--:--";
   return `${firstStart} - ${firstEnd} / ${secondStart} - ${secondEnd}`;
+}
+
+export function formatShiftTimeRangeWithPv(args: {
+  status: ShiftStatus | null | undefined;
+  start_time?: string | null;
+  end_time?: string | null;
+  second_start_time?: string | null;
+  second_end_time?: string | null;
+  pv_code?: string | null;
+  pv_name?: string | null;
+  work_pv_code?: string | null;
+  work_pv_name?: string | null;
+  second_work_pv_code?: string | null;
+  second_work_pv_name?: string | null;
+}) {
+  const status = normalizeShiftStatus(args.status);
+  if (!status || isNoTimeStatus(status)) return "—";
+
+  const firstStart = normalizeTime(args.start_time ?? "") ?? "--:--";
+  const firstEnd = normalizeTime(args.end_time ?? "") ?? "--:--";
+  const firstRange = `${firstStart} - ${firstEnd}`;
+  const firstPvLabel = formatPvLabel({
+    code: firstNonBlank(args.work_pv_code, args.pv_code),
+    name: firstNonBlank(args.work_pv_name, args.pv_name),
+  });
+
+  const formatBlock = (pvLabel: string, range: string) => (pvLabel ? `${pvLabel}: ${range}` : range);
+
+  if (status !== "split") return formatBlock(firstPvLabel, firstRange);
+
+  const secondStart = normalizeTime(args.second_start_time ?? "") ?? "--:--";
+  const secondEnd = normalizeTime(args.second_end_time ?? "") ?? "--:--";
+  const secondRange = `${secondStart} - ${secondEnd}`;
+  const secondPvLabel = formatPvLabel({
+    code: firstNonBlank(args.second_work_pv_code, args.work_pv_code, args.pv_code),
+    name: firstNonBlank(args.second_work_pv_name, args.work_pv_name, args.pv_name),
+  });
+
+  return `${formatBlock(firstPvLabel, firstRange)} / ${formatBlock(secondPvLabel, secondRange)}`;
 }
 
 export function getShiftPublicLabel(args: {

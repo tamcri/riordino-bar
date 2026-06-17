@@ -9,7 +9,7 @@ export async function GET() {
   const cookieStore = cookies();
   const session = parseSessionValue(cookieStore.get(COOKIE_NAME)?.value ?? null);
 
-  if (!session || !["admin", "amministrativo"].includes(session.role)) {
+  if (!session || !["admin", "amministrativo", "punto_vendita"].includes(session.role)) {
     return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
   }
 

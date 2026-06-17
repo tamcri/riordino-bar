@@ -16,9 +16,14 @@ import {
   getShiftPublicLabel,
   isDateOnly,
   isNoTimeStatus,
+  isOptionalUuid,
   isUuid,
   minutesBetween,
+  timeToMinutes,
+  normalizeOptionalUuid,
   requiresSecondShift,
+  resolveSecondWorkPvId,
+  resolveWorkPvId,
   normalizeShiftStatus,
   shiftMinutesTotal,
   normalizeTime,
@@ -31,6 +36,8 @@ type ShiftDbRow = {
   pv_id?: unknown;
   employee_id?: unknown;
   shift_date?: unknown;
+  work_pv_id?: unknown;
+  second_work_pv_id?: unknown;
   start_time?: unknown;
   end_time?: unknown;
   second_start_time?: unknown;
@@ -49,6 +56,8 @@ function shiftSelect() {
     pv_id,
     employee_id,
     shift_date,
+    work_pv_id,
+    second_work_pv_id,
     start_time,
     end_time,
     second_start_time,
@@ -58,34 +67,51 @@ function shiftSelect() {
     created_at,
     updated_at,
     employees:employees(id, name, active),
-    pvs:pvs(code, name)
+    pvs:pvs!work_shifts_pv_id_fkey(code, name)
   `;
 }
 
 function normalizeShift(row: ShiftDbRow) {
+  const status = normalizeShiftStatus(row?.status) ?? "rest";
   const startTime = normalizeTime(row?.start_time ?? "") ?? null;
   const endTime = normalizeTime(row?.end_time ?? "") ?? null;
   const secondStartTime = normalizeTime(row?.second_start_time ?? "") ?? null;
   const secondEndTime = normalizeTime(row?.second_end_time ?? "") ?? null;
   const employee = asRecord(row?.employees);
   const pv = asRecord(row?.pvs);
+  const pvId = normalizeOptionalUuid(row?.pv_id) ?? String(row?.pv_id ?? "");
+  const workPvId = isNoTimeStatus(status)
+    ? null
+    : resolveWorkPvId({
+        pv_id: pvId,
+        work_pv_id: normalizeOptionalUuid(row?.work_pv_id),
+      });
+  const secondWorkPvId = requiresSecondShift(status)
+    ? resolveSecondWorkPvId({
+        pv_id: pvId,
+        work_pv_id: workPvId,
+        second_work_pv_id: normalizeOptionalUuid(row?.second_work_pv_id),
+      })
+    : null;
 
   return {
     id: String(row?.id ?? ""),
-    pv_id: String(row?.pv_id ?? ""),
+    pv_id: pvId,
     employee_id: String(row?.employee_id ?? ""),
     employee_name: employee.name ? String(employee.name) : "",
     employee_active: employee.active !== false,
     pv_code: pv.code ? String(pv.code) : null,
     pv_name: pv.name ? String(pv.name) : null,
     shift_date: String(row?.shift_date ?? ""),
-    status: normalizeShiftStatus(row?.status) ?? "rest",
+    status,
+    work_pv_id: workPvId,
+    second_work_pv_id: secondWorkPvId,
     start_time: startTime,
     end_time: endTime,
     second_start_time: secondStartTime,
     second_end_time: secondEndTime,
     note: row?.note ? String(row.note) : "",
-    hours: shiftMinutesTotal({ status: normalizeShiftStatus(row?.status) ?? "rest", start_time: startTime, end_time: endTime, second_start_time: secondStartTime, second_end_time: secondEndTime }) / 60,
+    hours: shiftMinutesTotal({ status, start_time: startTime, end_time: endTime, second_start_time: secondStartTime, second_end_time: secondEndTime }) / 60,
     created_at: row?.created_at ? String(row.created_at) : null,
     updated_at: row?.updated_at ? String(row.updated_at) : null,
   };
@@ -114,6 +140,10 @@ function validateWeekStart(value: unknown) {
   const raw = String(value ?? "").trim();
   const base = isDateOnly(raw) ? raw : currentWeekMondayISO();
   return getMondayISO(base);
+}
+
+function hasOwnField(row: Record<string, unknown>, key: string) {
+  return Object.prototype.hasOwnProperty.call(row, key);
 }
 
 export async function GET(req: Request) {
@@ -169,6 +199,8 @@ export async function GET(req: Request) {
             pv_name: row.pv_name,
             shift_date: row.shift_date,
             status: row.status,
+            work_pv_id: row.work_pv_id,
+            second_work_pv_id: row.second_work_pv_id,
             start_time: null,
             end_time: null,
             second_start_time: null,
@@ -275,6 +307,36 @@ export async function POST(req: Request) {
     }
 
     const userId = await getAppUserIdByUsername(session.username);
+
+    const { data: existingShiftRows, error: existingShiftError } = await supabaseAdmin
+      .from("work_shifts")
+      .select("employee_id, shift_date, work_pv_id, second_work_pv_id")
+      .eq("pv_id", pv_id)
+      .in("employee_id", employeeIds)
+      .gte("shift_date", week_start)
+      .lte("shift_date", weekDates[6]);
+
+    if (existingShiftError) {
+      return NextResponse.json({ ok: false, error: existingShiftError.message }, { status: 500 });
+    }
+
+    const existingWorkPvsByKey = new Map<
+      string,
+      { work_pv_id: string | null; second_work_pv_id: string | null }
+    >();
+
+    for (const existingRow of existingShiftRows ?? []) {
+      const rec = asRecord(existingRow);
+      const existingEmployeeId = String(rec.employee_id ?? "").trim();
+      const existingShiftDate = String(rec.shift_date ?? "").trim();
+      if (!isUuid(existingEmployeeId) || !isDateOnly(existingShiftDate)) continue;
+
+      existingWorkPvsByKey.set(`${existingEmployeeId}:${existingShiftDate}`, {
+        work_pv_id: normalizeOptionalUuid(rec.work_pv_id),
+        second_work_pv_id: normalizeOptionalUuid(rec.second_work_pv_id),
+      });
+    }
+
     const seen = new Set<string>();
     const payload: Array<Record<string, unknown>> = [];
 
@@ -307,6 +369,17 @@ export async function POST(req: Request) {
       let second_start_time: string | null = null;
       let second_end_time: string | null = null;
       const note = clampText(row.note, 500) || null;
+
+      const hasWorkPvId = hasOwnField(row, "work_pv_id");
+      const hasSecondWorkPvId = hasOwnField(row, "second_work_pv_id");
+
+      if (hasWorkPvId && !isOptionalUuid(row.work_pv_id)) {
+        return NextResponse.json({ ok: false, error: "PV lavoro primo turno non valido" }, { status: 400 });
+      }
+
+      if (hasSecondWorkPvId && !isOptionalUuid(row.second_work_pv_id)) {
+        return NextResponse.json({ ok: false, error: "PV lavoro secondo turno non valido" }, { status: 400 });
+      }
 
       if (!isNoTimeStatus(status)) {
         start_time = normalizeTime(row.start_time ?? "");
@@ -345,19 +418,43 @@ export async function POST(req: Request) {
           );
         }
 
-        if (end_time && minutesBetween(end_time, second_start_time) <= 0) {
-          return NextResponse.json(
-            { ok: false, error: "Il turno pomeriggio deve iniziare dopo la fine del turno mattina" },
-            { status: 400 }
-          );
-        }
+        const firstEndMinutes = timeToMinutes(end_time);
+const secondStartMinutes = timeToMinutes(second_start_time);
+
+if (
+  firstEndMinutes !== null &&
+  secondStartMinutes !== null &&
+  secondStartMinutes < firstEndMinutes
+) {
+  return NextResponse.json(
+    { ok: false, error: "Il secondo turno non può iniziare prima della fine del primo turno" },
+    { status: 400 }
+  );
+}
       }
+
+      const existingWorkPvs = existingWorkPvsByKey.get(key) ?? {
+        work_pv_id: null,
+        second_work_pv_id: null,
+      };
+      const work_pv_id = isNoTimeStatus(status)
+        ? null
+        : hasWorkPvId
+          ? normalizeOptionalUuid(row.work_pv_id)
+          : existingWorkPvs.work_pv_id;
+      const second_work_pv_id = requiresSecondShift(status)
+        ? hasSecondWorkPvId
+          ? normalizeOptionalUuid(row.second_work_pv_id)
+          : existingWorkPvs.second_work_pv_id
+        : null;
 
       payload.push({
         pv_id,
         employee_id,
         shift_date,
         status,
+        work_pv_id,
+        second_work_pv_id,
         start_time,
         end_time,
         second_start_time,
@@ -366,6 +463,30 @@ export async function POST(req: Request) {
         created_by: userId,
         updated_by: userId,
       });
+    }
+
+    const referencedWorkPvIds = Array.from(
+      new Set(
+        payload
+          .flatMap((row) => [row.work_pv_id, row.second_work_pv_id])
+          .filter(isUuid)
+      )
+    );
+
+    if (referencedWorkPvIds.length > 0) {
+      const { data: pvRows, error: pvsError } = await supabaseAdmin
+        .from("pvs")
+        .select("id")
+        .in("id", referencedWorkPvIds);
+
+      if (pvsError) {
+        return NextResponse.json({ ok: false, error: pvsError.message }, { status: 500 });
+      }
+
+      const existingPvIds = new Set((pvRows ?? []).map((row) => String(asRecord(row).id ?? "")));
+      if (existingPvIds.size !== referencedWorkPvIds.length) {
+        return NextResponse.json({ ok: false, error: "Uno o più PV lavoro non esistono" }, { status: 400 });
+      }
     }
 
     const { data, error } = await supabaseAdmin

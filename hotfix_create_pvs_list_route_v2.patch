@@ -1,0 +1,58 @@
+diff --git a/app/api/pvs/list/route.ts b/app/api/pvs/list/route.ts
+new file mode 100644
+index 0000000..6202413
+--- /dev/null
++++ b/app/api/pvs/list/route.ts
+@@ -0,0 +1,52 @@
++import { NextResponse } from "next/server";
++import { cookies } from "next/headers";
++import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
++import { supabaseAdmin } from "@/lib/supabaseAdmin";
++import { getErrorMessage } from "@/lib/work-shifts";
++
++export const runtime = "nodejs";
++
++type PvDbRow = {
++  id?: unknown;
++  code?: unknown;
++  name?: unknown;
++};
++
++function normalizePv(row: PvDbRow) {
++  return {
++    id: String(row.id ?? ""),
++    code: String(row.code ?? ""),
++    name: String(row.name ?? ""),
++  };
++}
++
++export async function GET() {
++  try {
++    const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
++
++    if (!session || !["admin", "amministrativo", "punto_vendita"].includes(session.role)) {
++      return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
++    }
++
++    const { data, error } = await supabaseAdmin
++      .from("pvs")
++      .select("id, code, name")
++      .order("code", { ascending: true });
++
++    if (error) {
++      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
++    }
++
++    const rows = ((data ?? []) as unknown[])
++      .map((row) => normalizePv(row as PvDbRow))
++      .filter((row) => row.id);
++
++    return NextResponse.json({
++      ok: true,
++      rows,
++      pvs: rows,
++    });
++  } catch (e: unknown) {
++    return NextResponse.json({ ok: false, error: getErrorMessage(e, "Errore caricamento PV") }, { status: 500 });
++  }
++}

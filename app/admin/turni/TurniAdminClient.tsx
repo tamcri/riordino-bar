@@ -10,8 +10,10 @@ import {
   formatShiftTimeRange,
   getMondayISO,
   getWeekDates,
+  isNoTimeStatus,
   normalizeShiftStatus,
   normalizeTime,
+  requiresSecondShift,
   shiftHoursTotal,
   shiftStatusLabel,
   type ShiftStatus,
@@ -61,6 +63,8 @@ type ShiftRow = {
   employee_active: boolean;
   pv_code: string | null;
   pv_name: string | null;
+  work_pv_id?: string | null;
+  second_work_pv_id?: string | null;
   shift_date: string;
   status: ShiftStatus;
   start_time: string | null;
@@ -79,6 +83,12 @@ type MonthlyRow = {
   pv_id?: string | null;
   pv_code?: string | null;
   pv_name?: string | null;
+  work_pv_id?: string | null;
+  work_pv_code?: string | null;
+  work_pv_name?: string | null;
+  second_work_pv_id?: string | null;
+  second_work_pv_code?: string | null;
+  second_work_pv_name?: string | null;
   status: ShiftStatus | null;
   status_label: string;
   start_time: string | null;
@@ -179,11 +189,18 @@ type GroupedRow = {
 type WeeklyEditCell = {
   shift_date: string;
   status: ShiftStatus;
+  work_pv_id: string;
+  second_work_pv_id: string;
   start_time: string;
   end_time: string;
   second_start_time: string;
   second_end_time: string;
   note: string;
+};
+
+type AdminCopyDayState = {
+  sourceIndex: number;
+  targetIndexes: number[];
 };
 
 type WeekResponse = ApiResponseBase & {
@@ -261,14 +278,30 @@ function timeRangeLabel(startTime: string | null, endTime: string | null) {
   return `${start} - ${end}`;
 }
 
+function pvBlockLabel(code?: string | null, name?: string | null) {
+  return [code, name].filter(Boolean).join(" — ");
+}
+
 function monthlyShiftTimeLabel(row: MonthlyRow) {
   if (!row.has_shift || !row.status) return "—";
 
   const firstRange = timeRangeLabel(row.start_time, row.end_time);
   const secondRange = timeRangeLabel(row.second_start_time, row.second_end_time);
+  const firstPvLabel =
+    pvBlockLabel(row.work_pv_code, row.work_pv_name) ||
+    pvBlockLabel(row.pv_code, row.pv_name);
+  const secondPvLabel =
+    pvBlockLabel(row.second_work_pv_code, row.second_work_pv_name) ||
+    firstPvLabel;
 
-  if (firstRange && secondRange) return `${firstRange} / ${secondRange}`;
-  if (firstRange) return firstRange;
+  if (firstRange && secondRange) {
+    const firstLine = firstPvLabel ? `${firstPvLabel}: ${firstRange}` : firstRange;
+    const secondLine = secondPvLabel ? `${secondPvLabel}: ${secondRange}` : secondRange;
+    return `${firstLine}
+${secondLine}`;
+  }
+
+  if (firstRange) return firstPvLabel ? `${firstPvLabel}: ${firstRange}` : firstRange;
 
   return row.shift_label || "—";
 }
@@ -285,10 +318,12 @@ function monthlyRowHours(row: MonthlyRow) {
   });
 }
 
-function makeEmptyWeeklyEditCell(shiftDate: string): WeeklyEditCell {
+function makeEmptyWeeklyEditCell(shiftDate: string, defaultPvId = ""): WeeklyEditCell {
   return {
     shift_date: shiftDate,
     status: "rest",
+    work_pv_id: defaultPvId,
+    second_work_pv_id: defaultPvId,
     start_time: "",
     end_time: "",
     second_start_time: "",
@@ -297,14 +332,18 @@ function makeEmptyWeeklyEditCell(shiftDate: string): WeeklyEditCell {
   };
 }
 
-function shiftToWeeklyEditCell(shiftDate: string, shift?: ShiftRow): WeeklyEditCell {
-  if (!shift) return makeEmptyWeeklyEditCell(shiftDate);
+function shiftToWeeklyEditCell(shiftDate: string, shift: ShiftRow | undefined, defaultPvId = ""): WeeklyEditCell {
+  if (!shift) return makeEmptyWeeklyEditCell(shiftDate, defaultPvId);
 
   const status = normalizeShiftStatus(shift.status) ?? "rest";
+  const workPvId = String(shift.work_pv_id || shift.pv_id || defaultPvId || "");
+  const secondWorkPvId = String(shift.second_work_pv_id || workPvId || defaultPvId || "");
 
   return {
     shift_date: shiftDate,
     status,
+    work_pv_id: isNoTimeStatus(status) ? "" : workPvId,
+    second_work_pv_id: status === "split" ? secondWorkPvId : "",
     start_time: normalizeTime(shift.start_time ?? "") ?? "",
     end_time: normalizeTime(shift.end_time ?? "") ?? "",
     second_start_time: normalizeTime(shift.second_start_time ?? "") ?? "",
@@ -313,10 +352,12 @@ function shiftToWeeklyEditCell(shiftDate: string, shift?: ShiftRow): WeeklyEditC
   };
 }
 
-function cleanWeeklyEditCellForStatus(cell: WeeklyEditCell): WeeklyEditCell {
-  if (cell.status === "rest" || cell.status === "vacation" || cell.status === "sick") {
+function cleanWeeklyEditCellForStatus(cell: WeeklyEditCell, defaultPvId = ""): WeeklyEditCell {
+  if (isNoTimeStatus(cell.status)) {
     return {
       ...cell,
+      work_pv_id: "",
+      second_work_pv_id: "",
       start_time: "",
       end_time: "",
       second_start_time: "",
@@ -324,15 +365,30 @@ function cleanWeeklyEditCellForStatus(cell: WeeklyEditCell): WeeklyEditCell {
     };
   }
 
-  if (cell.status !== "split") {
+  const workPvId = cell.work_pv_id || defaultPvId;
+
+  if (!requiresSecondShift(cell.status)) {
     return {
       ...cell,
+      work_pv_id: workPvId,
+      second_work_pv_id: "",
       second_start_time: "",
       second_end_time: "",
     };
   }
 
-  return cell;
+  return {
+    ...cell,
+    work_pv_id: workPvId,
+    second_work_pv_id: cell.second_work_pv_id || workPvId || defaultPvId,
+  };
+}
+
+function cloneWeeklyEditCellForDate(cell: WeeklyEditCell, shiftDate: string): WeeklyEditCell {
+  return {
+    ...cell,
+    shift_date: shiftDate,
+  };
 }
 
 async function fetchJsonSafe<T extends ApiResponseBase>(
@@ -383,6 +439,7 @@ export default function TurniAdminClient() {
   const [weeklyEmployeesLoading, setWeeklyEmployeesLoading] = useState(false);
   const [editingEmployee, setEditingEmployee] = useState<Employee | null>(null);
   const [editCells, setEditCells] = useState<WeeklyEditCell[]>([]);
+  const [editCopyDay, setEditCopyDay] = useState<AdminCopyDayState | null>(null);
   const [editSaving, setEditSaving] = useState(false);
     const [newEmployeeName, setNewEmployeeName] = useState("");
   const [newEmployeeCountsInStaff, setNewEmployeeCountsInStaff] = useState(true);
@@ -796,15 +853,64 @@ export default function TurniAdminClient() {
     const shiftsByDate = new Map(employeeRows.map((row) => [row.shift_date, row]));
 
     setEditingEmployee(selectedWeeklyEmployee);
-    setEditCells(weekDates.map((date) => shiftToWeeklyEditCell(date, shiftsByDate.get(date))));
+    setEditCopyDay(null);
+    setEditCells(weekDates.map((date) => shiftToWeeklyEditCell(date, shiftsByDate.get(date), pvId)));
   }
 
   function updateEditCell(index: number, patch: Partial<WeeklyEditCell>) {
     setEditCells((current) =>
       current.map((cell, cellIndex) =>
-        cellIndex === index ? cleanWeeklyEditCellForStatus({ ...cell, ...patch }) : cell
+        cellIndex === index ? cleanWeeklyEditCellForStatus({ ...cell, ...patch }, pvId) : cell
       )
     );
+  }
+
+  function openEditCopyDay(sourceIndex: number) {
+    setError(null);
+    setMsg(null);
+    setEditCopyDay({ sourceIndex, targetIndexes: [] });
+  }
+
+  function toggleEditCopyTarget(targetIndex: number) {
+    setEditCopyDay((current) => {
+      if (!current) return current;
+
+      const exists = current.targetIndexes.includes(targetIndex);
+      return {
+        ...current,
+        targetIndexes: exists
+          ? current.targetIndexes.filter((item) => item !== targetIndex)
+          : [...current.targetIndexes, targetIndex],
+      };
+    });
+  }
+
+  function cancelEditCopyDay() {
+    setEditCopyDay(null);
+  }
+
+  function applyEditCopyDay() {
+    if (!editCopyDay) return;
+
+    if (editCopyDay.targetIndexes.length === 0) {
+      setError("Seleziona almeno un giorno su cui applicare il turno.");
+      return;
+    }
+
+    setEditCells((current) => {
+      const source = current[editCopyDay.sourceIndex];
+      if (!source) return current;
+
+      return current.map((cell, index) =>
+        editCopyDay.targetIndexes.includes(index)
+          ? cloneWeeklyEditCellForDate(source, cell.shift_date)
+          : cell
+      );
+    });
+
+    setEditCopyDay(null);
+    setError(null);
+    setMsg("Turno copiato sui giorni selezionati.");
   }
 
   async function saveWeeklyEmployeeEdit() {
@@ -829,11 +935,13 @@ export default function TurniAdminClient() {
     setEditSaving(true);
     try {
       const shifts = editCells.map((cell) => {
-        const clean = cleanWeeklyEditCellForStatus(cell);
+        const clean = cleanWeeklyEditCellForStatus(cell, pvId);
         return {
           employee_id: editingEmployee.id,
           shift_date: clean.shift_date,
           status: clean.status,
+          work_pv_id: isNoTimeStatus(clean.status) ? null : clean.work_pv_id || pvId,
+          second_work_pv_id: clean.status === "split" ? clean.second_work_pv_id || clean.work_pv_id || pvId : null,
           start_time: clean.start_time || null,
           end_time: clean.end_time || null,
           second_start_time: clean.second_start_time || null,
@@ -1348,6 +1456,7 @@ export default function TurniAdminClient() {
                           setWeeklyEmployeeId(e.target.value);
                           setEditingEmployee(null);
                           setEditCells([]);
+                          setEditCopyDay(null);
                         }}
                       >
                         <option value="">
@@ -1551,6 +1660,7 @@ export default function TurniAdminClient() {
                         onClick={() => {
                           setEditingEmployee(null);
                           setEditCells([]);
+                          setEditCopyDay(null);
                         }}
                       >
                         Chiudi modifica
@@ -1565,7 +1675,7 @@ export default function TurniAdminClient() {
 
                         return (
                           <div key={cell.shift_date} className="rounded-xl border p-3">
-                            <div className="grid grid-cols-1 gap-3 lg:grid-cols-[0.7fr_0.9fr_0.7fr_0.7fr_0.7fr_0.7fr_1.2fr] lg:items-end">
+                            <div className="grid grid-cols-1 gap-3 lg:grid-cols-[0.65fr_0.85fr_1fr_0.7fr_0.7fr_1fr_0.7fr_0.7fr_1.1fr] lg:items-end">
                               <div>
                                 <div className="text-sm font-semibold">
                                   {WEEK_DAYS[index]?.label ?? "Giorno"}
@@ -1594,6 +1704,27 @@ export default function TurniAdminClient() {
                               </div>
 
                               <div>
+                                <label className="mb-1 block text-xs font-medium text-gray-600">PV lavoro</label>
+                                <select
+                                  className="w-full rounded-lg border bg-white p-2 disabled:bg-gray-100"
+                                  value={cell.work_pv_id || pvId}
+                                  disabled={!showTimeFields}
+                                  onChange={(e) =>
+                                    updateEditCell(index, {
+                                      work_pv_id: e.target.value,
+                                      second_work_pv_id: showSecondShift && !cell.second_work_pv_id ? e.target.value : cell.second_work_pv_id,
+                                    })
+                                  }
+                                >
+                                  {pvs.map((pv) => (
+                                    <option key={pv.id} value={pv.id}>
+                                      {pv.code} — {pv.name}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+
+                              <div>
                                 <label className="mb-1 block text-xs font-medium text-gray-600">
                                   {showSecondShift ? "Mattina inizio" : "Inizio"}
                                 </label>
@@ -1617,6 +1748,22 @@ export default function TurniAdminClient() {
                                   disabled={!showTimeFields}
                                   onChange={(e) => updateEditCell(index, { end_time: e.target.value })}
                                 />
+                              </div>
+
+                              <div>
+                                <label className="mb-1 block text-xs font-medium text-gray-600">PV secondo</label>
+                                <select
+                                  className="w-full rounded-lg border bg-white p-2 disabled:bg-gray-100"
+                                  value={cell.second_work_pv_id || cell.work_pv_id || pvId}
+                                  disabled={!showSecondShift}
+                                  onChange={(e) => updateEditCell(index, { second_work_pv_id: e.target.value })}
+                                >
+                                  {pvs.map((pv) => (
+                                    <option key={pv.id} value={pv.id}>
+                                      {pv.code} — {pv.name}
+                                    </option>
+                                  ))}
+                                </select>
                               </div>
 
                               <div>
@@ -1653,19 +1800,77 @@ export default function TurniAdminClient() {
                               </div>
                             </div>
 
-                            <div className="mt-2 text-right text-xs font-semibold text-gray-600">
-                              Ore giorno:{" "}
-                              {formatHours(
-                                shiftHoursTotal({
-                                  status,
-                                  start_time: cell.start_time,
-                                  end_time: cell.end_time,
-                                  second_start_time: cell.second_start_time,
-                                  second_end_time: cell.second_end_time,
-                                })
-                              )}{" "}
-                              h
+                            <div className="mt-2 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                              <button
+                                type="button"
+                                className="rounded-lg border bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-gray-50"
+                                onClick={() => openEditCopyDay(index)}
+                              >
+                                Copia giorno
+                              </button>
+
+                              <div className="text-right text-xs font-semibold text-gray-600">
+                                Ore giorno:{" "}
+                                {formatHours(
+                                  shiftHoursTotal({
+                                    status,
+                                    start_time: cell.start_time,
+                                    end_time: cell.end_time,
+                                    second_start_time: cell.second_start_time,
+                                    second_end_time: cell.second_end_time,
+                                  })
+                                )}{" "}
+                                h
+                              </div>
                             </div>
+
+                            {editCopyDay?.sourceIndex === index && (
+                              <div className="mt-3 rounded-xl border bg-slate-50 p-3 text-xs">
+                                <div className="font-semibold text-slate-700">Applica questo turno a:</div>
+
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                  {weekDates.map((targetDate, targetIndex) => {
+                                    const disabled = targetIndex === index;
+                                    const checked = editCopyDay.targetIndexes.includes(targetIndex);
+
+                                    return (
+                                      <label
+                                        key={targetDate}
+                                        className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 ${
+                                          disabled ? "bg-gray-100 text-gray-400" : "bg-white"
+                                        }`}
+                                      >
+                                        <input
+                                          type="checkbox"
+                                          disabled={disabled}
+                                          checked={checked}
+                                          onChange={() => toggleEditCopyTarget(targetIndex)}
+                                        />
+                                        <span>{WEEK_DAYS[targetIndex]?.shortLabel}</span>
+                                      </label>
+                                    );
+                                  })}
+                                </div>
+
+                                <div className="mt-3 flex gap-2">
+                                  <button
+                                    type="button"
+                                    className="rounded-lg bg-slate-900 px-3 py-2 font-semibold text-white"
+                                    onClick={applyEditCopyDay}
+                                  >
+                                    Applica
+                                  </button>
+
+                                  <button
+                                    type="button"
+                                    className="rounded-lg border bg-white px-3 py-2 font-semibold text-slate-700 hover:bg-gray-50"
+                                    onClick={cancelEditCopyDay}
+                                  >
+                                    Annulla
+                                  </button>
+                                </div>
+                              </div>
+                            )}
                           </div>
                         );
                       })}
@@ -1996,7 +2201,7 @@ export default function TurniAdminClient() {
                         <th className="border-b px-3 py-3 font-semibold min-w-36">PV</th>
                       )}
                       <th className="border-b px-3 py-3 font-semibold min-w-40">Stato</th>
-                      <th className="border-b px-3 py-3 font-semibold min-w-36">Turno</th>
+                      <th className="border-b px-3 py-3 font-semibold min-w-56">Turno / PV lavoro</th>
                       <th className="border-b px-3 py-3 font-semibold min-w-24 text-right">Ore</th>
                       <th className="border-b px-3 py-3 font-semibold min-w-60">Note</th>
                     </tr>
@@ -2023,7 +2228,7 @@ export default function TurniAdminClient() {
                             </span>
                           </td>
                           <td className="border-b px-3 py-3 whitespace-pre-line">
-                            {shiftTimeLabel !== "—" ? shiftTimeLabel.replace(" / ", "\n") : "—"}
+                            {shiftTimeLabel}
                           </td>
                           <td className="border-b px-3 py-3 text-right font-semibold">{formatHours(rowHours)} h</td>
                           <td className="border-b px-3 py-3 text-gray-700">{row.note || "—"}</td>

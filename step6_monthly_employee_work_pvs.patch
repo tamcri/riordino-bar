@@ -1,0 +1,151 @@
+diff --git a/app/api/work-shifts/monthly-employee/route.ts b/app/api/work-shifts/monthly-employee/route.ts
+index 750277b..f8dd619 100644
+--- a/app/api/work-shifts/monthly-employee/route.ts
++++ b/app/api/work-shifts/monthly-employee/route.ts
+@@ -36,10 +36,18 @@ type ShiftDbRow = {
+   end_time?: unknown;
+   second_start_time?: unknown;
+   second_end_time?: unknown;
++  work_pv_id?: unknown;
++  second_work_pv_id?: unknown;
+   status?: unknown;
+   note?: unknown;
+ };
+ 
++type PvInfo = {
++  id: string;
++  code: string | null;
++  name: string | null;
++};
++
+ function employeeSelect() {
+   return `
+     id,
+@@ -103,6 +111,16 @@ function normalizeEmployee(row: EmployeeDbRow) {
+   };
+ }
+ 
++function normalizePvInfo(row: unknown): PvInfo {
++  const rec = asRecord(row);
++
++  return {
++    id: String(rec.id ?? ""),
++    code: rec.code ? String(rec.code) : null,
++    name: rec.name ? String(rec.name) : null,
++  };
++}
++
+ function normalizeShift(row: ShiftDbRow) {
+   const status = normalizeShiftStatus(row?.status) ?? "rest";
+   const startTime = normalizeTime(row?.start_time ?? "") ?? null;
+@@ -128,6 +146,8 @@ function normalizeShift(row: ShiftDbRow) {
+     id: String(row?.id ?? ""),
+     pv_id: String(row?.pv_id ?? ""),
+     employee_id: String(row?.employee_id ?? ""),
++    work_pv_id: row?.work_pv_id ? String(row.work_pv_id) : null,
++    second_work_pv_id: row?.second_work_pv_id ? String(row.second_work_pv_id) : null,
+     shift_date: String(row?.shift_date ?? ""),
+     status,
+     status_label: shiftStatusLabel(status),
+@@ -151,6 +171,12 @@ function emptyMonthlyRow(date: string) {
+     pv_id: null,
+     pv_code: null,
+     pv_name: null,
++    work_pv_id: null,
++    work_pv_code: null,
++    work_pv_name: null,
++    second_work_pv_id: null,
++    second_work_pv_code: null,
++    second_work_pv_name: null,
+     status: null,
+     status_label: "Nessun turno",
+     start_time: null,
+@@ -248,7 +274,7 @@ export async function GET(req: Request) {
+ 
+     const { data: shiftData, error: shiftError } = await supabaseAdmin
+       .from("work_shifts")
+-      .select("id, pv_id, employee_id, shift_date, start_time, end_time, second_start_time, second_end_time, status, note")
++      .select("id, pv_id, employee_id, shift_date, start_time, end_time, second_start_time, second_end_time, work_pv_id, second_work_pv_id, status, note")
+       .in("employee_id", employeeIds)
+       .gte("shift_date", month_start)
+       .lte("shift_date", month_end)
+@@ -262,9 +288,55 @@ export async function GET(req: Request) {
+       .map((row) => normalizeShift(row as ShiftDbRow))
+       .filter((row) => employeeById.has(row.employee_id));
+ 
++    const pvIds = new Set<string>();
++    for (const emp of matchedEmployees) {
++      if (isUuid(emp.pv_id)) pvIds.add(emp.pv_id);
++    }
++    for (const shift of normalizedShifts) {
++      if (isUuid(shift.pv_id)) pvIds.add(shift.pv_id);
++      if (isUuid(shift.work_pv_id)) pvIds.add(shift.work_pv_id);
++      if (isUuid(shift.second_work_pv_id)) pvIds.add(shift.second_work_pv_id);
++    }
++
++    const pvById = new Map<string, PvInfo>();
++    if (pvIds.size > 0) {
++      const { data: pvData, error: pvError } = await supabaseAdmin
++        .from("pvs")
++        .select("id, code, name")
++        .in("id", Array.from(pvIds));
++
++      if (pvError) {
++        return NextResponse.json({ ok: false, error: pvError.message }, { status: 500 });
++      }
++
++      for (const row of pvData ?? []) {
++        const pv = normalizePvInfo(row);
++        if (pv.id) pvById.set(pv.id, pv);
++      }
++    }
++
++    function workPvFields(shift: ReturnType<typeof normalizeShift>, emp: ReturnType<typeof normalizeEmployee>) {
++      const recordPvId = shift.pv_id || emp.pv_id || null;
++      const firstPvId = shift.work_pv_id || recordPvId;
++      const hasSecondBlock = Boolean(shift.second_start_time && shift.second_end_time);
++      const secondPvId = hasSecondBlock ? shift.second_work_pv_id || firstPvId || recordPvId : null;
++      const firstPv = firstPvId ? pvById.get(firstPvId) ?? null : null;
++      const secondPv = secondPvId ? pvById.get(secondPvId) ?? null : null;
++
++      return {
++        work_pv_id: firstPvId,
++        work_pv_code: firstPv?.code ?? null,
++        work_pv_name: firstPv?.name ?? null,
++        second_work_pv_id: secondPvId,
++        second_work_pv_code: secondPv?.code ?? null,
++        second_work_pv_name: secondPv?.name ?? null,
++      };
++    }
++
+     const rows = includeSameName
+       ? normalizedShifts.map((shift) => {
+           const emp = employeeById.get(shift.employee_id) ?? employee;
++          const pvFields = workPvFields(shift, emp);
+           return {
+             shift_date: shift.shift_date,
+             weekday: weekdayLabel(shift.shift_date),
+@@ -274,6 +346,7 @@ export async function GET(req: Request) {
+             pv_id: emp.pv_id,
+             pv_code: emp.pv_code,
+             pv_name: emp.pv_name,
++            ...pvFields,
+             status: shift.status,
+             status_label: shift.status_label,
+             start_time: shift.start_time,
+@@ -287,6 +360,7 @@ export async function GET(req: Request) {
+         })
+       : days.map((date) => {
+           const shift = normalizedShifts.find((row) => row.shift_date === date) ?? null;
++          const pvFields = shift ? workPvFields(shift, employee) : null;
+           return shift
+             ? {
+                 shift_date: date,
+@@ -297,6 +371,7 @@ export async function GET(req: Request) {
+                 pv_id: employee.pv_id,
+                 pv_code: employee.pv_code,
+                 pv_name: employee.pv_name,
++                ...pvFields,
+                 status: shift.status,
+                 status_label: shift.status_label,
+                 start_time: shift.start_time,
