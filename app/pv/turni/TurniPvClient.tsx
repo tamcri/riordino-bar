@@ -206,6 +206,8 @@ function statusCellClass(status: ShiftStatus) {
       return "border-rose-200 bg-rose-50";
     case "change":
       return "border-amber-200 bg-amber-50";
+    case "support":
+      return "border-orange-200 bg-orange-50";
     case "rest":
     default:
       return "border-slate-200 bg-slate-50";
@@ -1343,6 +1345,7 @@ if (
           <span className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">Riposo: 0 ore</span>
           <span className="rounded-xl border border-violet-200 bg-violet-50 px-3 py-2">Ferie: 0 ore</span>
           <span className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2">Malattia: 0 ore</span>
+          <span className="rounded-xl border border-orange-200 bg-orange-50 px-3 py-2">Di supporto: 0 ore, dipendente impegnato su altro PV</span>
           <span className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2">Cambio turno: conta nelle ore e può avere nota</span>
         </div>
       </section>

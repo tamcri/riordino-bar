@@ -234,6 +234,8 @@ function statusBadgeClass(status: ShiftStatus) {
       return "border-rose-200 bg-rose-50 text-rose-800";
     case "change":
       return "border-amber-200 bg-amber-50 text-amber-800";
+    case "support":
+      return "border-orange-200 bg-orange-50 text-orange-800";
     case "rest":
     default:
       return "border-slate-200 bg-slate-50 text-slate-700";
@@ -1699,6 +1701,7 @@ export default function TurniAdminClient() {
                                   <option value="rest">Riposo</option>
                                   <option value="vacation">Ferie</option>
                                   <option value="sick">Malattia</option>
+                                  <option value="support">Di supporto</option>
                                   <option value="change">Cambio turno</option>
                                 </select>
                               </div>
