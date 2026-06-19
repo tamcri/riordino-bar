@@ -218,10 +218,28 @@ function computeTotals(rows: Array<{ status: ShiftStatus | null; hours: number; 
     total_work_days: visibleRows.filter((row) => row.status === "work" || row.status === "split" || row.status === "change").length,
     total_split_days: visibleRows.filter((row) => row.status === "split").length,
     total_rest_days: visibleRows.filter((row) => row.status === "rest").length,
+    total_support_days: visibleRows.filter((row) => row.status === "support").length,
     total_vacation_days: visibleRows.filter((row) => row.status === "vacation").length,
     total_sick_days: visibleRows.filter((row) => row.status === "sick").length,
     total_change_days: visibleRows.filter((row) => row.status === "change").length,
   };
+}
+
+function filterSupportRowsForAggregatedView<T extends { shift_date: string; status: ShiftStatus | null }>(rows: T[]) {
+  const byDate = new Map<string, T[]>();
+
+  for (const row of rows) {
+    const current = byDate.get(row.shift_date) ?? [];
+    current.push(row);
+    byDate.set(row.shift_date, current);
+  }
+
+  return Array.from(byDate.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .flatMap(([, dayRows]) => {
+      const hasSupport = dayRows.some((row) => row.status === "support");
+      return hasSupport ? dayRows.filter((row) => row.status !== "rest") : dayRows;
+    });
 }
 
 export async function GET(req: Request) {
@@ -393,25 +411,26 @@ export async function GET(req: Request) {
       return `${a.employee_name ?? ""}`.localeCompare(`${b.employee_name ?? ""}`, "it");
     });
 
-    const totals = computeTotals(sortedRows);
+    const outputRows = includeSameName ? filterSupportRowsForAggregatedView(sortedRows) : sortedRows;
+const totals = computeTotals(outputRows);
 
-    return NextResponse.json({
-      ok: true,
-      month,
-      month_start,
-      month_end,
-      grouped_by_name: includeSameName,
-      matched_employees_count: matchedEmployees.length,
-      employee: includeSameName
-        ? {
-            ...employee,
-            pv_code: null,
-            pv_name: `Aggregato su ${matchedEmployees.length} record dipendente`,
-          }
-        : employee,
-      rows: sortedRows,
-      totals,
-    });
+return NextResponse.json({
+  ok: true,
+  month,
+  month_start,
+  month_end,
+  grouped_by_name: includeSameName,
+  matched_employees_count: matchedEmployees.length,
+  employee: includeSameName
+    ? {
+        ...employee,
+        pv_code: null,
+        pv_name: `Aggregato su ${matchedEmployees.length} record dipendente`,
+      }
+    : employee,
+  rows: outputRows,
+  totals,
+});
   } catch (e: unknown) {
     return NextResponse.json({ ok: false, error: getErrorMessage(e, "Errore server") }, { status: 500 });
   }

@@ -284,7 +284,12 @@ function rowPvLabel(row: MonthlyRow) {
 function compactShiftLine(row: MonthlyRow) {
   if (!row.has_shift || !row.status) return "-";
 
-  if (row.status === "rest" || row.status === "vacation" || row.status === "sick") {
+  if (
+    row.status === "rest" ||
+    row.status === "vacation" ||
+    row.status === "sick" ||
+    row.status === "support"
+  ) {
     return `${rowPvLabel(row)}: ${shiftStatusLabel(row.status)}`;
   }
 
@@ -294,6 +299,28 @@ function compactShiftLine(row: MonthlyRow) {
 
 function uniqueNonEmpty(values: string[]) {
   return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
+}
+
+function filterSupportDayRows(dayRows: MonthlyRow[]) {
+  const hasSupport = dayRows.some((row) => row.status === "support");
+
+  if (!hasSupport) return dayRows;
+
+  return dayRows.filter((row) => row.status !== "rest");
+}
+
+function filterSupportAggregatedRows(rows: MonthlyRow[]) {
+  const byDate = new Map<string, MonthlyRow[]>();
+
+  for (const row of rows) {
+    const current = byDate.get(row.shift_date) ?? [];
+    current.push(row);
+    byDate.set(row.shift_date, current);
+  }
+
+  return Array.from(byDate.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .flatMap(([, dayRows]) => filterSupportDayRows(dayRows));
 }
 
 function buildCompactMonthlyPdfRows(rows: MonthlyRow[]): CompactMonthlyPdfRow[] {
@@ -308,7 +335,9 @@ function buildCompactMonthlyPdfRows(rows: MonthlyRow[]): CompactMonthlyPdfRow[] 
   return Array.from(byDate.entries())
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([date, dayRows]) => {
-      const sortedRows = [...dayRows].sort((a, b) => {
+      const printableDayRows = filterSupportDayRows(dayRows);
+
+      const sortedRows = [...printableDayRows].sort((a, b) => {
         const pvCompare = `${a.pv_code ?? ""} ${a.pv_name ?? ""}`.localeCompare(`${b.pv_code ?? ""} ${b.pv_name ?? ""}`, "it");
         if (pvCompare !== 0) return pvCompare;
         return `${a.employee_name ?? ""}`.localeCompare(`${b.employee_name ?? ""}`, "it");
@@ -465,14 +494,16 @@ export async function GET(req: Request) {
       return `${a.employee_name ?? ""}`.localeCompare(`${b.employee_name ?? ""}`, "it");
     });
 
-    const visibleRows = rows.filter((row) => row.has_shift);
-    const totalHours = visibleRows.reduce((sum, row) => sum + row.hours, 0);
-    const totalWorkDays = visibleRows.filter((row) => row.status === "work" || row.status === "split" || row.status === "change").length;
-    const totalSplitDays = countRows(visibleRows, "split");
-    const totalRestDays = countRows(visibleRows, "rest");
-    const totalVacationDays = countRows(visibleRows, "vacation");
-    const totalSickDays = countRows(visibleRows, "sick");
-    const totalChangeDays = countRows(visibleRows, "change");
+    const rowsForTotals = includeSameName ? filterSupportAggregatedRows(rows) : rows;
+const visibleRows = rowsForTotals.filter((row) => row.has_shift);
+const totalHours = visibleRows.reduce((sum, row) => sum + row.hours, 0);
+const totalWorkDays = visibleRows.filter((row) => row.status === "work" || row.status === "split" || row.status === "change").length;
+const totalSplitDays = countRows(visibleRows, "split");
+const totalRestDays = countRows(visibleRows, "rest");
+const totalSupportDays = countRows(visibleRows, "support");
+const totalVacationDays = countRows(visibleRows, "vacation");
+const totalSickDays = countRows(visibleRows, "sick");
+const totalChangeDays = countRows(visibleRows, "change");
     const pvLabel = includeSameName
       ? `Aggregato su ${matchedEmployees.length} record dipendente`
       : [employee.pv_code, employee.pv_name].filter(Boolean).join(" - ") || "PV non indicato";
@@ -483,7 +514,7 @@ export async function GET(req: Request) {
         `Mese: ${formatMonthIT(month)}`,
         `Punto vendita: ${pvLabel}`,
         `Dipendente: ${employee.name}`,
-        `Totale ore: ${formatHours(totalHours)} h - Lavorati: ${totalWorkDays} - Spezzati: ${totalSplitDays} - Riposi: ${totalRestDays} - Ferie: ${totalVacationDays} - Malattia: ${totalSickDays} - Cambi: ${totalChangeDays}`,
+        `Totale ore: ${formatHours(totalHours)} h - Lavorati: ${totalWorkDays} - Spezzati: ${totalSplitDays} - Riposi: ${totalRestDays} - Supporti: ${totalSupportDays} - Ferie: ${totalVacationDays} - Malattia: ${totalSickDays} - Cambi: ${totalChangeDays}`,
       ],
     });
 
@@ -532,8 +563,8 @@ export async function GET(req: Request) {
 
     report.tableRow(
       includeSameName
-        ? ["Totale mese", "", "", "", `${formatHours(totalHours)} h`, `Lavorati: ${totalWorkDays} - Riposi: ${totalRestDays} - Ferie: ${totalVacationDays} - Malattia: ${totalSickDays} - Cambi: ${totalChangeDays}`]
-        : ["Totale mese", "", "", "", `${formatHours(totalHours)} h`, `Lavorati: ${totalWorkDays} - Riposi: ${totalRestDays} - Ferie: ${totalVacationDays} - Malattia: ${totalSickDays} - Cambi: ${totalChangeDays}`],
+  ? ["Totale mese", "", "", "", `${formatHours(totalHours)} h`, `Lavorati: ${totalWorkDays} - Riposi: ${totalRestDays} - Supporti: ${totalSupportDays} - Ferie: ${totalVacationDays} - Malattia: ${totalSickDays} - Cambi: ${totalChangeDays}`]
+  : ["Totale mese", "", "", "", `${formatHours(totalHours)} h`, `Lavorati: ${totalWorkDays} - Riposi: ${totalRestDays} - Supporti: ${totalSupportDays} - Ferie: ${totalVacationDays} - Malattia: ${totalSickDays} - Cambi: ${totalChangeDays}`],
       widths,
       { header: true, fontSize: 8, lineHeight: 10 }
     );
