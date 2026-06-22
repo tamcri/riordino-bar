@@ -196,7 +196,7 @@ function addShiftClassification(row: AnalysisRow, shift: ReturnType<typeof norma
 
   if (start !== null && end !== null && end < start) {
     row.nights += 1;
-  } else if (start !== null && start < 13 * 60) {
+  } else if (start !== null && start < 12 * 60) {
     row.mornings += 1;
   } else if (start !== null) {
     row.afternoons += 1;

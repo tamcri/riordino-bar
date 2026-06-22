@@ -327,7 +327,7 @@ export function getShiftPublicLabel(args: {
       // Se l'ora di fine e' minore dell'ora di inizio, il turno finisce il giorno dopo: lo mostriamo come Notte.
       if (end !== null && end < start) return "Notte";
 
-      return start < 13 * 60 ? "Mattina" : "Pomeriggio";
+      return start < 12 * 60 ? "Mattina" : "Pomeriggio";
     }
   }
 }

@@ -57,7 +57,7 @@ function shiftSelect() {
     created_at,
     updated_at,
     employees:employees(id, name, active),
-    pvs:pvs(code, name)
+    pvs:pvs!work_shifts_pv_id_fkey(code, name)
   `;
 }
 
