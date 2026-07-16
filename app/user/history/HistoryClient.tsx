@@ -71,6 +71,7 @@ function normPvLabel(s: string) {
 const PV_PAT_ALLOWED_NORM = new Set(
   [
     "A3 FLACCA",
+    "A4 FORMIA",
     "C3 VELLETRI",
     "C7 ROVERETO",
     "C8 RIMINI",
