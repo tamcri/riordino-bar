@@ -60,6 +60,7 @@ export async function GET(req: Request) {
         spese_extra,
         versamento,
         da_versare,
+        tot_versato,
         fondo_cassa,
         is_closed,
         pvs:pvs!inner(
@@ -242,8 +243,6 @@ export async function GET(req: Request) {
         {}
       );
     }
-
-
 
     let comments_by_summary: Record<string, string> = {};
 

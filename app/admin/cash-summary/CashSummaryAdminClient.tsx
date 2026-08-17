@@ -53,6 +53,7 @@ type RawRow = {
   vendita_gv: number | null;
   vendita_tabacchi: number | null;
   da_versare: number | null;
+  tot_versato: number | null;
   fondo_cassa: number | null;
   is_closed: boolean;
   pvs?: { code?: string; name?: string } | { code?: string; name?: string }[] | null;
@@ -75,6 +76,7 @@ type ViewRow = {
   vendita_gv: number;
   vendita_tabacchi: number;
   saldo_giorno: number;
+  tot_versato: number;
   progressivo_da_versare: number;
   fondo_cassa: number;
   delta_fondo_cassa: number | null;
@@ -973,6 +975,7 @@ export default function CashSummaryAdminClient() {
         vendita_gv: n(row.vendita_gv),
         vendita_tabacchi: n(row.vendita_tabacchi),
         saldo_giorno: saldoGiorno,
+        tot_versato: n(row.tot_versato),
         progressivo_da_versare: progressivo,
         fondo_cassa: fondo,
         delta_fondo_cassa: deltaFondo,
@@ -2261,6 +2264,7 @@ export default function CashSummaryAdminClient() {
                 <th className="p-2 text-right">Incasso Totale</th>
                 <th className="p-2 text-right">Vendita G&amp;V</th>
                 <th className="p-2 text-right">Vendita Tabacchi</th>
+                <th className="p-2 text-right">Tot. Versato</th>
                 <th className="p-2 text-right">Saldo giorno</th>
                 <th className="p-2 text-right">Progressivo</th>
                 <th className="p-2 text-right">Fondo Cassa</th>
@@ -2278,6 +2282,7 @@ export default function CashSummaryAdminClient() {
                   <td className="p-2 text-right">{formatEuro(row.incasso_totale)}</td>
                   <td className="p-2 text-right">{formatEuro(row.vendita_gv)}</td>
                   <td className="p-2 text-right">{formatEuro(row.vendita_tabacchi)}</td>
+                  <td className="p-2 text-right">{formatEuro(row.tot_versato)}</td>
                   <td
                     className={`p-2 text-right font-medium ${
                       row.saldo_giorno > 0
@@ -2318,7 +2323,7 @@ export default function CashSummaryAdminClient() {
 
               {!loading && filteredComputedRows.length === 0 && (
                 <tr className="border-t">
-                  <td className="p-3 text-gray-500" colSpan={11}>
+                  <td className="p-3 text-gray-500" colSpan={12}>
                     Nessun riepilogo trovato.
                   </td>
                 </tr>
@@ -2326,7 +2331,7 @@ export default function CashSummaryAdminClient() {
 
               {loading && (
                 <tr className="border-t">
-                  <td className="p-3 text-gray-500" colSpan={11}>
+                  <td className="p-3 text-gray-500" colSpan={12}>
                     Caricamento...
                   </td>
                 </tr>
