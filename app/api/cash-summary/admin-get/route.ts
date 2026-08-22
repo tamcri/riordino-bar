@@ -17,14 +17,20 @@ export async function GET(req: Request) {
     const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
 
     if (!session || !["admin", "amministrativo"].includes(session.role)) {
-      return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
+      return NextResponse.json(
+        { ok: false, error: "Non autorizzato" },
+        { status: 401 }
+      );
     }
 
     const { searchParams } = new URL(req.url);
     const id = String(searchParams.get("id") ?? "").trim();
 
     if (!isUuid(id)) {
-      return NextResponse.json({ ok: false, error: "id non valido" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "id non valido" },
+        { status: 400 }
+      );
     }
 
     const { data: summary, error: summaryErr } = await supabaseAdmin
@@ -41,11 +47,17 @@ export async function GET(req: Request) {
       .maybeSingle();
 
     if (summaryErr) {
-      return NextResponse.json({ ok: false, error: summaryErr.message }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: summaryErr.message },
+        { status: 500 }
+      );
     }
 
     if (!summary) {
-      return NextResponse.json({ ok: false, error: "Riepilogo non trovato" }, { status: 404 });
+      return NextResponse.json(
+        { ok: false, error: "Riepilogo non trovato" },
+        { status: 404 }
+      );
     }
 
     const { data: suppliers, error: suppliersErr } = await supabaseAdmin
@@ -55,7 +67,10 @@ export async function GET(req: Request) {
       .order("created_at", { ascending: true });
 
     if (suppliersErr) {
-      return NextResponse.json({ ok: false, error: suppliersErr.message }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: suppliersErr.message },
+        { status: 500 }
+      );
     }
 
     const { data: fieldCommentsRows, error: fieldCommentsErr } = await supabaseAdmin
@@ -64,7 +79,10 @@ export async function GET(req: Request) {
       .eq("summary_id", id);
 
     if (fieldCommentsErr) {
-      return NextResponse.json({ ok: false, error: fieldCommentsErr.message }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: fieldCommentsErr.message },
+        { status: 500 }
+      );
     }
 
     const field_comments = (fieldCommentsRows ?? []).reduce(
@@ -73,7 +91,34 @@ export async function GET(req: Request) {
         const commentText = String(row?.comment_text ?? "").trim();
 
         if (!fieldKey) return acc;
+
         acc[fieldKey] = commentText;
+        return acc;
+      },
+      {}
+    );
+
+    const { data: metricCheckRows, error: metricChecksErr } = await supabaseAdmin
+      .from("cash_summary_metric_checks")
+      .select("metric_key, status")
+      .eq("summary_id", id);
+
+    if (metricChecksErr) {
+      return NextResponse.json(
+        { ok: false, error: metricChecksErr.message },
+        { status: 500 }
+      );
+    }
+
+    const metric_checks = (metricCheckRows ?? []).reduce(
+      (acc: Record<string, "ok" | "check">, row: any) => {
+        const metricKey = String(row?.metric_key ?? "").trim();
+        const status = String(row?.status ?? "").trim();
+
+        if (!metricKey) return acc;
+        if (status !== "ok" && status !== "check") return acc;
+
+        acc[metricKey] = status;
         return acc;
       },
       {}
@@ -84,10 +129,14 @@ export async function GET(req: Request) {
       summary,
       suppliers: suppliers ?? [],
       field_comments,
+      metric_checks,
     });
   } catch (e: any) {
     return NextResponse.json(
-      { ok: false, error: e?.message || "Errore lettura dettaglio riepilogo" },
+      {
+        ok: false,
+        error: e?.message || "Errore lettura dettaglio riepilogo",
+      },
       { status: 500 }
     );
   }

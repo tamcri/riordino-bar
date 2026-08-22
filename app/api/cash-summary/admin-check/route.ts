@@ -12,6 +12,13 @@ const ALLOWED_METRICS = new Set([
   "vendita_gv",
   "lis_plus",
   "mooney",
+  "pos",
+  "spese_extra",
+  "tot_versato",
+  "fondo_cassa_iniziale",
+  "parziale_1",
+  "parziale_2",
+  "parziale_3",
   "saldo_giorno",
   "fondo_cassa",
 ] as const);
@@ -25,14 +32,18 @@ function isUuid(v: string | null | undefined) {
 
 function normalizeStatus(value: unknown): "ok" | "check" | null {
   const raw = String(value ?? "").trim().toLowerCase();
+
   if (raw === "ok") return "ok";
   if (raw === "check") return "check";
+
   return null;
 }
 
 function normalizeMetricKey(value: unknown): string | null {
   const raw = String(value ?? "").trim();
+
   if (!raw) return null;
+
   return ALLOWED_METRICS.has(raw as any) ? raw : null;
 }
 
@@ -41,7 +52,10 @@ export async function POST(req: Request) {
     const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
 
     if (!session || !["admin", "amministrativo"].includes(session.role)) {
-      return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
+      return NextResponse.json(
+        { ok: false, error: "Non autorizzato" },
+        { status: 401 }
+      );
     }
 
     const body = await req.json().catch(() => null);
@@ -51,14 +65,20 @@ export async function POST(req: Request) {
     const status = normalizeStatus(body?.status);
 
     if (!isUuid(summaryId)) {
-      return NextResponse.json({ ok: false, error: "ID riepilogo non valido" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "ID riepilogo non valido" },
+        { status: 400 }
+      );
     }
 
     if (!metricKey) {
-      return NextResponse.json({ ok: false, error: "Metrica non valida" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "Metrica non valida" },
+        { status: 400 }
+      );
     }
 
-    // 🔹 se status è null → cancella lo stato
+    // Se status è null, rimuove lo stato di controllo.
     if (status === null) {
       const { error } = await supabaseAdmin
         .from("cash_summary_metric_checks")
@@ -67,10 +87,16 @@ export async function POST(req: Request) {
         .eq("metric_key", metricKey);
 
       if (error) {
-        return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+        return NextResponse.json(
+          { ok: false, error: error.message },
+          { status: 500 }
+        );
       }
 
-      return NextResponse.json({ ok: true, deleted: true });
+      return NextResponse.json({
+        ok: true,
+        deleted: true,
+      });
     }
 
     const payload = {
@@ -89,7 +115,10 @@ export async function POST(req: Request) {
       .single();
 
     if (error) {
-      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: error.message },
+        { status: 500 }
+      );
     }
 
     return NextResponse.json({
@@ -98,7 +127,10 @@ export async function POST(req: Request) {
     });
   } catch (e: any) {
     return NextResponse.json(
-      { ok: false, error: e?.message || "Errore salvataggio stato controllo" },
+      {
+        ok: false,
+        error: e?.message || "Errore salvataggio stato controllo",
+      },
       { status: 500 }
     );
   }
