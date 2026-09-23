@@ -35,18 +35,32 @@ function n(value: unknown) {
   return Number.isFinite(num) ? num : 0;
 }
 
+function formatDate(value: string) {
+  const raw = String(value ?? "").trim();
+
+  if (!raw) return "";
+
+  const [yyyy, mm, dd] = raw.split("-");
+
+  if (!yyyy || !mm || !dd) return raw;
+
+  return `${dd}/${mm}/${yyyy}`;
+}
+
 function applyStyles(ws: XLSX.WorkSheet, totalRows: number) {
-  const euroCol = "B";
+  const euroCol = "C";
 
   for (let r = 2; r <= totalRows; r += 1) {
     const cell = ws[`${euroCol}${r}`];
+
     if (cell && (typeof cell.v === "number" || cell.f)) {
       cell.z = '[$€-it-IT] #,##0.00';
     }
   }
 
-  ["A", "B", "C"].forEach((col) => {
+  ["A", "B", "C", "D"].forEach((col) => {
     const headerCell = ws[`${col}1`];
+
     if (headerCell) {
       headerCell.s = {
         ...(headerCell.s || {}),
@@ -56,7 +70,7 @@ function applyStyles(ws: XLSX.WorkSheet, totalRows: number) {
   });
 
   const totalLabelCell = ws[`A${totalRows}`];
-  const totalValueCell = ws[`B${totalRows}`];
+  const totalValueCell = ws[`C${totalRows}`];
 
   if (totalLabelCell) {
     totalLabelCell.s = {
@@ -84,13 +98,20 @@ export function generateCashSummaryPrelieviExcelReport({
   const sortedRows = [...rows]
     .filter((row) => n(row.spese_extra) > 0)
     .sort((a, b) => {
-      return String(a.pv_label ?? "").localeCompare(String(b.pv_label ?? ""));
+      const pvCompare = String(a.pv_label ?? "").localeCompare(
+        String(b.pv_label ?? "")
+      );
+
+      if (pvCompare !== 0) return pvCompare;
+
+      return String(a.data ?? "").localeCompare(String(b.data ?? ""));
     });
 
-  const header = [["PV", "Prelievo", "Note"]];
+  const header = [["PV", "Data", "Prelievo", "Note"]];
 
   const body = sortedRows.map((row) => [
     String(row.pv_label ?? ""),
+    formatDate(row.data),
     n(row.spese_extra),
     String(row.note ?? ""),
   ]);
@@ -100,8 +121,9 @@ export function generateCashSummaryPrelieviExcelReport({
 
   const totalRow = [
     "TOTALE",
+    "",
     {
-      f: body.length > 0 ? `SUBTOTAL(109,B2:B${lastDataRow})` : "0",
+      f: body.length > 0 ? `SUBTOTAL(109,C2:C${lastDataRow})` : "0",
       t: "n",
     },
     "",
@@ -111,12 +133,13 @@ export function generateCashSummaryPrelieviExcelReport({
 
   ws["!cols"] = [
     { wch: 28 }, // PV
+    { wch: 14 }, // Data
     { wch: 16 }, // Prelievo
     { wch: 42 }, // Note
   ];
 
   ws["!autofilter"] = {
-    ref: `A1:C${totalRowIndex}`,
+    ref: `A1:D${totalRowIndex}`,
   };
 
   applyStyles(ws, totalRowIndex);
@@ -124,5 +147,8 @@ export function generateCashSummaryPrelieviExcelReport({
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Prelievi");
 
-  XLSX.writeFile(wb, fileName || buildSafeFileName(pvLabel, dateFrom, dateTo));
+  XLSX.writeFile(
+    wb,
+    fileName || buildSafeFileName(pvLabel, dateFrom, dateTo)
+  );
 }

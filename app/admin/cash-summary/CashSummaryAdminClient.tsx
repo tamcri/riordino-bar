@@ -538,6 +538,44 @@ export default function CashSummaryAdminClient() {
 
   const [chartFondoInitialValue, setChartFondoInitialValue] = useState<number | null>(null);
   const [chartFondoLoading, setChartFondoLoading] = useState(false);
+  const [deletingSummaryId, setDeletingSummaryId] = useState<string | null>(null);
+
+  async function deleteSummary(row: ViewRow) {
+    const confirmed = window.confirm(
+      `Sei sicuro di voler eliminare definitivamente il riepilogo del ${formatLongDate(row.data)} di ${row.pv_label}?`
+    );
+
+    if (!confirmed) return;
+
+    setDeletingSummaryId(row.id);
+    setMsg(null);
+
+    try {
+      const res = await fetch("/api/cash-summary/admin-delete", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          summary_id: row.id,
+        }),
+      });
+
+      const json = await res.json().catch(() => null);
+
+      if (!res.ok || !json?.ok) {
+        setMsg(json?.error || "Errore eliminazione riepilogo");
+        return;
+      }
+
+      setMsg("Riepilogo eliminato correttamente.");
+      await loadRows();
+    } catch {
+      setMsg("Errore di rete durante l'eliminazione del riepilogo.");
+    } finally {
+      setDeletingSummaryId(null);
+    }
+  }
 
   async function loadPvs() {
     try {
@@ -2311,12 +2349,58 @@ export default function CashSummaryAdminClient() {
                   </td>
                   <td className="p-2 text-center">{row.is_closed ? "Chiuso" : "Aperto"}</td>
                   <td className="p-2 text-center">
-                    <a
-                      href={`/admin/cash-summary/${row.id}`}
-                      className="rounded-lg border px-3 py-1 text-sm hover:bg-gray-100"
-                    >
-                      Apri
-                    </a>
+                    <div className="flex items-center justify-center gap-2">
+                      <a
+                        href={`/admin/cash-summary/${row.id}`}
+                        title="Apri riepilogo"
+                        aria-label={`Apri riepilogo ${row.data} ${row.pv_label}`}
+                        className="inline-flex h-9 w-9 items-center justify-center rounded-lg border text-slate-700 transition hover:bg-slate-100"
+                      >
+                        <svg
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          className="h-4 w-4"
+                          aria-hidden="true"
+                        >
+                          <path d="M12 20h9" />
+                          <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                        </svg>
+                      </a>
+
+                      <button
+                        type="button"
+                        onClick={() => deleteSummary(row)}
+                        disabled={deletingSummaryId === row.id}
+                        title="Elimina riepilogo"
+                        aria-label={`Elimina riepilogo ${row.data} ${row.pv_label}`}
+                        className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-red-200 text-red-600 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {deletingSummaryId === row.id ? (
+                          <span className="text-xs font-semibold">...</span>
+                        ) : (
+                          <svg
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            className="h-4 w-4"
+                            aria-hidden="true"
+                          >
+                            <path d="M3 6h18" />
+                            <path d="M8 6V4h8v2" />
+                            <path d="M19 6l-1 14H6L5 6" />
+                            <path d="M10 11v5" />
+                            <path d="M14 11v5" />
+                          </svg>
+                        )}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
