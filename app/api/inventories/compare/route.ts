@@ -296,16 +296,6 @@ export async function POST(req: Request) {
     priceMap.set(code, Number(prezzo));
   }
 
-  if (isRapid) {
-    const gestionaleCodes = new Set(Array.from(gestionaleMap.keys()).map(normCode));
-
-    inventoryLines = inventoryLines.filter((l) => {
-      const codeNorm = normCode(l.code);
-      if (!codeNorm) return false;
-      return gestionaleCodes.has(codeNorm);
-    });
-  }
-
   const normalizedInventoryLabel = currentHeaderLabel.toLowerCase().trim();
   const normalizedCategoryName = String(categoryName || "").toLowerCase().trim();
 
@@ -322,6 +312,20 @@ export async function POST(req: Request) {
     normalizedCategoryName.includes("grattaevinci");
 
   const isFullCompareCategory = isTabacchi || isGrattaEVinci;
+
+  // In rapido, per Tabacchi e Gratta e Vinci il confronto deve essere bidirezionale:
+  // - articoli presenti solo nel gestionale
+  // - articoli presenti solo nell'inventario
+  // Per le altre modalità manteniamo il comportamento precedente.
+  if (isRapid && !isFullCompareCategory) {
+    const gestionaleCodes = new Set(Array.from(gestionaleMap.keys()).map(normCode));
+
+    inventoryLines = inventoryLines.filter((l) => {
+      const codeNorm = normCode(l.code);
+      if (!codeNorm) return false;
+      return gestionaleCodes.has(codeNorm);
+    });
+  }
 
   const compareLines = isFullCompareCategory
     ? buildCompareLines(inventoryLines, gestionaleMap, {
