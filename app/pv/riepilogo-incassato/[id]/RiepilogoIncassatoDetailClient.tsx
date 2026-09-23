@@ -245,13 +245,6 @@ export default function RiepilogoIncassatoDetailClient({ id }: { id: string }) {
   function addSupplierPayment() {
     if (!supplierCode || !supplierName || supplierAmount === null) return;
 
-    const alreadyExists = supplierPayments.some((s) => s.code === supplierCode);
-
-    if (alreadyExists) {
-      alert("Questo fornitore è già stato inserito.");
-      return;
-    }
-
     const newPayment: SupplierPayment = {
       id: Date.now(),
       code: supplierCode,
