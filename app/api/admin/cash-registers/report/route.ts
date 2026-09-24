@@ -31,7 +31,6 @@ function shouldShowCashRegister(item: {
   next_verification_date: string | null;
 }) {
   if (item.label === 'Cassa 1') return true;
-
   if (item.is_enabled) return true;
 
   return Boolean(
@@ -41,9 +40,7 @@ function shouldShowCashRegister(item: {
   );
 }
 
-function formatDateIT(
-  value: string | null | undefined,
-) {
+function formatDateIT(value: string | null | undefined) {
   if (!value) return '-';
 
   const parts = value.split('-');
@@ -57,9 +54,7 @@ function formatDateIT(
   return `${day}/${month}/${year}`;
 }
 
-function sanitizePdfText(
-  value: string | null | undefined,
-) {
+function sanitizePdfText(value: string | null | undefined) {
   if (!value) return '';
 
   return value
@@ -70,10 +65,7 @@ function sanitizePdfText(
     .trim();
 }
 
-function truncate(
-  value: string,
-  maxLength: number,
-) {
+function truncate(value: string, maxLength: number) {
   if (value.length <= maxLength) {
     return value;
   }
@@ -88,10 +80,9 @@ async function embedQrImage(
   if (!path) return null;
 
   try {
-    const { data, error } =
-      await supabaseAdmin.storage
-        .from(STORAGE_BUCKET)
-        .download(path);
+    const { data, error } = await supabaseAdmin.storage
+      .from(STORAGE_BUCKET)
+      .download(path);
 
     if (error || !data) {
       console.error(
@@ -106,11 +97,8 @@ async function embedQrImage(
       await data.arrayBuffer(),
     );
 
-    const contentType =
-      data.type?.toLowerCase() ?? '';
-
-    const lowerPath =
-      path.toLowerCase();
+    const contentType = data.type?.toLowerCase() ?? '';
+    const lowerPath = path.toLowerCase();
 
     if (
       contentType.includes('png') ||
@@ -208,11 +196,9 @@ export async function GET() {
       );
     }
 
-    const filteredPvs =
-      (pvs ?? []).filter(
-        (pv) =>
-          !EXCLUDED_PV_IDS.includes(pv.id),
-      );
+    const filteredPvs = (pvs ?? []).filter(
+      (pv) => !EXCLUDED_PV_IDS.includes(pv.id),
+    );
 
     const pvMap = new Map(
       filteredPvs.map((pv) => [
@@ -224,221 +210,160 @@ export async function GET() {
       ]),
     );
 
-    const rows =
-      [...(cashRegisters ?? [])]
-        .filter((item) =>
-          pvMap.has(item.pv_id),
-        )
-        .filter((item) =>
-          shouldShowCashRegister(item),
-        )
-        .sort((a, b) => {
-          const pvA =
-            pvMap.get(a.pv_id);
+    const rows = [...(cashRegisters ?? [])]
+      .filter((item) => pvMap.has(item.pv_id))
+      .filter((item) => shouldShowCashRegister(item))
+      .sort((a, b) => {
+        const pvA = pvMap.get(a.pv_id);
+        const pvB = pvMap.get(b.pv_id);
 
-          const pvB =
-            pvMap.get(b.pv_id);
+        const codeA = pvA?.code ?? '';
+        const codeB = pvB?.code ?? '';
 
-          const codeA =
-            pvA?.code ?? '';
+        if (codeA !== codeB) {
+          return codeA.localeCompare(codeB, 'it');
+        }
 
-          const codeB =
-            pvB?.code ?? '';
+        const numberA = Number(
+          a.label.match(/\d+/)?.[0] ?? 0,
+        );
 
-          if (codeA !== codeB) {
-            return codeA.localeCompare(
-              codeB,
-              'it',
-            );
-          }
+        const numberB = Number(
+          b.label.match(/\d+/)?.[0] ?? 0,
+        );
 
-          const numberA =
-            Number(
-              a.label.match(/\d+/)?.[0] ??
-                0,
-            );
+        return numberA - numberB;
+      })
+      .map((item) => {
+        const pv = pvMap.get(item.pv_id);
 
-          const numberB =
-            Number(
-              b.label.match(/\d+/)?.[0] ??
-                0,
-            );
+        return {
+          pv_code: sanitizePdfText(pv?.code ?? ''),
+          pv_name: sanitizePdfText(pv?.name ?? ''),
+          label: sanitizePdfText(item.label),
 
-          return numberA - numberB;
-        })
-        .map((item) => {
-          const pv =
-            pvMap.get(item.pv_id);
+          identifier: sanitizePdfText(
+            item.identifier ?? '-',
+          ),
 
-          return {
-            pv_code:
-              sanitizePdfText(
-                pv?.code ?? '',
-              ),
+          qr_image_path: item.qr_image_url,
 
-            pv_name:
-              sanitizePdfText(
-                pv?.name ?? '',
-              ),
+          last_verification_date: formatDateIT(
+            item.last_verification_date,
+          ),
 
-            label:
-              sanitizePdfText(
-                item.label,
-              ),
+          next_verification_date: formatDateIT(
+            item.next_verification_date,
+          ),
 
-            identifier:
-              sanitizePdfText(
-                item.identifier ?? '-',
-              ),
-
-            qr_image_path:
-              item.qr_image_url,
-
-            last_verification_date:
-              formatDateIT(
-                item.last_verification_date,
-              ),
-
-            next_verification_date:
-              formatDateIT(
-                item.next_verification_date,
-              ),
-
-            status_label:
-              sanitizePdfText(
-                getCashRegisterStatusLabel(
-                  item.next_verification_date,
-                ),
-              ),
-
-            alert:
-              sanitizePdfText(
-                getCashRegisterAlert(
-                  item.next_verification_date,
-                ),
-              ),
-          };
-        });
-
-    const pdfDoc =
-      await PDFDocument.create();
-
-    const font =
-      await pdfDoc.embedFont(
-        StandardFonts.Helvetica,
-      );
-
-    const fontBold =
-      await pdfDoc.embedFont(
-        StandardFonts.HelveticaBold,
-      );
-
-    /*
-     * Prepariamo prima le immagini QR.
-     * Così durante il disegno del PDF
-     * sono già disponibili.
-     */
-    const rowsWithQr =
-      await Promise.all(
-        rows.map(async (row) => ({
-          ...row,
-
-          qrImage:
-            await embedQrImage(
-              pdfDoc,
-              row.qr_image_path,
+          status_label: sanitizePdfText(
+            getCashRegisterStatusLabel(
+              item.next_verification_date,
             ),
-        })),
-      );
+          ),
 
-    /*
-     * A4 landscape.
-     */
-    let page =
-      pdfDoc.addPage([
-        842,
-        595,
-      ]);
+          alert: sanitizePdfText(
+            getCashRegisterAlert(
+              item.next_verification_date,
+            ),
+          ),
+        };
+      });
 
-    let {
-      width,
-      height,
-    } = page.getSize();
+    const pdfDoc = await PDFDocument.create();
+
+    const font = await pdfDoc.embedFont(
+      StandardFonts.Helvetica,
+    );
+
+    const fontBold = await pdfDoc.embedFont(
+      StandardFonts.HelveticaBold,
+    );
+
+    const rowsWithQr = await Promise.all(
+      rows.map(async (row) => ({
+        ...row,
+
+        qrImage: await embedQrImage(
+          pdfDoc,
+          row.qr_image_path,
+        ),
+      })),
+    );
+
+    // A4 landscape
+    let page = pdfDoc.addPage([842, 595]);
+
+    let { width, height } = page.getSize();
 
     const margin = 28;
 
+    // Più spazio verticale per QR più grande
+    const rowHeight = 72;
+
+    // QR più grande
+    const qrSize = 68;
+
+    const headerY = height - margin;
+
     /*
-     * La riga è più alta rispetto al vecchio
-     * report perché ora dobbiamo ospitare il QR.
+     * Colonne riequilibrate:
+     * meno spazio sprecato su Stato/Alert,
+     * più spazio dedicato al QR.
      */
-    const rowHeight = 54;
-
-    const qrSize = 42;
-
-    const headerY =
-      height - margin;
-
     const columns = [
       {
         key: 'pv',
         label: 'PV',
         x: 28,
-        width: 132,
+        width: 120,
       },
-
       {
         key: 'cassa',
         label: 'Cassa',
-        x: 160,
-        width: 55,
+        x: 148,
+        width: 52,
       },
-
       {
         key: 'identifier',
         label: 'Identificativo',
-        x: 215,
-        width: 100,
+        x: 200,
+        width: 95,
       },
-
       {
         key: 'qr',
         label: 'QR',
-        x: 315,
-        width: 55,
+        x: 295,
+        width: 80,
       },
-
       {
         key: 'ultima',
         label: 'Ultima',
-        x: 370,
-        width: 82,
+        x: 375,
+        width: 78,
       },
-
       {
         key: 'prossima',
         label: 'Prossima',
-        x: 452,
-        width: 82,
+        x: 453,
+        width: 78,
       },
-
       {
         key: 'stato',
         label: 'Stato',
-        x: 534,
-        width: 110,
+        x: 531,
+        width: 95,
       },
-
       {
         key: 'alert',
         label: 'Alert',
-        x: 644,
-        width: 165,
+        x: 626,
+        width: 183,
       },
     ] as const;
 
     function drawPageHeader(
-      currentPage:
-        typeof page,
+      currentPage: typeof page,
       titleDate: string,
     ) {
       currentPage.drawText(
@@ -461,112 +386,74 @@ export async function GET() {
         },
       );
 
-      const tableHeaderY =
-        headerY - 46;
+      const tableHeaderY = headerY - 46;
 
       currentPage.drawLine({
         start: {
           x: margin,
           y: tableHeaderY + 16,
         },
-
         end: {
           x: width - margin,
           y: tableHeaderY + 16,
         },
-
         thickness: 1,
       });
 
-      columns.forEach(
-        (column) => {
-          currentPage.drawText(
-            column.label,
-            {
-              x: column.x,
-              y: tableHeaderY,
-              size: 8.5,
-              font: fontBold,
-            },
-          );
-        },
-      );
+      columns.forEach((column) => {
+        currentPage.drawText(column.label, {
+          x: column.x,
+          y: tableHeaderY,
+          size: 8.5,
+          font: fontBold,
+        });
+      });
 
       currentPage.drawLine({
         start: {
           x: margin,
           y: tableHeaderY - 6,
         },
-
         end: {
           x: width - margin,
           y: tableHeaderY - 6,
         },
-
         thickness: 1,
       });
 
-      return (
-        tableHeaderY -
-        rowHeight
-      );
+      return tableHeaderY - rowHeight;
     }
 
-    const generatedAt =
-      new Date().toLocaleString(
-        'it-IT',
-      );
+    const generatedAt = new Date().toLocaleString('it-IT');
 
-    let y =
-      drawPageHeader(
-        page,
-        generatedAt,
-      );
+    let y = drawPageHeader(
+      page,
+      generatedAt,
+    );
 
-    for (
-      const row of rowsWithQr
-    ) {
-      if (
-        y <
-        margin + 10
-      ) {
-        page =
-          pdfDoc.addPage([
-            842,
-            595,
-          ]);
+    for (const row of rowsWithQr) {
+      if (y < margin + 10) {
+        page = pdfDoc.addPage([842, 595]);
 
-        ({
-          width,
-          height,
-        } = page.getSize());
+        ({ width, height } = page.getSize());
 
-        y =
-          drawPageHeader(
-            page,
-            generatedAt,
-          );
+        y = drawPageHeader(
+          page,
+          generatedAt,
+        );
       }
 
-      const rowBottom =
-        y - 8;
+      const rowBottom = y - 8;
 
       /*
-       * Se la cassa è scaduta,
-       * manteniamo l'evidenziazione rossa.
+       * Evidenziazione delle casse scadute.
        */
-      if (
-        row.status_label ===
-        'Scaduta'
-      ) {
+      if (row.status_label === 'Scaduta') {
         page.drawRectangle({
           x: margin,
           y: rowBottom,
-          width:
-            width -
-            margin * 2,
-          height:
-            rowHeight - 2,
+          width: width - margin * 2,
+          height: rowHeight - 2,
           color: rgb(
             1,
             0.9,
@@ -575,53 +462,48 @@ export async function GET() {
         });
       }
 
+      /*
+       * Testi centrati verticalmente rispetto alla riga.
+       */
       const textY =
-        y +
+        rowBottom +
         rowHeight / 2 -
-        24;
+        3;
 
-      const pvText =
-        truncate(
-          `${row.pv_code} - ${row.pv_name}`,
-          23,
-        );
+      const pvText = truncate(
+        `${row.pv_code} - ${row.pv_name}`,
+        21,
+      );
 
-      const cassaText =
-        truncate(
-          row.label,
-          10,
-        );
+      const cassaText = truncate(
+        row.label,
+        9,
+      );
 
-      const identifierText =
-        truncate(
-          row.identifier ||
-            '-',
-          15,
-        );
+      const identifierText = truncate(
+        row.identifier || '-',
+        14,
+      );
 
-      const ultimaText =
-        truncate(
-          row.last_verification_date,
-          12,
-        );
+      const ultimaText = truncate(
+        row.last_verification_date,
+        12,
+      );
 
-      const prossimaText =
-        truncate(
-          row.next_verification_date,
-          12,
-        );
+      const prossimaText = truncate(
+        row.next_verification_date,
+        12,
+      );
 
-      const statoText =
-        truncate(
-          row.status_label,
-          20,
-        );
+      const statoText = truncate(
+        row.status_label,
+        18,
+      );
 
-      const alertText =
-        truncate(
-          row.alert,
-          27,
-        );
+      const alertText = truncate(
+        row.alert,
+        26,
+      );
 
       page.drawText(
         pvText,
@@ -654,65 +536,52 @@ export async function GET() {
       );
 
       /*
-       * Disegno QR.
+       * QR
        */
       if (row.qrImage) {
-        const dimensions =
-          row.qrImage.scale(1);
+        const dimensions = row.qrImage.scale(1);
 
-        const maxDimension =
-          Math.max(
-            dimensions.width,
-            dimensions.height,
-          );
+        const maxDimension = Math.max(
+          dimensions.width,
+          dimensions.height,
+        );
 
-        const scale =
-          qrSize /
-          maxDimension;
+        const scale = qrSize / maxDimension;
 
         const imageWidth =
-          dimensions.width *
-          scale;
+          dimensions.width * scale;
 
         const imageHeight =
-          dimensions.height *
-          scale;
+          dimensions.height * scale;
 
         page.drawImage(
           row.qrImage,
           {
+            /*
+             * Centrato nella colonna QR.
+             * +4 lo sposta leggermente verso destra
+             * rispetto all'inizio della colonna.
+             */
             x:
               columns[3].x +
-              (qrSize -
-                imageWidth) /
-                2,
+              4 +
+              (qrSize - imageWidth) / 2,
 
             y:
               rowBottom +
-              (
-                rowHeight -
-                imageHeight
-              ) /
-                2,
+              (rowHeight - imageHeight) / 2,
 
-            width:
-              imageWidth,
+            width: imageWidth,
 
-            height:
-              imageHeight,
+            height: imageHeight,
           },
         );
       } else {
         page.drawText(
           '-',
           {
-            x:
-              columns[3].x +
-              18,
-
-            y:
-              textY,
-
+            x: columns[3].x + 26,
+            y: textY,
             size: 9,
             font,
           },
@@ -764,16 +633,11 @@ export async function GET() {
           x: margin,
           y: rowBottom,
         },
-
         end: {
-          x:
-            width -
-            margin,
+          x: width - margin,
           y: rowBottom,
         },
-
         thickness: 0.5,
-
         color: rgb(
           0.75,
           0.75,
@@ -784,25 +648,19 @@ export async function GET() {
       y -= rowHeight;
     }
 
-    const pdfBytes =
-      await pdfDoc.save();
+    const pdfBytes = await pdfDoc.save();
 
     return new NextResponse(
-      Buffer.from(
-        pdfBytes,
-      ),
+      Buffer.from(pdfBytes),
       {
         status: 200,
-
         headers: {
-          'Content-Type':
-            'application/pdf',
+          'Content-Type': 'application/pdf',
 
           'Content-Disposition':
             'attachment; filename="verifica-cassa-report.pdf"',
 
-          'Cache-Control':
-            'no-store',
+          'Cache-Control': 'no-store',
         },
       },
     );
