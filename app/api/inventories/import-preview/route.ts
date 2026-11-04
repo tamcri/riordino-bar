@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireRole } from "@/lib/auth";
 import * as XLSX from "xlsx";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
@@ -45,6 +46,16 @@ function findColumn(row: Record<string, any>, candidates: string[]) {
 }
 
 export async function POST(req: Request) {
+  try {
+    await requireRole(["admin", "amministrativo", "punto_vendita"]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "UNAUTHORIZED";
+    return NextResponse.json(
+      { ok: false, error: message === "FORBIDDEN" ? "Non autorizzato" : "Non autenticato" },
+      { status: message === "FORBIDDEN" ? 403 : 401 }
+    );
+  }
+
   try {
     const formData = await req.formData();
     const file = formData.get("file");

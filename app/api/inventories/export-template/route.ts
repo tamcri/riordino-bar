@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireRole } from "@/lib/auth";
 import * as XLSX from "xlsx";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
@@ -28,6 +29,16 @@ function todayFileDate() {
 }
 
 export async function GET(req: Request) {
+  try {
+    await requireRole(["admin", "amministrativo", "punto_vendita"]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "UNAUTHORIZED";
+    return NextResponse.json(
+      { ok: false, error: message === "FORBIDDEN" ? "Non autorizzato" : "Non autenticato" },
+      { status: message === "FORBIDDEN" ? 403 : 401 }
+    );
+  }
+
   try {
     const url = new URL(req.url);
     const label = String(url.searchParams.get("label") || "").trim();

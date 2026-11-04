@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireRole } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 export const runtime = "nodejs";
@@ -21,6 +22,16 @@ function calcPriceVat(price: number | null, vat: number | null) {
 }
 
 export async function GET() {
+  try {
+    await requireRole(["admin", "amministrativo"]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "UNAUTHORIZED";
+    return NextResponse.json(
+      { ok: false, error: message === "FORBIDDEN" ? "Non autorizzato" : "Non autenticato" },
+      { status: message === "FORBIDDEN" ? 403 : 401 }
+    );
+  }
+
   try {
     // 1. deposito
     const { data: depositRows, error: depositError } = await supabaseAdmin
