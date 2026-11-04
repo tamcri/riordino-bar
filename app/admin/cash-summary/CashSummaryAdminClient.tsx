@@ -50,6 +50,7 @@ type RawRow = {
   pos: number | null;
   spese_extra: number | null;
   prelievo_note?: string | null;
+  admin_note?: string | null;
   vendita_gv: number | null;
   vendita_tabacchi: number | null;
   da_versare: number | null;
@@ -73,6 +74,7 @@ type ViewRow = {
   pos: number;
   spese_extra: number;
   prelievo_note: string;
+  admin_note: string;
   vendita_gv: number;
   vendita_tabacchi: number;
   saldo_giorno: number;
@@ -539,6 +541,7 @@ export default function CashSummaryAdminClient() {
   const [chartFondoInitialValue, setChartFondoInitialValue] = useState<number | null>(null);
   const [chartFondoLoading, setChartFondoLoading] = useState(false);
   const [deletingSummaryId, setDeletingSummaryId] = useState<string | null>(null);
+  const [notePreview, setNotePreview] = useState<{ date: string; pv: string; text: string } | null>(null);
 
   async function deleteSummary(row: ViewRow) {
     const confirmed = window.confirm(
@@ -1010,6 +1013,7 @@ export default function CashSummaryAdminClient() {
         pos: n(row.pos),
         spese_extra: n(row.spese_extra),
         prelievo_note: String(commentsBySummary[row.id] ?? row.prelievo_note ?? ""),
+        admin_note: String(row.admin_note ?? ""),
         vendita_gv: n(row.vendita_gv),
         vendita_tabacchi: n(row.vendita_tabacchi),
         saldo_giorno: saldoGiorno,
@@ -2371,6 +2375,21 @@ export default function CashSummaryAdminClient() {
                         </svg>
                       </a>
 
+                      {row.admin_note.trim() !== "" && (
+                        <button
+                          type="button"
+                          onClick={() => setNotePreview({ date: row.data, pv: row.pv_label, text: row.admin_note })}
+                          title="Visualizza nota riepilogo"
+                          aria-label={`Visualizza nota riepilogo ${row.data} ${row.pv_label}`}
+                          className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-amber-300 bg-amber-50 text-amber-700 transition hover:bg-amber-100"
+                        >
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4" aria-hidden="true">
+                            <path d="M8 10h8M8 14h5" />
+                            <path d="M4 4h16v16H4z" />
+                          </svg>
+                        </button>
+                      )}
+
                       <button
                         type="button"
                         onClick={() => deleteSummary(row)}
@@ -2424,6 +2443,21 @@ export default function CashSummaryAdminClient() {
           </table>
         </div>
       </section>
+
+      {notePreview && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4" onMouseDown={(e) => { if (e.target === e.currentTarget) setNotePreview(null); }}>
+          <div role="dialog" aria-modal="true" aria-labelledby="cash-note-dialog-title" className="w-full max-w-xl rounded-2xl bg-white p-5 shadow-xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 id="cash-note-dialog-title" className="text-lg font-semibold text-slate-900">Nota riepilogo</h3>
+                <p className="mt-1 text-sm text-gray-500">{formatLongDate(notePreview.date)} — {notePreview.pv}</p>
+              </div>
+              <button type="button" className="rounded-lg border px-3 py-1.5 text-sm hover:bg-gray-50" onClick={() => setNotePreview(null)}>Chiudi</button>
+            </div>
+            <div className="mt-4 max-h-[60vh] overflow-y-auto whitespace-pre-wrap break-words rounded-xl border bg-slate-50 p-4 text-sm text-slate-800">{notePreview.text}</div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

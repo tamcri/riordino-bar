@@ -612,33 +612,44 @@ export default function HistoryClient() {
                   <div className="flex flex-col">
                     <MenuItemLink href={`/api/reorder/history/${id}/excel`} label="Excel" />
 
-                    <MenuItemLink
-                      href={isTAB ? `/api/reorder/history/${id}/u88` : "#"}
-                      label="U88"
-                      disabled={!isTAB}
-                      title={isTAB ? "Scarica U88 compilato" : "U88 disponibile solo per TAB"}
-                    />
+                    {isTAB && (
+                      <>
+                        <MenuItemLink
+                          href={`/api/reorder/history/${id}/u88`}
+                          label="U88"
+                          title="Scarica U88 compilato"
+                        />
 
-                    {canPAT && <MenuItemLink href={`/api/reorder/history/${id}/pat`} label="PAT" title="Scarica PAT" />}
+                        {canPAT && (
+                          <MenuItemLink
+                            href={`/api/reorder/history/${id}/pat`}
+                            label="PAT"
+                            title="Scarica PAT"
+                          />
+                        )}
 
-                    <div className="my-2 border-t" />
+                        <div className="my-2 border-t" />
 
-                    <MenuItemLink
-                      href={isTAB ? `/api/reorder/history/${id}/order-tab` : "#"}
-                      label="Log"
-                      disabled={!isTAB}
-                      title={isTAB ? "Scarica Order Tab compilato" : "Order Tab disponibile solo per TAB"}
-                    />
+                        <MenuItemLink
+                          href={`/api/reorder/history/${id}/order-tab`}
+                          label="Log"
+                          title="Scarica Order Tab compilato"
+                        />
 
-                    <MenuItemLink
-                      href={isTAB ? `/api/reorder/history/${id}/log-car` : "#"}
-                      label="LOG CAR"
-                      disabled={!isTAB}
-                      title={isTAB ? "Scarica LOG CAR" : "LOG CAR disponibile solo per TAB"}
-                    />
+                        <MenuItemLink
+                          href={`/api/reorder/history/${id}/log-car`}
+                          label="LOG CAR"
+                          title="Scarica LOG CAR"
+                        />
 
-                    {isAdmin && (
-                      <MenuItemLink href={`/api/reorder/history/${id}/log`} label="Json" title="Scarica JSON log" />
+                        {isAdmin && (
+                          <MenuItemLink
+                            href={`/api/reorder/history/${id}/log`}
+                            label="Json"
+                            title="Scarica JSON log"
+                          />
+                        )}
+                      </>
                     )}
 
                     {canDelete && (

@@ -62,6 +62,7 @@ export async function GET(req: Request) {
         da_versare,
         tot_versato,
         fondo_cassa,
+        admin_note,
         is_closed,
         pvs:pvs!inner(
           code,

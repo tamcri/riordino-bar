@@ -235,8 +235,37 @@ export async function processReorderGVExcel(
   qtaDaOrdinare = basePack + aggiunta;
 }
 
-    const prezzo = priceMap[codArticolo] || 0;
-    const valoreDaOrdinare = qtaDaOrdinare * fattco * prezzo;
+    // Usa prima il prezzo anagrafico. Se manca, prova a ricavare
+    // il prezzo unitario dal valore delle vendite o delle giacenze
+    // presenti nel file di origine (valori riferiti ai singoli biglietti).
+    const prezzoAnagrafica = Number(priceMap[codArticolo]);
+    const prezzoDaVendite =
+      qtaVenduta > 0 && valoreVenduto > 0
+        ? valoreVenduto / qtaVenduta
+        : 0;
+    const prezzoDaGiacenza =
+      giacenzaBarQty > 0 && valoreGiacenzaBar > 0
+        ? valoreGiacenzaBar / giacenzaBarQty
+        : 0;
+
+    const prezzo =
+      Number.isFinite(prezzoAnagrafica) && prezzoAnagrafica > 0
+        ? prezzoAnagrafica
+        : prezzoDaVendite > 0 && Number.isFinite(prezzoDaVendite)
+          ? prezzoDaVendite
+          : prezzoDaGiacenza > 0 && Number.isFinite(prezzoDaGiacenza)
+            ? prezzoDaGiacenza
+            : 0;
+
+    // Non generare silenziosamente importi a zero per articoli da ordinare.
+    if (qtaDaOrdinare > 0 && !(prezzo > 0)) {
+      throw new Error(
+        `Prezzo unitario non disponibile per l'articolo ${codArticolo}`
+      );
+    }
+
+    const valoreDaOrdinare =
+      Math.round(qtaDaOrdinare * fattco * prezzo * 100) / 100;
 
     rows.push({
       codArticolo,

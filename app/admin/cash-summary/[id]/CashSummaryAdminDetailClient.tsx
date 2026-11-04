@@ -35,6 +35,7 @@ type SummaryRow = {
   fondo_cassa: number | null;
   status?: string | null;
   is_closed: boolean;
+  admin_note?: string | null;
   pvs?: PvJoin | PvJoin[] | null;
 };
 
@@ -1256,6 +1257,18 @@ export default function CashSummaryAdminDetailClient({ id }: { id: string }) {
             )}
           />
         </div>
+      </section>
+
+      <section className="rounded-2xl border bg-white p-4">
+        <h2 className="text-lg font-semibold">Note</h2>
+        <p className="mt-1 text-sm text-gray-600">Annotazioni generali del riepilogo. Sono separate dalle note dei singoli campi.</p>
+        <textarea
+          className="mt-4 min-h-[120px] w-full resize-y rounded-xl border bg-white p-3 text-sm"
+          placeholder="Scrivi qui una nota sul riepilogo..."
+          value={summary.admin_note ?? ""}
+          maxLength={10000}
+          onChange={(e) => setSummary({ ...summary, admin_note: e.target.value })}
+        />
       </section>
 
       {supplierModalOpen && (

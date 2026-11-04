@@ -33,6 +33,7 @@ type Body = {
   status?: string | null;
   suppliers?: SupplierInput[];
   field_comments?: Record<string, string>;
+  admin_note?: string | null;
 };
 
 const ALLOWED_COMMENT_FIELDS = new Set([
@@ -159,6 +160,14 @@ export async function POST(req: Request) {
     const id = String(body.id ?? "").trim();
     const data = String(body.data ?? "").trim();
     const operatore = String(body.operatore ?? "").trim();
+    const adminNoteProvided = Object.prototype.hasOwnProperty.call(body, "admin_note");
+    if (adminNoteProvided && body.admin_note !== null && typeof body.admin_note !== "string") {
+      return NextResponse.json({ ok: false, error: "Nota non valida" }, { status: 400 });
+    }
+    const admin_note = String(body.admin_note ?? "").trim();
+    if (admin_note.length > 10000) {
+      return NextResponse.json({ ok: false, error: "La nota supera 10000 caratteri" }, { status: 400 });
+    }
 
     if (!isUuid(id)) {
       return NextResponse.json(
@@ -403,6 +412,7 @@ export async function POST(req: Request) {
       fondo_cassa,
       status,
       is_closed,
+      ...(adminNoteProvided ? { admin_note } : {}),
       updated_at: new Date().toISOString(),
     };
 
