@@ -1,4 +1,6 @@
 import { NextResponse } from 'next/server';
+import { cookies } from 'next/headers';
+import { COOKIE_NAME, parseSessionValue } from '@/lib/auth';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import {
   getCashRegisterAlert,
@@ -48,6 +50,16 @@ async function buildSignedUrl(path: string | null) {
 
 export async function GET() {
   try {
+    const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
+
+    if (!session) {
+      return NextResponse.json({ error: 'Non autenticato' }, { status: 401 });
+    }
+
+    if (session.role !== 'admin') {
+      return NextResponse.json({ error: 'Non autorizzato' }, { status: 403 });
+    }
+
     const [{ data: pvs, error: pvsError }, { data: cashRegisters, error: cashRegistersError }] =
       await Promise.all([
         supabaseAdmin

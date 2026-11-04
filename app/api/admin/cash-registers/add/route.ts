@@ -1,4 +1,6 @@
 import { NextResponse } from 'next/server';
+import { cookies } from 'next/headers';
+import { COOKIE_NAME, parseSessionValue } from '@/lib/auth';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
 export const dynamic = 'force-dynamic';
@@ -7,6 +9,16 @@ export const fetchCache = 'force-no-store';
 
 export async function POST(req: Request) {
   try {
+    const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
+
+    if (!session) {
+      return NextResponse.json({ error: 'Non autenticato' }, { status: 401 });
+    }
+
+    if (session.role !== 'admin') {
+      return NextResponse.json({ error: 'Non autorizzato' }, { status: 403 });
+    }
+
     const body = await req.json();
     const pvId = String(body?.pv_id ?? '').trim();
 

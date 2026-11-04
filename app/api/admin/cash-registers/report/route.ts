@@ -1,4 +1,7 @@
 import { NextResponse } from 'next/server';
+import { cookies } from 'next/headers';
+import { COOKIE_NAME, parseSessionValue } from '@/lib/auth';
+
 import {
   PDFDocument,
   StandardFonts,
@@ -133,6 +136,14 @@ async function embedQrImage(
 
 export async function GET() {
   try {
+    const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
+    if (!session) {
+      return NextResponse.json({ error: 'Non autenticato' }, { status: 401 });
+    }
+    if (session.role !== 'admin') {
+      return NextResponse.json({ error: 'Non autorizzato' }, { status: 403 });
+    }
+
     const [
       {
         data: pvs,
