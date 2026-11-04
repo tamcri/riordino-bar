@@ -212,19 +212,30 @@ export async function GET(req: Request) {
       new Set(rows.map((row: any) => String(row?.id ?? "").trim()).filter(Boolean))
     );
 
+    // Evita richieste PostgREST troppo lunghe quando il periodo include molti PV.
+    // I risultati vengono ricomposti senza cambiare il formato della risposta API.
+    const summaryIdChunks: string[][] = [];
+    for (let offset = 0; offset < summaryIds.length; offset += 100) {
+      summaryIdChunks.push(summaryIds.slice(offset, offset + 100));
+    }
+
     let checks_by_summary: Record<string, Record<string, "ok" | "check">> = {};
 
     if (summaryIds.length > 0) {
-      const { data: checkRows, error: checkErr } = await supabaseAdmin
-        .from("cash_summary_metric_checks")
-        .select("summary_id, metric_key, status")
-        .in("summary_id", summaryIds);
+      const allCheckRows: any[] = [];
+      for (const ids of summaryIdChunks) {
+        const { data: checkRows, error: checkErr } = await supabaseAdmin
+          .from("cash_summary_metric_checks")
+          .select("summary_id, metric_key, status")
+          .in("summary_id", ids);
 
-      if (checkErr) {
-        return NextResponse.json({ ok: false, error: checkErr.message }, { status: 500 });
+        if (checkErr) {
+          return NextResponse.json({ ok: false, error: checkErr.message }, { status: 500 });
+        }
+        allCheckRows.push(...(checkRows ?? []));
       }
 
-      checks_by_summary = (checkRows ?? []).reduce(
+      checks_by_summary = allCheckRows.reduce(
         (acc: Record<string, Record<string, "ok" | "check">>, row: any) => {
           const summaryId = String(row?.summary_id ?? "").trim();
           const metricKey = String(row?.metric_key ?? "").trim();
@@ -248,17 +259,21 @@ export async function GET(req: Request) {
     let comments_by_summary: Record<string, string> = {};
 
     if (summaryIds.length > 0) {
-      const { data: commentRows, error: commentErr } = await supabaseAdmin
-        .from("cash_summary_field_comments")
-        .select("summary_id, field_key, comment_text")
-        .in("summary_id", summaryIds)
-        .eq("field_key", "spese_extra");
+      const allCommentRows: any[] = [];
+      for (const ids of summaryIdChunks) {
+        const { data: commentRows, error: commentErr } = await supabaseAdmin
+          .from("cash_summary_field_comments")
+          .select("summary_id, field_key, comment_text")
+          .in("summary_id", ids)
+          .eq("field_key", "spese_extra");
 
-      if (commentErr) {
-        return NextResponse.json({ ok: false, error: commentErr.message }, { status: 500 });
+        if (commentErr) {
+          return NextResponse.json({ ok: false, error: commentErr.message }, { status: 500 });
+        }
+        allCommentRows.push(...(commentRows ?? []));
       }
 
-      comments_by_summary = (commentRows ?? []).reduce(
+      comments_by_summary = allCommentRows.reduce(
         (acc: Record<string, string>, row: any) => {
           const summaryId = String(row?.summary_id ?? "").trim();
           const commentText = String(row?.comment_text ?? "").trim();

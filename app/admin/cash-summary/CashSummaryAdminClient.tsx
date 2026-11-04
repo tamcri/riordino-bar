@@ -498,6 +498,35 @@ function drawSimpleLineChart(
   });
 }
 
+// Confronto tra intervalli: conserva i giorni del mese, limitando quelli inesistenti
+// (es. 31 ottobre -> 30 settembre), e mantiene eventuali mesi successivi.
+function shiftDateToMonth(iso: string, targetMonth: string, sourceMonth: string) {
+  const [year, month, day] = iso.split("-").map(Number);
+  const [targetYear, targetMonthNumber] = targetMonth.split("-").map(Number);
+  const [sourceYear, sourceMonthNumber] = sourceMonth.split("-").map(Number);
+  if (![year, month, day, targetYear, targetMonthNumber, sourceYear, sourceMonthNumber].every(Number.isInteger)) return "";
+  const offset = (year * 12 + month - 1) - (sourceYear * 12 + sourceMonthNumber - 1);
+  const targetIndex = targetYear * 12 + targetMonthNumber - 1 + offset;
+  const resultYear = Math.floor(targetIndex / 12);
+  const resultMonth = (targetIndex % 12) + 1;
+  const lastDay = new Date(Date.UTC(resultYear, resultMonth, 0)).getUTCDate();
+  const dayClamped = Math.min(day, lastDay);
+  return `${resultYear}-${String(resultMonth).padStart(2, "0")}-${String(dayClamped).padStart(2, "0")}`;
+}
+
+function monthBefore(isoMonth: string, howMany = 1) {
+  const [year, month] = isoMonth.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1 - howMany, 1));
+  return date.toISOString().slice(0, 7);
+}
+
+function monthDisplayName(value: string) {
+  const [year, month] = value.split("-").map(Number);
+  const label = new Intl.DateTimeFormat("it-IT", { month: "long", year: "numeric", timeZone: "UTC" })
+    .format(new Date(Date.UTC(year, month - 1, 1)));
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
 export default function CashSummaryAdminClient() {
   const reportChartRef = useRef<HTMLDivElement | null>(null);
 
@@ -523,6 +552,12 @@ export default function CashSummaryAdminClient() {
 
   const [selectedComparePvIds, setSelectedComparePvIds] = useState<string[]>([]);
   const [activeComparePvId, setActiveComparePvId] = useState<string | null>(null);
+
+  // Stato isolato: la scelta del mese non modifica grafici, filtri o storico.
+  const [comparisonMonth, setComparisonMonth] = useState(() => monthBefore(firstDayOfCurrentMonthISO().slice(0, 7)));
+  const [previousPeriodRows, setPreviousPeriodRows] = useState<Array<{ pv_id: string; data: string; value: number | null }>>([]);
+  const [comparisonLoading, setComparisonLoading] = useState(false);
+  const [comparisonError, setComparisonError] = useState<string | null>(null);
 
   const [showBalanceBlock, setShowBalanceBlock] = useState(false);
   const [showFondoBlock, setShowFondoBlock] = useState(false);
@@ -1146,6 +1181,118 @@ export default function CashSummaryAdminClient() {
 
     return Array.from(map.values()).sort((a, b) => b.total - a.total);
   }, [filteredComputedRows, metric, selectedComparePvIds]);
+
+  // Date riferite ai dati attualmente mostrati, senza modificare i filtri principali.
+  const currentTrendDates = useMemo(() => {
+    const dates = filteredComputedRows.map((row) => row.data).sort();
+    return {
+      from: dateFrom || dates[0] || "",
+      to: dateTo || dates[dates.length - 1] || "",
+    };
+  }, [filteredComputedRows, dateFrom, dateTo]);
+
+  const sourceMonth = currentTrendDates.from.slice(0, 7);
+  const monthOptions = useMemo(() => {
+    if (!/^\d{4}-\d{2}$/.test(sourceMonth)) return [];
+    return Array.from({ length: 36 }, (_, index) => monthBefore(sourceMonth, index + 1));
+  }, [sourceMonth]);
+
+  useEffect(() => {
+    if (sourceMonth) setComparisonMonth(monthBefore(sourceMonth));
+  }, [sourceMonth]);
+
+  const effectiveComparisonMonth = monthOptions.includes(comparisonMonth)
+    ? comparisonMonth
+    : monthOptions[0] || "";
+
+  const previousTrendDates = useMemo(() => {
+    if (!currentTrendDates.from || !currentTrendDates.to || !effectiveComparisonMonth) return null;
+    return {
+      from: shiftDateToMonth(currentTrendDates.from, effectiveComparisonMonth, sourceMonth),
+      to: shiftDateToMonth(currentTrendDates.to, effectiveComparisonMonth, sourceMonth),
+    };
+  }, [currentTrendDates.from, currentTrendDates.to, effectiveComparisonMonth, sourceMonth]);
+
+  // Lettura indipendente e minimale: non riutilizza né cambia lo storico esistente.
+  useEffect(() => {
+    if (!previousTrendDates?.from || !previousTrendDates.to || previousTrendDates.from > previousTrendDates.to) {
+      setPreviousPeriodRows([]);
+      setComparisonError(null);
+      setComparisonLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    setComparisonLoading(true);
+    setComparisonError(null);
+    setPreviousPeriodRows([]);
+
+    const params = new URLSearchParams({
+      date_from: previousTrendDates.from,
+      date_to: previousTrendDates.to,
+      metric,
+      status: statusFilter,
+    });
+    if (pvId) params.set("pv_id", pvId);
+
+    fetch(`/api/cash-summary/trend-comparison?${params}`, { cache: "no-store", signal: controller.signal })
+      .then(async (res) => {
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.ok) throw new Error(json?.error || `Errore caricamento confronto (${res.status})`);
+        return json;
+      })
+      .then((json) => {
+        if (!controller.signal.aborted) setPreviousPeriodRows(Array.isArray(json.rows) ? json.rows : []);
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted) setComparisonError(error?.message || "Errore caricamento periodo di confronto");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setComparisonLoading(false);
+      });
+
+    return () => controller.abort();
+  }, [previousTrendDates?.from, previousTrendDates?.to, metric, statusFilter, pvId]);
+
+  const pvTrendRanking = useMemo(() => {
+    const selectedRows = selectedComparePvIds.length > 0
+      ? filteredComputedRows.filter((row) => selectedComparePvIds.includes(row.pv_id))
+      : filteredComputedRows;
+    const byPv = new Map<string, ViewRow[]>();
+    for (const row of selectedRows) {
+      const group = byPv.get(row.pv_id) ?? [];
+      group.push(row);
+      byPv.set(row.pv_id, group);
+    }
+
+    return Array.from(byPv.entries()).map(([pvId, currentRows]) => {
+      const earlierRows = previousPeriodRows.filter((row) => row.pv_id === pvId);
+      // Richiediamo almeno 2 giornate registrate per parte, senza equiparare assenze a zero.
+      const sufficient = currentRows.length >= 2 && earlierRows.length >= 2;
+      const firstAvg = sufficient
+        ? earlierRows.reduce((sum, row) => sum + n(row.value), 0) / earlierRows.length
+        : null;
+      const lastAvg = sufficient
+        ? currentRows.reduce((sum, row) => sum + metricValue(row, metric), 0) / currentRows.length
+        : null;
+      const variation = firstAvg !== null && lastAvg !== null ? lastAvg - firstAvg : null;
+      const variationPercent = firstAvg !== null && firstAvg !== 0 && variation !== null
+        ? (variation / Math.abs(firstAvg)) * 100
+        : null;
+
+      return {
+        pv_id: pvId,
+        pv_label: currentRows[0].pv_label,
+        firstAvg, lastAvg, variation, variationPercent,
+        firstCount: earlierRows.length,
+        lastCount: currentRows.length,
+      };
+    }).sort((a, b) => {
+      if (a.variationPercent === null && b.variationPercent !== null) return 1;
+      if (a.variationPercent !== null && b.variationPercent === null) return -1;
+      if (a.variationPercent !== null && b.variationPercent !== null) return b.variationPercent - a.variationPercent;
+      return a.pv_label.localeCompare(b.pv_label);
+    });
+  }, [filteredComputedRows, selectedComparePvIds, metric, previousPeriodRows]);
 
   const comparisonChartData = useMemo(() => {
     const baseRows =
@@ -2112,7 +2259,8 @@ export default function CashSummaryAdminClient() {
         </div>
 
         <div className="mt-6 grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.6fr)_280px]">
-          <div className="h-80 rounded-2xl border bg-slate-50 p-4">
+          <div className="min-w-0 space-y-4">
+            <div className="h-80 rounded-2xl border bg-slate-50 p-4">
             {comparisonChartData.rows.length > 0 && comparisonChartData.series.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart
@@ -2151,6 +2299,68 @@ export default function CashSummaryAdminClient() {
                 Nessun dato disponibile per il confronto.
               </div>
             )}
+            </div>
+
+            <div className="rounded-2xl border bg-white p-4">
+              <div className="flex flex-wrap items-end justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-900">Classifica andamento PV</h3>
+                  <p className="mt-1 text-xs text-gray-600">
+                    Confronto tra la media giornaliera del periodo selezionato e la media dello stesso intervallo nel mese scelto.
+                    Sono considerate solo le giornate con riepilogo (minimo 2 per periodo).
+                  </p>
+                </div>
+                <div className="min-w-[185px]">
+                  <label htmlFor="cash-trend-month" className="mb-1 block text-xs font-medium text-slate-700">Confronta con il mese</label>
+                  <select
+                    id="cash-trend-month"
+                    className="w-full rounded-lg border bg-white p-2 text-sm text-slate-800"
+                    value={effectiveComparisonMonth}
+                    onChange={(event) => setComparisonMonth(event.target.value)}
+                    disabled={monthOptions.length === 0}
+                  >
+                    {monthOptions.map((month) => <option key={month} value={month}>{monthDisplayName(month)}</option>)}
+                  </select>
+                </div>
+              </div>
+              <p className="mt-2 text-xs text-slate-600">
+                Periodo selezionato: <strong>{currentTrendDates.from ? formatLongDate(currentTrendDates.from) : "—"} – {currentTrendDates.to ? formatLongDate(currentTrendDates.to) : "—"}</strong>
+                {previousTrendDates && <> · Confronto: <strong>{formatLongDate(previousTrendDates.from)} – {formatLongDate(previousTrendDates.to)}</strong></>}
+              </p>
+              {comparisonLoading && <p className="mt-2 text-xs text-slate-500">Caricamento periodo di confronto...</p>}
+              {comparisonError && <p className="mt-2 text-xs text-red-700">{comparisonError}</p>}
+              <div className="mt-3 overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead className="bg-slate-100 text-slate-700">
+                    <tr>
+                      <th className="p-2 text-left">PV</th>
+                      <th className="p-2 text-right">Media confronto</th>
+                      <th className="p-2 text-right">Media selezionata</th>
+                      <th className="p-2 text-right">Variazione €</th>
+                      <th className="p-2 text-right">Variazione %</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pvTrendRanking.map((row) => (
+                      <tr key={row.pv_id} className="border-t">
+                        <td className="p-2 font-medium text-slate-800">{row.pv_label}</td>
+                        <td className="p-2 text-right whitespace-nowrap">{comparisonLoading || comparisonError || row.firstAvg === null ? "—" : formatEuro(row.firstAvg)}</td>
+                        <td className="p-2 text-right whitespace-nowrap">{comparisonLoading || comparisonError || row.lastAvg === null ? "—" : formatEuro(row.lastAvg)}</td>
+                        <td className={`p-2 text-right whitespace-nowrap font-medium ${row.variation === null ? "text-gray-500" : row.variation > 0 ? "text-green-700" : row.variation < 0 ? "text-red-700" : "text-slate-700"}`}>
+                          {comparisonLoading || comparisonError || row.variation === null ? "—" : `${row.variation > 0 ? "+" : ""}${formatEuro(row.variation)}`}
+                        </td>
+                        <td className={`p-2 text-right whitespace-nowrap font-semibold ${row.variationPercent === null ? "text-gray-500" : row.variationPercent > 0 ? "text-green-700" : row.variationPercent < 0 ? "text-red-700" : "text-slate-700"}`}>
+                          {comparisonLoading ? "Caricamento..." : comparisonError ? "Confronto non disponibile" : row.variationPercent === null ? "Dati insufficienti" : `${row.variationPercent > 0 ? "↑ " : row.variationPercent < 0 ? "↓ " : "→ "}${formatPercent(row.variationPercent)}`}
+                        </td>
+                      </tr>
+                    ))}
+                    {pvTrendRanking.length === 0 && (
+                      <tr><td className="p-3 text-gray-500" colSpan={5}>Nessun dato disponibile.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
 
           <div className="space-y-2">
