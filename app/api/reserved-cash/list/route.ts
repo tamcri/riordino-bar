@@ -28,7 +28,7 @@ export async function GET(req: Request) {
 
     let query = supabaseAdmin
       .from("pv_cash_summaries")
-      .select("id, pv_id, data, operatore, totale, incasso_totale, versamento, da_versare, tot_versato, fondo_cassa, status, is_closed")
+      .select("id, pv_id, data, operatore, totale, incasso_totale, lis_plus, mooney, vendita_gv, vendita_tabacchi, gv_pagati, versamento, da_versare, tot_versato, fondo_cassa, status, is_closed")
       .eq("pv_id", context.assignedPvId)
       .order("data", { ascending: false });
     if (dateFrom) query = query.gte("data", dateFrom);

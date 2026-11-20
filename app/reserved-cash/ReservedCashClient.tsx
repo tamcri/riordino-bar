@@ -9,6 +9,11 @@ type Row = {
   operatore: string | null;
   totale: number | null;
   incasso_totale: number | null;
+  lis_plus: number | null;
+  mooney: number | null;
+  vendita_gv: number | null;
+  vendita_tabacchi: number | null;
+  gv_pagati: number | null;
   versamento: number | null;
   da_versare: number | null;
   tot_versato: number | null;
@@ -132,13 +137,80 @@ export default function ReservedCashClient() {
           </form>
           {error && <p role="alert" className="mt-3 text-sm text-red-700">{error}</p>}
         </section>
-        <section className="overflow-x-auto rounded-2xl border bg-white p-5">
+        <section className="min-w-0 rounded-2xl border bg-white p-3 sm:p-4">
           <div className="mb-4 flex items-center justify-between gap-3"><h2 className="font-semibold">Storico riepiloghi</h2><span className="text-sm text-slate-500">{rows.length} risultati</span></div>
           {loading ? <p className="text-sm text-slate-600">Caricamento...</p> : (
-            <table className="w-full min-w-[760px] text-sm">
-              <thead><tr className="border-b bg-slate-50 text-left"><th className="p-3">Data</th><th className="p-3">Operatore</th><th className="p-3 text-right">Incasso totale</th><th className="p-3 text-right">Da versare</th><th className="p-3">Stato</th><th className="p-3">Dettaglio</th></tr></thead>
-              <tbody>{rows.map((r) => <tr className="border-b" key={r.id}><td className="p-3">{dateLabel(r.data)}</td><td className="p-3">{r.operatore || "—"}</td><td className="p-3 text-right">{euro(r.incasso_totale)}</td><td className="p-3 text-right">{euro(r.da_versare)}</td><td className="p-3">{r.is_closed ? "Chiuso" : r.status || "Aperto"}</td><td className="p-3"><button type="button" onClick={() => void openDetail(r.id)} className="rounded-lg border px-3 py-1.5 hover:bg-slate-50">Apri</button></td></tr>)}</tbody>
-            </table>
+            <>
+              <table className="hidden w-full table-fixed text-[10px] leading-tight sm:table lg:text-xs">
+                <colgroup>
+                  <col style={{ width: "10%" }} />
+                  <col style={{ width: "10%" }} />
+                  <col style={{ width: "12%" }} />
+                  <col style={{ width: "8%" }} />
+                  <col style={{ width: "9%" }} />
+                  <col style={{ width: "11%" }} />
+                  <col style={{ width: "12%" }} />
+                  <col style={{ width: "10%" }} />
+                  <col style={{ width: "10%" }} />
+                  <col style={{ width: "8%" }} />
+                </colgroup>
+                <thead>
+                  <tr className="border-b bg-slate-50 text-slate-700">
+                    <th className="px-1 py-2 text-center">Data</th>
+                    <th className="px-1 py-2 text-center">Operatore</th>
+                    <th className="px-1 py-2 text-center">Incasso<br />Totale</th>
+                    <th className="px-1 py-2 text-center">LIS+</th>
+                    <th className="px-1 py-2 text-center">Mooney</th>
+                    <th className="px-1 py-2 text-center">Vendita<br />G&amp;V</th>
+                    <th className="px-1 py-2 text-center">Vendita<br />Tabacchi</th>
+                    <th className="px-1 py-2 text-center">G&amp;V<br />Pagati</th>
+                    <th className="px-1 py-2 text-center">Tot.<br />Versato</th>
+                    <th className="px-1 py-2 text-center">Dettaglio</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r) => (
+                    <tr className="border-b hover:bg-slate-50" key={r.id}>
+                      <td className="whitespace-nowrap px-1 py-2 text-center font-medium">{dateLabel(r.data)}</td>
+                      <td className="break-words px-1 py-2 text-center">{r.operatore || "—"}</td>
+                      <td className="whitespace-nowrap px-1 py-2 text-center tabular-nums">{euro(r.incasso_totale)}</td>
+                      <td className="whitespace-nowrap px-1 py-2 text-center tabular-nums">{euro(r.lis_plus)}</td>
+                      <td className="whitespace-nowrap px-1 py-2 text-center tabular-nums">{euro(r.mooney)}</td>
+                      <td className="whitespace-nowrap px-1 py-2 text-center tabular-nums">{euro(r.vendita_gv)}</td>
+                      <td className="whitespace-nowrap px-1 py-2 text-center tabular-nums">{euro(r.vendita_tabacchi)}</td>
+                      <td className="whitespace-nowrap px-1 py-2 text-center tabular-nums">{euro(r.gv_pagati)}</td>
+                      <td className="whitespace-nowrap px-1 py-2 text-center font-semibold tabular-nums">{euro(r.tot_versato)}</td>
+                      <td className="px-1 py-2 text-center">
+                        <button type="button" onClick={() => void openDetail(r.id)} className="rounded border px-1.5 py-1 hover:bg-slate-100">Apri</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="space-y-3 sm:hidden">
+                {rows.map((r) => (
+                  <div key={r.id} className="rounded-xl border p-3 text-sm">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <div><strong>{dateLabel(r.data)}</strong><p className="text-xs text-slate-500">{r.operatore || "—"}</p></div>
+                      <button type="button" onClick={() => void openDetail(r.id)} className="rounded-lg border px-3 py-1.5 text-xs">Dettaglio</button>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      {([
+                        ["Incasso Totale", r.incasso_totale], ["LIS+", r.lis_plus],
+                        ["Mooney", r.mooney], ["Vendita G&V", r.vendita_gv],
+                        ["Vendita Tabacchi", r.vendita_tabacchi], ["G&V Pagati", r.gv_pagati],
+                        ["Tot. Versato", r.tot_versato],
+                      ] as Array<[string, number | null]>).map(([label, value]) => (
+                        <div key={label} className="rounded bg-slate-50 p-2">
+                          <div className="text-slate-500">{label}</div>
+                          <div className="font-semibold tabular-nums">{euro(value)}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
           )}
           {!loading && rows.length === 0 && <p className="mt-4 text-sm text-slate-500">Nessun riepilogo trovato.</p>}
         </section>
