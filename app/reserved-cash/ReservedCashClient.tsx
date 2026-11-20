@@ -14,6 +14,7 @@ type Row = {
   vendita_gv: number | null;
   vendita_tabacchi: number | null;
   gv_pagati: number | null;
+  pos: number | null;
   versamento: number | null;
   da_versare: number | null;
   tot_versato: number | null;
@@ -143,15 +144,16 @@ export default function ReservedCashClient() {
             <>
               <table className="hidden w-full table-fixed text-[10px] leading-tight sm:table lg:text-xs">
                 <colgroup>
-                  <col style={{ width: "10%" }} />
-                  <col style={{ width: "10%" }} />
-                  <col style={{ width: "12%" }} />
-                  <col style={{ width: "8%" }} />
+                  <col style={{ width: "9%" }} />
                   <col style={{ width: "9%" }} />
                   <col style={{ width: "11%" }} />
+                  <col style={{ width: "7%" }} />
+                  <col style={{ width: "8%" }} />
+                  <col style={{ width: "10%" }} />
                   <col style={{ width: "12%" }} />
-                  <col style={{ width: "10%" }} />
-                  <col style={{ width: "10%" }} />
+                  <col style={{ width: "9%" }} />
+                  <col style={{ width: "8%" }} />
+                  <col style={{ width: "9%" }} />
                   <col style={{ width: "8%" }} />
                 </colgroup>
                 <thead>
@@ -164,6 +166,7 @@ export default function ReservedCashClient() {
                     <th className="px-1 py-2 text-center">Vendita<br />G&amp;V</th>
                     <th className="px-1 py-2 text-center">Vendita<br />Tabacchi</th>
                     <th className="px-1 py-2 text-center">G&amp;V<br />Pagati</th>
+                    <th className="px-1 py-2 text-center">POS</th>
                     <th className="px-1 py-2 text-center">Tot.<br />Versato</th>
                     <th className="px-1 py-2 text-center">Dettaglio</th>
                   </tr>
@@ -179,6 +182,7 @@ export default function ReservedCashClient() {
                       <td className="whitespace-nowrap px-1 py-2 text-center tabular-nums">{euro(r.vendita_gv)}</td>
                       <td className="whitespace-nowrap px-1 py-2 text-center tabular-nums">{euro(r.vendita_tabacchi)}</td>
                       <td className="whitespace-nowrap px-1 py-2 text-center tabular-nums">{euro(r.gv_pagati)}</td>
+                      <td className="whitespace-nowrap px-1 py-2 text-center tabular-nums">{euro(r.pos)}</td>
                       <td className="whitespace-nowrap px-1 py-2 text-center font-semibold tabular-nums">{euro(r.tot_versato)}</td>
                       <td className="px-1 py-2 text-center">
                         <button type="button" onClick={() => void openDetail(r.id)} className="rounded border px-1.5 py-1 hover:bg-slate-100">Apri</button>
@@ -199,7 +203,7 @@ export default function ReservedCashClient() {
                         ["Incasso Totale", r.incasso_totale], ["LIS+", r.lis_plus],
                         ["Mooney", r.mooney], ["Vendita G&V", r.vendita_gv],
                         ["Vendita Tabacchi", r.vendita_tabacchi], ["G&V Pagati", r.gv_pagati],
-                        ["Tot. Versato", r.tot_versato],
+                        ["POS", r.pos], ["Tot. Versato", r.tot_versato],
                       ] as Array<[string, number | null]>).map(([label, value]) => (
                         <div key={label} className="rounded bg-slate-50 p-2">
                           <div className="text-slate-500">{label}</div>
