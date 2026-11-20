@@ -3,6 +3,8 @@ import { NextResponse } from "next/server";
 import ExcelJS from "exceljs";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { getProgressiviReportData } from "@/lib/progressivi/report";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, requirePvAccess } from "@/lib/pvAccess";
 
 export const runtime = "nodejs";
 
@@ -76,9 +78,40 @@ export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
 
+    const access = await resolvePvAccess(session);
+    if (access.profile !== "standard") {
+      return NextResponse.json({ ok: false, error: "FORBIDDEN" }, { status: 403 });
+    }
+
+    // Il report puo' essere richiesto per PV o per header: risolvi sempre
+    // il PV effettivo PRIMA di costruire il file Excel.
+    const requestedPvId = String(url.searchParams.get("pv_id") ?? "").trim();
+    const headerId = String(url.searchParams.get("header_id") ?? "").trim();
+    let effectivePvId = requestedPvId;
+    if (headerId) {
+      const { data: invHeader, error: invHeaderError } = await supabaseAdmin
+        .from("inventories_headers")
+        .select("id, pv_id")
+        .eq("id", headerId)
+        .maybeSingle();
+      if (invHeaderError) throw invHeaderError;
+      if (!invHeader) {
+        return NextResponse.json({ ok: false, error: "Inventario non trovato" }, { status: 404 });
+      }
+      const headerPvId = String(invHeader.pv_id);
+      if (requestedPvId && requestedPvId !== headerPvId) {
+        return NextResponse.json({ ok: false, error: "PV e inventario non corrispondono" }, { status: 400 });
+      }
+      effectivePvId = headerPvId;
+    }
+    if (!effectivePvId) {
+      return NextResponse.json({ ok: false, error: "PV obbligatorio" }, { status: 400 });
+    }
+    await requirePvAccess(access, effectivePvId, "read");
+
     const data = await getProgressiviReportData({
       header_id: url.searchParams.get("header_id"),
-      pv_id: url.searchParams.get("pv_id"),
+      pv_id: effectivePvId,
       inventory_date: url.searchParams.get("inventory_date"),
       category_id: url.searchParams.get("category_id"),
       subcategory_id: url.searchParams.get("subcategory_id"),
@@ -314,9 +347,10 @@ export async function GET(req: Request) {
       },
     });
   } catch (e: any) {
+    const message = e?.message || "Errore generazione report progressivi";
     return NextResponse.json(
-      { ok: false, error: e?.message || "Errore generazione report progressivi" },
-      { status: 400 }
+      { ok: false, error: message },
+      { status: message === "FORBIDDEN" ? 403 : message === "UNAUTHORIZED" ? 401 : 400 }
     );
   }
 }

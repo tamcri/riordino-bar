@@ -6,6 +6,7 @@ import { getPvIdForSession } from "@/lib/pvLookup";
 import { requireShiftManagerAccess } from "@/lib/work-shifts-manager";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { asRecord, clampText, getErrorMessage, isUuid } from "@/lib/work-shifts";
+import { resolvePvAccess, requirePvAccess, filterVisiblePvs } from "@/lib/pvAccess";
 
 export const runtime = "nodejs";
 
@@ -71,6 +72,9 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
     }
 
+    const access = await resolvePvAccess(session);
+    if (access.profile !== "standard") return NextResponse.json({ ok: false, error: "FORBIDDEN" }, { status: 403 });
+
     if (session.role === "punto_vendita") {
       const manager = await requireShiftManagerAccess(session);
       if (!manager.ok) {
@@ -97,6 +101,14 @@ export async function GET(req: Request) {
       pv_id = pvIdParam;
     }
 
+    const { data: availablePvs, error: pvsError } = await supabaseAdmin
+      .from("pvs")
+      .select("id, is_reserved");
+    if (pvsError) throw pvsError;
+    const visiblePvIds = filterVisiblePvs(access, availablePvs ?? []).map((pv) => pv.id);
+    if (pv_id) await requirePvAccess(access, pv_id, "read");
+    if (visiblePvIds.length === 0) return NextResponse.json({ ok: true, rows: [] });
+
     let q = supabaseAdmin
       .from("employees")
       .select(employeeSelect())
@@ -104,6 +116,7 @@ export async function GET(req: Request) {
       .order("name", { ascending: true })
       .limit(1000);
 
+    q = q.in("pv_id", visiblePvIds);
     if (pv_id) q = q.eq("pv_id", pv_id);
     if (!includeInactive) q = q.eq("active", true);
 
@@ -112,7 +125,7 @@ export async function GET(req: Request) {
 
     return NextResponse.json({ ok: true, rows: (data ?? []).map((row) => normalizeEmployee(row as unknown as EmployeeDbRow)) });
   } catch (e: unknown) {
-    return NextResponse.json({ ok: false, error: getErrorMessage(e, "Errore server") }, { status: 500 });
+    return NextResponse.json({ ok: false, error: getErrorMessage(e, "Errore server") }, { status: e instanceof Error && e.message === "FORBIDDEN" ? 403 : e instanceof Error && e.message === "UNAUTHORIZED" ? 401 : 500 });
   }
 }
 
@@ -123,6 +136,8 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
     }
 
+    const access = await resolvePvAccess(session);
+    if (access.profile !== "standard") return NextResponse.json({ ok: false, error: "FORBIDDEN" }, { status: 403 });
     const body = asRecord(await req.json().catch(() => null));
     const name = clampText(body.name, 120);
     const contractType = normalizeContractType(body.contract_type);
@@ -162,6 +177,8 @@ export async function POST(req: Request) {
       pv_id = pvIdParam;
     }
 
+    if (!pv_id) throw new Error("FORBIDDEN");
+    await requirePvAccess(access, pv_id, "write");
     const userId = await getAppUserIdByUsername(session.username);
 
     const { data, error } = await supabaseAdmin
@@ -185,7 +202,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ ok: true, row: normalizeEmployee(data as unknown as EmployeeDbRow), warning });
   } catch (e: unknown) {
-    return NextResponse.json({ ok: false, error: getErrorMessage(e, "Errore server") }, { status: 500 });
+    return NextResponse.json({ ok: false, error: getErrorMessage(e, "Errore server") }, { status: e instanceof Error && e.message === "FORBIDDEN" ? 403 : e instanceof Error && e.message === "UNAUTHORIZED" ? 401 : 500 });
   }
 }
 
@@ -196,6 +213,8 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
     }
 
+    const access = await resolvePvAccess(session);
+    if (access.profile !== "standard") return NextResponse.json({ ok: false, error: "FORBIDDEN" }, { status: 403 });
     const body = asRecord(await req.json().catch(() => null));
     const id = String(body.id ?? "").trim();
     if (!isUuid(id)) {
@@ -256,6 +275,8 @@ export async function PATCH(req: Request) {
       pv_id = pvIdParam;
     }
 
+    if (!pv_id) throw new Error("FORBIDDEN");
+    await requirePvAccess(access, pv_id, "write");
     update.updated_by = await getAppUserIdByUsername(session.username);
 
     const { data, error } = await supabaseAdmin
@@ -277,6 +298,6 @@ export async function PATCH(req: Request) {
 
     return NextResponse.json({ ok: true, row: normalizeEmployee(data as unknown as EmployeeDbRow), warning });
   } catch (e: unknown) {
-    return NextResponse.json({ ok: false, error: getErrorMessage(e, "Errore server") }, { status: 500 });
+    return NextResponse.json({ ok: false, error: getErrorMessage(e, "Errore server") }, { status: e instanceof Error && e.message === "FORBIDDEN" ? 403 : e instanceof Error && e.message === "UNAUTHORIZED" ? 401 : 500 });
   }
 }

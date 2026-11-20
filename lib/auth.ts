@@ -4,10 +4,15 @@ import crypto from "crypto";
 export const COOKIE_NAME = "rb_session";
 
 export type SessionRole = "admin" | "amministrativo" | "punto_vendita";
+export type SessionProfile = "standard" | "cash_readonly" | "cash_operator";
 
 export type SessionData = {
   username: string;
   role: SessionRole;
+  /** ID della riga app_users; opzionale per le vecchie sessioni. */
+  userId?: string;
+  /** Profilo verificato al login e incluso nella firma del cookie. */
+  accessProfile?: SessionProfile;
   iat: number;
 };
 
@@ -40,12 +45,29 @@ export function parseSessionValue(value?: string | null): SessionData | null {
     if (!parsed?.username) return null;
     if (!["admin", "amministrativo", "punto_vendita"].includes(parsed.role)) return null;
 
+    if (parsed.accessProfile !== undefined &&
+        !["standard", "cash_readonly", "cash_operator"].includes(parsed.accessProfile)) return null;
+    // I nuovi profili devono avere una sessione associata a un utente DB.
+    if (parsed.accessProfile && parsed.accessProfile !== "standard" && !parsed.userId) return null;
+    if (parsed.accessProfile === "cash_readonly" && parsed.role !== "admin") return null;
+    if (parsed.accessProfile === "cash_operator" && parsed.role !== "punto_vendita") return null;
+
+    // Accetta i cookie precedenti, che non avevano userId.
+    // Se presente, userId deve corrispondere al formato UUID.
+    if (parsed.userId !== undefined) {
+      if (
+        typeof parsed.userId !== "string" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(parsed.userId)
+      ) {
+        return null;
+      }
+    }
+
     return parsed;
   } catch {
     return null;
   }
 }
-// ...tutto il tuo codice invariato sopra...
 
 export async function getSession(): Promise<SessionData | null> {
   const cookieStore = await cookies();

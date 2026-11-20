@@ -5,6 +5,7 @@ import { getAppUserIdByUsername } from "@/lib/appUsers";
 import { getPvIdForSession } from "@/lib/pvLookup";
 import { requireShiftManagerAccess } from "@/lib/work-shifts-manager";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, requirePvAccess, filterVisiblePvs } from "@/lib/pvAccess";
 import {
   addDaysISO,
   asRecord,
@@ -153,6 +154,9 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
     }
 
+    const access = await resolvePvAccess(session);
+    if (access.profile !== "standard") return NextResponse.json({ ok: false, error: "FORBIDDEN" }, { status: 403 });
+
     if (session.role === "punto_vendita") {
       const manager = await requireShiftManagerAccess(session);
       if (!manager.ok) {
@@ -171,6 +175,17 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: false, error: pvResolved.error }, { status: 400 });
     }
 
+    const { data: availablePvs, error: pvsError } = await supabaseAdmin
+      .from("pvs")
+      .select("id, is_reserved");
+    if (pvsError) throw pvsError;
+    const visiblePvIds = filterVisiblePvs(access, availablePvs ?? []).map((pv) => pv.id);
+    const visiblePvIdSet = new Set(visiblePvIds);
+    if (pvResolved.pv_id) await requirePvAccess(access, pvResolved.pv_id, "read");
+    if (visiblePvIds.length === 0) {
+      return NextResponse.json({ ok: true, week_start, week_end, week_dates: weekDates, pv_id: pvResolved.pv_id, rows: [], pv_summary_only: false, warning: pvResolved.warning ?? null });
+    }
+
     let q = supabaseAdmin
       .from("work_shifts")
       .select(shiftSelect())
@@ -180,12 +195,21 @@ export async function GET(req: Request) {
       .order("employee_id", { ascending: true })
       .limit(5000);
 
+    q = q.in("pv_id", visiblePvIds);
     if (pvResolved.pv_id) q = q.eq("pv_id", pvResolved.pv_id);
 
     const { data, error } = await q;
     if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
 
-    const normalizedRows = (data ?? []).map((row) => normalizeShift(row as unknown as ShiftDbRow));
+    const normalizedRows = (data ?? []).map((row) => {
+      const normalized = normalizeShift(row as unknown as ShiftDbRow);
+      // Non esporre neppure identificativi di PV riservati usati come sede di supporto.
+      if (!access.isPrimaryAdmin) {
+        if (normalized.work_pv_id && !visiblePvIdSet.has(normalized.work_pv_id)) normalized.work_pv_id = null;
+        if (normalized.second_work_pv_id && !visiblePvIdSet.has(normalized.second_work_pv_id)) normalized.second_work_pv_id = null;
+      }
+      return normalized;
+    });
 
     const rows =
       session.role === "punto_vendita"
@@ -223,7 +247,7 @@ export async function GET(req: Request) {
       warning: pvResolved.warning ?? null,
     });
   } catch (e: unknown) {
-    return NextResponse.json({ ok: false, error: getErrorMessage(e, "Errore server") }, { status: 500 });
+    return NextResponse.json({ ok: false, error: getErrorMessage(e, "Errore server") }, { status: e instanceof Error && e.message === "FORBIDDEN" ? 403 : e instanceof Error && e.message === "UNAUTHORIZED" ? 401 : 500 });
   }
 }
 
@@ -246,6 +270,9 @@ export async function POST(req: Request) {
 
     let pv_id: string | null = null;
     let warning: string | null = null;
+
+    const access = await resolvePvAccess(session);
+    if (access.profile !== "standard") return NextResponse.json({ ok: false, error: "FORBIDDEN" }, { status: 403 });
 
     if (session.role === "punto_vendita") {
       const manager = await requireShiftManagerAccess(session);
@@ -274,6 +301,8 @@ export async function POST(req: Request) {
     if (!pv_id) {
       return NextResponse.json({ ok: false, error: "Punto vendita non valido" }, { status: 400 });
     }
+
+    await requirePvAccess(access, pv_id, "write");
 
     const employeeIds = Array.from(
       new Set(shifts.map((row) => String(row.employee_id ?? "").trim()).filter(isUuid))
@@ -476,14 +505,15 @@ if (
     if (referencedWorkPvIds.length > 0) {
       const { data: pvRows, error: pvsError } = await supabaseAdmin
         .from("pvs")
-        .select("id")
+        .select("id, is_reserved")
         .in("id", referencedWorkPvIds);
 
       if (pvsError) {
         return NextResponse.json({ ok: false, error: pvsError.message }, { status: 500 });
       }
 
-      const existingPvIds = new Set((pvRows ?? []).map((row) => String(asRecord(row).id ?? "")));
+      const allowedWorkPvs = filterVisiblePvs(access, pvRows ?? []);
+      const existingPvIds = new Set(allowedWorkPvs.map((row) => row.id));
       if (existingPvIds.size !== referencedWorkPvIds.length) {
         return NextResponse.json({ ok: false, error: "Uno o più PV lavoro non esistono" }, { status: 400 });
       }
@@ -505,6 +535,6 @@ if (
       warning,
     });
   } catch (e: unknown) {
-    return NextResponse.json({ ok: false, error: getErrorMessage(e, "Errore server") }, { status: 500 });
+    return NextResponse.json({ ok: false, error: getErrorMessage(e, "Errore server") }, { status: e instanceof Error && e.message === "FORBIDDEN" ? 403 : e instanceof Error && e.message === "UNAUTHORIZED" ? 401 : 500 });
   }
 }

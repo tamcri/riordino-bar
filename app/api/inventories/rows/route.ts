@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, requirePvAccess, filterVisiblePvs, isCashOnlyProfile } from "@/lib/pvAccess";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -89,6 +90,10 @@ export async function GET(req: Request) {
     if (rapid_session_id !== null && !isUuid(rapid_session_id)) {
       return NextResponse.json({ ok: false, error: "rapid_session_id non valido" }, { status: 400 });
     }
+
+    const access = await resolvePvAccess(session);
+    if (isCashOnlyProfile(access)) throw new Error("FORBIDDEN");
+    await requirePvAccess(access, pv_id, "read");
 
     const isRapidRequest = category_id === null;
 
@@ -220,7 +225,9 @@ export async function GET(req: Request) {
     });
   } catch (e: any) {
     console.error("[inventories/rows] UNHANDLED ERROR:", e);
-    return NextResponse.json({ ok: false, error: e?.message || "TypeError: fetch failed" }, { status: 500 });
+    const message = e instanceof Error ? e.message : "Errore server";
+    const status = message === "UNAUTHORIZED" ? 401 : message === "FORBIDDEN" ? 403 : 500;
+    return NextResponse.json({ ok: false, error: message }, { status });
   }
 }
 

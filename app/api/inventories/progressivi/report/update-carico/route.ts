@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, requirePvAccess } from "@/lib/pvAccess";
 
 export const runtime = "nodejs";
 
@@ -27,6 +28,11 @@ export async function PATCH(req: Request) {
   }
 
   try {
+    const access = await resolvePvAccess(session);
+    if (access.profile !== "standard") {
+      return NextResponse.json({ ok: false, error: "FORBIDDEN" }, { status: 403 });
+    }
+
     const body = await req.json();
 
     const report_header_id = String(body?.report_header_id ?? "").trim();
@@ -45,6 +51,28 @@ export async function PATCH(req: Request) {
     if (!["previous", "current"].includes(mode)) {
       return NextResponse.json({ ok: false, error: "mode non valido" }, { status: 400 });
     }
+
+    // Risali dal report progressivi all'inventario di riferimento e al PV.
+    // Non fidarti del solo report_header_id ricevuto dal client.
+    const { data: reportHeader, error: reportHeaderError } = await supabaseAdmin
+      .from("progressivi_report_headers")
+      .select("id, current_header_id")
+      .eq("id", report_header_id)
+      .maybeSingle();
+    if (reportHeaderError) throw reportHeaderError;
+    if (!reportHeader?.current_header_id) {
+      return NextResponse.json({ ok: false, error: "Report non trovato" }, { status: 404 });
+    }
+    const { data: invHeader, error: invHeaderError } = await supabaseAdmin
+      .from("inventories_headers")
+      .select("id, pv_id")
+      .eq("id", reportHeader.current_header_id)
+      .maybeSingle();
+    if (invHeaderError) throw invHeaderError;
+    if (!invHeader?.pv_id) {
+      return NextResponse.json({ ok: false, error: "Inventario del report non trovato" }, { status: 404 });
+    }
+    await requirePvAccess(access, String(invHeader.pv_id), "write");
 
     // 1️⃣ carico la riga
     const { data: row, error: rowErr } = await supabaseAdmin
@@ -101,7 +129,7 @@ export async function PATCH(req: Request) {
     console.error("[update-carico] error", e);
     return NextResponse.json(
       { ok: false, error: e?.message || "Errore update carico" },
-      { status: 500 }
+      { status: e?.message === "FORBIDDEN" ? 403 : e?.message === "UNAUTHORIZED" ? 401 : 500 }
     );
   }
 }

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, requirePvAccess } from "@/lib/pvAccess";
 import { isPvOrderShippingStatus, isUuid } from "@/lib/pv-orders";
 
 export const runtime = "nodejs";
@@ -36,6 +37,12 @@ export async function POST(req: Request, context: RouteContext) {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
     }
 
+    const access = await resolvePvAccess(session);
+    // Gli account dedicati agli incassi non possono usare ordini o inventari.
+    if (access.profile !== "standard") {
+      return NextResponse.json({ ok: false, error: "FORBIDDEN" }, { status: 403 });
+    }
+
     const orderId = String(context.params?.id ?? "").trim();
     if (!isUuid(orderId)) {
       return NextResponse.json({ ok: false, error: "ID ordine non valido" }, { status: 400 });
@@ -56,7 +63,7 @@ export async function POST(req: Request, context: RouteContext) {
 
     const { data: header, error: headerError } = await supabaseAdmin
       .from("pv_order_headers")
-      .select("id, shipping_status")
+      .select("id, pv_id, shipping_status")
       .eq("id", orderId)
       .maybeSingle();
 
@@ -66,6 +73,16 @@ export async function POST(req: Request, context: RouteContext) {
 
     if (!header) {
       return NextResponse.json({ ok: false, error: "Ordine non trovato" }, { status: 404 });
+    }
+
+    try {
+      await requirePvAccess(access, String(header.pv_id), "write");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "FORBIDDEN";
+      if (message === "FORBIDDEN" || message === "UNAUTHORIZED") {
+        return NextResponse.json({ ok: false, error: message }, { status: message === "FORBIDDEN" ? 403 : 401 });
+      }
+      throw error;
     }
 
     // Caso semplice: NON_SPEDITO non scarica nulla, aggiorna solo stato header

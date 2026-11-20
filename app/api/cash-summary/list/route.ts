@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, canAccessPv, filterVisiblePvs } from "@/lib/pvAccess";
 
 export const runtime = "nodejs";
 
@@ -43,6 +44,62 @@ export async function GET(req: Request) {
     const date_from = String(searchParams.get("date_from") ?? "").trim();
     const date_to = String(searchParams.get("date_to") ?? "").trim();
 
+    // Risolvi sempre i permessi dal database: il solo ruolo non basta.
+    const access = await resolvePvAccess(session);
+    if (access.profile === "cash_operator") {
+      return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 403 });
+    }
+
+    if (pv_id && !isUuid(pv_id)) {
+      return NextResponse.json({ ok: false, error: "pv_id non valido" }, { status: 400 });
+    }
+
+    // Il filtro viene applicato PRIMA di leggere gli incassi e di calcolare i saldi.
+    // Per l'Admin principale senza filtro manteniamo il comportamento precedente.
+    let allowedPvIds: string[] | null = null;
+    if (!access.isPrimaryAdmin) {
+      const { data: pvRows, error: pvsError } = await supabaseAdmin
+        .from("pvs")
+        .select("id, is_reserved");
+
+      if (pvsError) {
+        return NextResponse.json({ ok: false, error: pvsError.message }, { status: 500 });
+      }
+
+      const visiblePvs = filterVisiblePvs(access, pvRows ?? []);
+      allowedPvIds = visiblePvs.map((pv) => pv.id);
+
+      // Nessun PV autorizzato: non effettuare una query senza filtro.
+      if (allowedPvIds.length === 0) {
+        return NextResponse.json({
+          ok: true,
+          rows: [],
+          saldo_iniziale_by_pv: {},
+          balance_start_date_by_pv: {},
+          checks_by_summary: {},
+          comments_by_summary: {},
+        });
+      }
+
+      if (pv_id && !allowedPvIds.includes(pv_id)) {
+        return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 403 });
+      }
+    } else if (pv_id) {
+      // Verifica anche l'esistenza del PV richiesto dal client.
+      const { data: selectedPv, error: selectedPvError } = await supabaseAdmin
+        .from("pvs")
+        .select("id, is_reserved")
+        .eq("id", pv_id)
+        .maybeSingle();
+
+      if (selectedPvError) {
+        return NextResponse.json({ ok: false, error: selectedPvError.message }, { status: 500 });
+      }
+      if (!selectedPv || !canAccessPv(access, selectedPv, "read")) {
+        return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 403 });
+      }
+    }
+
     let query = supabaseAdmin
       .from("pv_cash_summaries")
       .select(`
@@ -72,10 +129,9 @@ export async function GET(req: Request) {
       .order("data", { ascending: true });
 
     if (pv_id) {
-      if (!isUuid(pv_id)) {
-        return NextResponse.json({ ok: false, error: "pv_id non valido" }, { status: 400 });
-      }
       query = query.eq("pv_id", pv_id);
+    } else if (allowedPvIds !== null) {
+      query = query.in("pv_id", allowedPvIds);
     }
 
     if (date_from) {

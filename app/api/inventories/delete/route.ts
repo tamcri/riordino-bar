@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, requirePvAccess } from "@/lib/pvAccess";
 
 export const runtime = "nodejs";
 
@@ -29,6 +30,18 @@ export async function DELETE(req: Request) {
 
   if (!session || session.role !== "admin") {
     return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
+  }
+
+  let access;
+  try {
+    access = await resolvePvAccess(session);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "UNAUTHORIZED";
+    return NextResponse.json({ ok: false, error: message }, { status: message === "UNAUTHORIZED" ? 401 : 500 });
+  }
+  // Le API inventario e progressivi sono riservate ai profili standard.
+  if (access.profile !== "standard") {
+    return NextResponse.json({ ok: false, error: "FORBIDDEN" }, { status: 403 });
   }
 
   const url = new URL(req.url);
@@ -83,6 +96,16 @@ export async function DELETE(req: Request) {
         { status: 500 }
       );
     }
+
+  try {
+    await requirePvAccess(access, hpv, "write");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "FORBIDDEN";
+    if (message === "FORBIDDEN" || message === "UNAUTHORIZED") {
+      return NextResponse.json({ ok: false, error: message }, { status: message === "FORBIDDEN" ? 403 : 401 });
+    }
+    throw error;
+  }
 
     let delRowsQ = supabaseAdmin
       .from("inventories")
@@ -224,6 +247,16 @@ export async function DELETE(req: Request) {
 
   if (!isIsoDate(inventory_date)) {
     return NextResponse.json({ ok: false, error: "inventory_date non valida (YYYY-MM-DD)" }, { status: 400 });
+  }
+
+  try {
+    await requirePvAccess(access, pv_id, "write");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "FORBIDDEN";
+    if (message === "FORBIDDEN" || message === "UNAUTHORIZED") {
+      return NextResponse.json({ ok: false, error: message }, { status: message === "FORBIDDEN" ? 403 : 401 });
+    }
+    throw error;
   }
 
   const baseFilter = (q: any) => {

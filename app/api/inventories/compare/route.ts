@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, requirePvAccess } from "@/lib/pvAccess";
 import {
   buildInventoryCompareXlsx,
   parseGestionaleXlsx,
@@ -51,6 +52,18 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
   }
 
+  let access;
+  try {
+    access = await resolvePvAccess(session);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "UNAUTHORIZED";
+    return NextResponse.json({ ok: false, error: message }, { status: message === "UNAUTHORIZED" ? 401 : 500 });
+  }
+  // Le API inventario e progressivi sono riservate ai profili standard.
+  if (access.profile !== "standard") {
+    return NextResponse.json({ ok: false, error: "FORBIDDEN" }, { status: 403 });
+  }
+
   let form: FormData;
   try {
     form = await req.formData();
@@ -93,6 +106,30 @@ export async function POST(req: Request) {
       { ok: false, error: "inventory_date non valida (YYYY-MM-DD)" },
       { status: 400 }
     );
+  }
+
+  try {
+    await requirePvAccess(access, pv_id, "read");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "FORBIDDEN";
+    if (message === "FORBIDDEN" || message === "UNAUTHORIZED") {
+      return NextResponse.json({ ok: false, error: message }, { status: message === "FORBIDDEN" ? 403 : 401 });
+    }
+    throw error;
+  }
+  // Se viene indicato un header, deve appartenere al PV e alla data richiesti.
+  if (inventory_header_id) {
+    const { data: requestedHeader, error: requestedHeaderError } = await supabaseAdmin
+      .from("inventories_headers")
+      .select("id, pv_id, inventory_date")
+      .eq("id", inventory_header_id)
+      .maybeSingle();
+    if (requestedHeaderError) {
+      return NextResponse.json({ ok: false, error: requestedHeaderError.message }, { status: 500 });
+    }
+    if (!requestedHeader || String(requestedHeader.pv_id) !== pv_id || String(requestedHeader.inventory_date) !== inventory_date) {
+      return NextResponse.json({ ok: false, error: "Inventario non trovato per il PV e la data selezionati" }, { status: 404 });
+    }
   }
 
   const isRapid = category_id === null;

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireRole } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, requirePvAccess } from "@/lib/pvAccess";
 import { PdfReport, safePdfFilePart } from "@/lib/work-shifts-pdf";
 
 function isUuid(value: unknown): value is string {
@@ -26,7 +27,9 @@ export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   try {
-    await requireRole(["admin"]);
+    const session = await requireRole(["admin"]);
+    const access = await resolvePvAccess(session);
+    if (access.profile !== "standard") throw new Error("FORBIDDEN");
 
     const url = new URL(req.url);
     const pvId = String(url.searchParams.get("pv_id") ?? "").trim();
@@ -38,12 +41,15 @@ export async function GET(req: Request) {
       );
     }
 
+    // Controllo server-side PRIMA di caricare dipendenti e produrre il PDF.
+    await requirePvAccess(access, pvId, "read");
+
     const [
       { data: pv, error: pvError },
       { data: employees, error: employeesError },
       { data: setting, error: settingError },
     ] = await Promise.all([
-      supabaseAdmin.from("pvs").select("id, code, name").eq("id", pvId).maybeSingle(),
+      supabaseAdmin.from("pvs").select("id, code, name, is_reserved").eq("id", pvId).maybeSingle(),
 
       supabaseAdmin
         .from("employees")

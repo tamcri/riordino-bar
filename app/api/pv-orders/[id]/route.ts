@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, requirePvAccess, filterVisiblePvs, isCashOnlyProfile } from "@/lib/pvAccess";
 import { getPvIdForSession } from "@/lib/pvLookup";
 import { isUuid, summarizePvOrderRows } from "@/lib/pv-orders";
 import type { PvOrderDetail, PvOrderDetailRow } from "@/types/pv-orders";
@@ -51,16 +52,9 @@ export async function GET(_req: Request, context: RouteContext) {
       return NextResponse.json({ ok: false, error: "Ordine non trovato" }, { status: 404 });
     }
 
-    if (session.role === "punto_vendita") {
-      const r = await getPvIdForSession(session);
-      const pv_id = r.pv_id;
-      if (!pv_id) {
-        return NextResponse.json({ ok: false, error: "Utente PV senza pv_id" }, { status: 400 });
-      }
-      if (String((header as any).pv_id) !== String(pv_id)) {
-        return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 403 });
-      }
-    }
+    const access = await resolvePvAccess(session);
+    if (isCashOnlyProfile(access)) throw new Error("FORBIDDEN");
+    await requirePvAccess(access, String(header.pv_id), "read");
 
     const { data: rowsData, error: rowsError } = await supabaseAdmin
       .from("pv_order_rows")
@@ -138,9 +132,8 @@ export async function GET(_req: Request, context: RouteContext) {
 
     return NextResponse.json({ ok: true, ...payload });
   } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: e?.message || "Errore server" },
-      { status: 500 }
-    );
+    const message = e instanceof Error ? e.message : "Errore server";
+    const status = message === "UNAUTHORIZED" ? 401 : message === "FORBIDDEN" ? 403 : 500;
+    return NextResponse.json({ ok: false, error: message }, { status });
   }
 }

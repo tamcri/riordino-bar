@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { COOKIE_NAME, parseSessionValue } from '@/lib/auth';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { resolvePvAccess, filterVisiblePvs } from '@/lib/pvAccess';
 import {
   getCashRegisterAlert,
   getCashRegisterStatus,
@@ -60,11 +61,16 @@ export async function GET() {
       return NextResponse.json({ error: 'Non autorizzato' }, { status: 403 });
     }
 
+    const access = await resolvePvAccess(session);
+    if (access.profile !== 'standard') {
+      return NextResponse.json({ error: 'FORBIDDEN' }, { status: 403 });
+    }
+
     const [{ data: pvs, error: pvsError }, { data: cashRegisters, error: cashRegistersError }] =
       await Promise.all([
         supabaseAdmin
           .from('pvs')
-          .select('id, code, name')
+          .select('id, code, name, is_reserved')
           .order('code', { ascending: true }),
         supabaseAdmin
           .from('cash_registers')
@@ -103,7 +109,7 @@ export async function GET() {
       );
     }
 
-    const filteredPvs = (pvs ?? []).filter((pv) => !EXCLUDED_PV_IDS.includes(pv.id));
+    const filteredPvs = filterVisiblePvs(access, pvs ?? []).filter((pv) => !EXCLUDED_PV_IDS.includes(pv.id));
 
     const pvMap = new Map(
       filteredPvs.map((pv) => [

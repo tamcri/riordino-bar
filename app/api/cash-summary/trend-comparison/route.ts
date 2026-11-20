@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { canAccessPv, resolvePvAccess, requirePvAccess } from "@/lib/pvAccess";
 
 export const runtime = "nodejs";
 
@@ -20,6 +21,11 @@ export async function GET(req: Request) {
     const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
     if (!session || !["admin", "amministrativo"].includes(session.role)) {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
+    }
+
+    const access = await resolvePvAccess(session);
+    if (access.profile !== "standard" && session.userId !== access.userId) {
+      return NextResponse.json({ ok: false, error: "Effettua nuovamente il login" }, { status: 401 });
     }
 
     const params = new URL(req.url).searchParams;
@@ -43,6 +49,25 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: false, error: "PV non valido" }, { status: 400 });
     }
 
+    // Determina i PV visibili PRIMA della paginazione e delle aggregazioni.
+    // Non limitiamo ai soli PV attivi, per preservare i dati storici ordinari.
+    const { data: pvRows, error: pvError } = await supabaseAdmin
+      .from("pvs")
+      .select("id, is_reserved");
+    if (pvError) {
+      return NextResponse.json({ ok: false, error: pvError.message }, { status: 500 });
+    }
+    const visiblePvIds = (pvRows ?? [])
+      .filter((pv) => canAccessPv(access, pv, "read"))
+      .map((pv) => String(pv.id));
+
+    if (pvId && !visiblePvIds.includes(pvId)) {
+      return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 403 });
+    }
+    if (visiblePvIds.length === 0) {
+      return NextResponse.json({ ok: true, rows: [] });
+    }
+
     // Consulta solo i campi necessari, con paginazione per non superare i limiti Supabase.
     const rows: Array<{ pv_id: string; data: string; value: number | null }> = [];
     const pageSize = 500;
@@ -55,7 +80,11 @@ export async function GET(req: Request) {
         .order("data", { ascending: true })
         .order("id", { ascending: true })
         .range(offset, offset + pageSize - 1);
-      if (pvId) query = query.eq("pv_id", pvId);
+      if (pvId) {
+        query = query.eq("pv_id", pvId);
+      } else {
+        query = query.in("pv_id", visiblePvIds);
+      }
       if (status !== "all") query = query.eq("is_closed", status === "closed");
       const { data, error } = await query;
       if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });

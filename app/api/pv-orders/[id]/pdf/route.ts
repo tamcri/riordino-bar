@@ -9,6 +9,7 @@ import {
 } from "pdf-lib";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, requirePvAccess } from "@/lib/pvAccess";
 import { getPvIdForSession } from "@/lib/pvLookup";
 import { isUuid, summarizePvOrderRows } from "@/lib/pv-orders";
 
@@ -150,6 +151,12 @@ export async function GET(req: Request, context: RouteContext) {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
     }
 
+    const access = await resolvePvAccess(session);
+    // Gli account dedicati agli incassi non possono usare ordini o inventari.
+    if (access.profile !== "standard") {
+      return NextResponse.json({ ok: false, error: "FORBIDDEN" }, { status: 403 });
+    }
+
     const url = new URL(req.url);
     const requestedPvView = url.searchParams.get("view") === "pv";
 
@@ -180,6 +187,16 @@ export async function GET(req: Request, context: RouteContext) {
 
     if (!header) {
       return NextResponse.json({ ok: false, error: "Ordine non trovato" }, { status: 404 });
+    }
+
+    try {
+      await requirePvAccess(access, String((header as any).pv_id), "read");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "FORBIDDEN";
+      if (message === "FORBIDDEN" || message === "UNAUTHORIZED") {
+        return NextResponse.json({ ok: false, error: message }, { status: message === "FORBIDDEN" ? 403 : 401 });
+      }
+      throw error;
     }
 
     if (session.role === "punto_vendita") {

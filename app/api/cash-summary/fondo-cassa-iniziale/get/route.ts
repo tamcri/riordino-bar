@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, requirePvAccess } from "@/lib/pvAccess";
 
 export const runtime = "nodejs";
 
@@ -67,6 +68,8 @@ export async function GET(req: Request) {
       );
     }
 
+    const access = await resolvePvAccess(session);
+
     const { searchParams } = new URL(req.url);
 
     let pv_id: string | null = null;
@@ -84,7 +87,14 @@ export async function GET(req: Request) {
       pv_id = pvFromQuery;
     } else if (session.role === "punto_vendita") {
       try {
-        pv_id = await requirePvIdForPuntoVendita(session.username);
+        // Gli account limitati usano esclusivamente il PV assegnato nel DB.
+        // Per i vecchi account standard resta il fallback storico.
+        if (access.profile !== "standard") {
+          if (!access.assignedPvId) throw new Error("PV non assegnato");
+          pv_id = access.assignedPvId;
+        } else {
+          pv_id = access.assignedPvId ?? await requirePvIdForPuntoVendita(session.username);
+        }
       } catch (e: any) {
         return NextResponse.json(
           { ok: false, error: e?.message || "PV non assegnato" },
@@ -96,6 +106,20 @@ export async function GET(req: Request) {
         { ok: false, error: "Ruolo non autorizzato" },
         { status: 403 }
       );
+    }
+
+    if (!pv_id) {
+      return NextResponse.json({ ok: false, error: "PV non valido" }, { status: 400 });
+    }
+
+    // Blocca la lettura dei PV non autorizzati, anche passando pv_id a mano.
+    try {
+      await requirePvAccess(access, pv_id, "read");
+    } catch (error: any) {
+      if (error?.message === "FORBIDDEN") {
+        return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 403 });
+      }
+      throw error;
     }
 
     const { data, error } = await supabaseAdmin

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireRole } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, requirePvAccess } from "@/lib/pvAccess";
 
 function isUuid(value: unknown): value is string {
   return (
@@ -28,6 +29,8 @@ export const dynamic = "force-dynamic";
 export async function POST(req: Request) {
   try {
     const session = await requireRole(["admin"]);
+    const access = await resolvePvAccess(session);
+    if (access.profile !== "standard") throw new Error("FORBIDDEN");
     const body = await req.json().catch(() => null);
     const pvId = String(body?.pv_id ?? "").trim();
     const minEmployees = Number.parseInt(String(body?.min_employees ?? "0"), 10);
@@ -41,6 +44,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Organico minimo non valido." }, { status: 400 });
     }
 
+    await requirePvAccess(access, pvId, "write");
     const userId = await getAppUserIdByUsername(session.username);
 
     const { data, error } = await supabaseAdmin

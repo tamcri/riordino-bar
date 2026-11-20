@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, requirePvAccess, filterVisiblePvs, isCashOnlyProfile } from "@/lib/pvAccess";
 import ExcelJS from "exceljs";
 
 export const runtime = "nodejs";
@@ -129,6 +130,16 @@ export async function GET(req: Request) {
   if (!isUuid(pv_id)) return NextResponse.json({ ok: false, error: "pv_id non valido" }, { status: 400 });
   if (!isIsoDate(date_from) || !isIsoDate(date_to))
     return NextResponse.json({ ok: false, error: "date_from/date_to non valide" }, { status: 400 });
+
+  try {
+    const access = await resolvePvAccess(session);
+    if (isCashOnlyProfile(access)) throw new Error("FORBIDDEN");
+    await requirePvAccess(access, pv_id, "read");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "FORBIDDEN";
+    const status = message === "UNAUTHORIZED" ? 401 : message === "FORBIDDEN" ? 403 : 500;
+    return NextResponse.json({ ok: false, error: message }, { status });
+  }
 
   // 1) Inventories nel periodo (NON filtro qui per category_id)
   let q = supabaseAdmin

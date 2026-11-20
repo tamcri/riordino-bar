@@ -2,58 +2,48 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import type { SessionData } from "@/lib/auth";
+import { resolvePvAccess, requirePvAccess } from "@/lib/pvAccess";
 
 export const runtime = "nodejs";
 
-const USER_TABLE_CANDIDATES = ["app_user", "app_users", "utenti", "users"];
-
-function isUuid(v: string | null | undefined) {
-  if (!v) return false;
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    v.trim()
-  );
-}
-
-async function lookupPvIdFromUserTables(username: string): Promise<string | null> {
-  for (const table of USER_TABLE_CANDIDATES) {
-    const { data, error } = await supabaseAdmin
-      .from(table)
-      .select("pv_id")
-      .eq("username", username)
-      .maybeSingle();
-
-    if (error) continue;
-
-    const pv_id = (data as any)?.pv_id ?? null;
-    if (pv_id && isUuid(pv_id)) return pv_id;
+// Risolve il PV solo da identita' verificata. Il fallback sul codice e'
+// riservato agli account standard storici e non puo' raggiungere PV riservati.
+async function ownPvId(session: SessionData, action: "read" | "write"): Promise<string> {
+  const context = await resolvePvAccess(session);
+  if (context.role !== "punto_vendita" ||
+      (context.profile !== "standard" && context.profile !== "cash_operator")) {
+    throw new Error("FORBIDDEN");
   }
 
-  return null;
-}
+  if (context.profile === "cash_operator" && session.userId !== context.userId) {
+    throw new Error("FORBIDDEN");
+  }
 
-async function lookupPvIdFromUsernameCode(username: string): Promise<string | null> {
-  const code = (username || "").trim().split(/\s+/)[0]?.toUpperCase();
-  if (!code || code.length > 5) return null;
+  if (context.assignedPvId) {
+    await requirePvAccess(context, context.assignedPvId, action);
+    return context.assignedPvId;
+  }
 
-  const { data, error } = await supabaseAdmin
+  if (context.profile !== "standard") throw new Error("FORBIDDEN");
+  const code = context.username.trim().split(/\s+/)[0]?.toUpperCase();
+  if (!code || code.length > 5) throw new Error("FORBIDDEN");
+
+  const { data: pv, error } = await supabaseAdmin
     .from("pvs")
     .select("id")
-    .eq("is_active", true)
     .eq("code", code)
+    .eq("is_active", true)
+    .eq("is_reserved", false)
     .maybeSingle();
-
-  if (error) return null;
-  return data?.id ?? null;
+  if (error) throw error;
+  if (!pv?.id) throw new Error("FORBIDDEN");
+  return String(pv.id);
 }
 
-async function requirePvIdForPuntoVendita(username: string): Promise<string> {
-  const pvFromUsers = await lookupPvIdFromUserTables(username);
-  if (pvFromUsers) return pvFromUsers;
-
-  const pvFromCode = await lookupPvIdFromUsernameCode(username);
-  if (pvFromCode) return pvFromCode;
-
-  throw new Error("Utente punto vendita senza PV assegnato (pv_id mancante).");
+function accessError(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+  return message === "UNAUTHORIZED" || message === "FORBIDDEN";
 }
 
 export async function GET() {
@@ -67,7 +57,7 @@ export async function GET() {
       );
     }
 
-    const pv_id = await requirePvIdForPuntoVendita(session.username);
+    const pv_id = await ownPvId(session, "read");
 
     const { data, error } = await supabaseAdmin
       .from("pv_cash_summaries")
@@ -101,6 +91,9 @@ export async function GET() {
       rows: data ?? [],
     });
   } catch (e: any) {
+    if (accessError(e)) {
+      return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 403 });
+    }
     return NextResponse.json(
       { ok: false, error: e?.message || "Errore lettura riepiloghi PV" },
       { status: 500 }

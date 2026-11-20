@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, requirePvAccess } from "@/lib/pvAccess";
 
 export const runtime = "nodejs";
 
@@ -33,6 +34,12 @@ export async function POST(req: Request) {
         { ok: false, error: "Non autorizzato" },
         { status: 401 }
       );
+    }
+
+    const access = await resolvePvAccess(session);
+    // I profili limitati non possono salvare saldi iniziali, neppure via chiamata diretta.
+    if (access.profile !== "standard") {
+      return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 403 });
     }
 
     const body = (await req.json().catch(() => null)) as Body | null;
@@ -67,6 +74,13 @@ export async function POST(req: Request) {
         { ok: false, error: "Saldo iniziale obbligatorio" },
         { status: 400 }
       );
+    }
+
+    try {
+      await requirePvAccess(access, pv_id, "write");
+    } catch (e: any) {
+      if (e?.message !== "FORBIDDEN") throw e;
+      return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 403 });
     }
 
     const payload = {

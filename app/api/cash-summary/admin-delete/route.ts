@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { requirePvAccess, resolvePvAccess } from "@/lib/pvAccess";
 
 export const runtime = "nodejs";
 
@@ -33,6 +34,20 @@ export async function POST(req: Request) {
           status: 401,
         }
       );
+    }
+
+    let access;
+    try {
+      access = await resolvePvAccess(session);
+      // I profili limitati richiedono la sessione recente con UUID.
+      if (access.profile !== "standard" && session.userId !== access.userId) {
+        return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
+      }
+    } catch (error) {
+      if (error instanceof Error && (error.message === "UNAUTHORIZED" || error.message === "Profilo di accesso non riconosciuto")) {
+        return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
+      }
+      throw error;
     }
 
     const body = (await req.json().catch(() => null)) as Body | null;
@@ -91,6 +106,17 @@ export async function POST(req: Request) {
           status: 404,
         }
       );
+    }
+
+    // L'API amministrativa richiede accesso pieno al PV del riepilogo.
+    // I profili limitati (anche di sola lettura) non possono scrivere qui.
+    try {
+      await requirePvAccess(access, String(summary.pv_id), "full");
+    } catch (error) {
+      if (error instanceof Error && error.message === "FORBIDDEN") {
+        return NextResponse.json({ ok: false, error: "Riepilogo non trovato" }, { status: 404 });
+      }
+      throw error;
     }
 
     const { error: deleteErr } = await supabaseAdmin

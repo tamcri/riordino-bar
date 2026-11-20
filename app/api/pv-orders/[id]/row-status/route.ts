@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, requirePvAccess } from "@/lib/pvAccess";
 import { isPvOrderRowStatus, isUuid } from "@/lib/pv-orders";
 
 export const runtime = "nodejs";
@@ -27,6 +28,12 @@ export async function POST(req: Request, context: RouteContext) {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
     }
 
+    const access = await resolvePvAccess(session);
+    // Gli account dedicati agli incassi non possono usare ordini o inventari.
+    if (access.profile !== "standard") {
+      return NextResponse.json({ ok: false, error: "FORBIDDEN" }, { status: 403 });
+    }
+
     const orderId = String(context.params?.id ?? "").trim();
     if (!isUuid(orderId)) {
       return NextResponse.json({ ok: false, error: "ID ordine non valido" }, { status: 400 });
@@ -45,6 +52,26 @@ export async function POST(req: Request, context: RouteContext) {
     const row_status = String(body.row_status ?? "").trim().toUpperCase() as RowStatus;
     if (!isPvOrderRowStatus(row_status)) {
       return NextResponse.json({ ok: false, error: "Stato riga non valido" }, { status: 400 });
+    }
+
+    // Recupera il PV proprietario dell'ordine PRIMA di leggere o aggiornare le righe.
+    const { data: orderHeader, error: orderHeaderError } = await supabaseAdmin
+      .from("pv_order_headers")
+      .select("id, pv_id")
+      .eq("id", orderId)
+      .maybeSingle();
+    if (orderHeaderError) throw orderHeaderError;
+    if (!orderHeader) {
+      return NextResponse.json({ ok: false, error: "Ordine non trovato" }, { status: 404 });
+    }
+    try {
+      await requirePvAccess(access, String(orderHeader.pv_id), "write");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "FORBIDDEN";
+      if (message === "FORBIDDEN" || message === "UNAUTHORIZED") {
+        return NextResponse.json({ ok: false, error: message }, { status: message === "FORBIDDEN" ? 403 : 401 });
+      }
+      throw error;
     }
 
     // 🔴 QUI CAMBIA LA SELECT

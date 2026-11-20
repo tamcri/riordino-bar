@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, canAccessPv } from "@/lib/pvAccess";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -78,6 +79,13 @@ export async function GET(req: Request) {
       );
     }
 
+    const access = await resolvePvAccess(session);
+    // Questo endpoint e' un report amministrativo separato dal Riepilogo Incassato.
+    // Il responsabile riservato puo' consultare solo le API di riepilogo dedicate.
+    if (access.profile !== "standard") {
+      return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 403 });
+    }
+
     const { searchParams } = new URL(req.url);
 
     const pv_id = cleanText(searchParams.get("pv_id"));
@@ -90,6 +98,27 @@ export async function GET(req: Request) {
         { ok: false, error: "pv_id non valido" },
         { status: 400 }
       );
+    }
+
+    // Individua i PV visibili PRIMA di recuperare i riepiloghi e i pagamenti.
+    const { data: allPvs, error: pvsError } = await supabaseAdmin
+      .from("pvs")
+      .select("id, is_reserved");
+
+    if (pvsError) {
+      return NextResponse.json({ ok: false, error: pvsError.message }, { status: 500 });
+    }
+
+    const allowedPvIds = (allPvs ?? [])
+      .filter((pv) => canAccessPv(access, pv, "read"))
+      .map((pv) => String(pv.id));
+
+    if (pv_id && !allowedPvIds.includes(pv_id)) {
+      return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 403 });
+    }
+
+    if (allowedPvIds.length === 0) {
+      return NextResponse.json({ ok: true, rows: [] });
     }
 
     let summariesQuery = supabaseAdmin
@@ -106,6 +135,7 @@ export async function GET(req: Request) {
         )
       `
       )
+      .in("pv_id", pv_id ? [pv_id] : allowedPvIds)
       .order("data", { ascending: false });
 
     if (pv_id) {

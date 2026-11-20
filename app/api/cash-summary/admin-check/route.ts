@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { requirePvAccess, resolvePvAccess } from "@/lib/pvAccess";
 
 export const runtime = "nodejs";
 
@@ -58,6 +59,20 @@ export async function POST(req: Request) {
       );
     }
 
+    let access;
+    try {
+      access = await resolvePvAccess(session);
+      // I profili limitati richiedono la sessione recente con UUID.
+      if (access.profile !== "standard" && session.userId !== access.userId) {
+        return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
+      }
+    } catch (error) {
+      if (error instanceof Error && (error.message === "UNAUTHORIZED" || error.message === "Profilo di accesso non riconosciuto")) {
+        return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
+      }
+      throw error;
+    }
+
     const body = await req.json().catch(() => null);
 
     const summaryId = String(body?.summary_id ?? "").trim();
@@ -76,6 +91,30 @@ export async function POST(req: Request) {
         { ok: false, error: "Metrica non valida" },
         { status: 400 }
       );
+    }
+
+    const { data: summary, error: summaryErr } = await supabaseAdmin
+      .from("pv_cash_summaries")
+      .select("id, pv_id")
+      .eq("id", summaryId)
+      .maybeSingle();
+
+    if (summaryErr) {
+      return NextResponse.json({ ok: false, error: summaryErr.message }, { status: 500 });
+    }
+    if (!summary) {
+      return NextResponse.json({ ok: false, error: "Riepilogo non trovato" }, { status: 404 });
+    }
+
+    // L'API amministrativa richiede accesso pieno al PV del riepilogo.
+    // I profili limitati (anche di sola lettura) non possono scrivere qui.
+    try {
+      await requirePvAccess(access, String(summary.pv_id), "full");
+    } catch (error) {
+      if (error instanceof Error && error.message === "FORBIDDEN") {
+        return NextResponse.json({ ok: false, error: "Riepilogo non trovato" }, { status: 404 });
+      }
+      throw error;
     }
 
     // Se status è null, rimuove lo stato di controllo.

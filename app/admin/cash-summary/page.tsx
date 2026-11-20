@@ -3,12 +3,18 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import CashSummaryAdminClient from "./CashSummaryAdminClient";
+import { resolvePvAccess } from "@/lib/pvAccess";
 
-export default function AdminCashSummaryPage() {
+export default async function AdminCashSummaryPage() {
   const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
 
   if (!session) redirect("/login");
   if (!["admin", "amministrativo"].includes(session.role)) redirect("/login");
+
+  // Non mostrare il cruscotto con azioni amministrative a profili di sola lettura.
+  // La pagina dedicata sara introdotta in uno step separato.
+  const access = await resolvePvAccess(session);
+  if (access.profile !== "standard") redirect("/login");
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">

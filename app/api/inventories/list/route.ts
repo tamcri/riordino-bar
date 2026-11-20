@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, requirePvAccess, filterVisiblePvs, isCashOnlyProfile } from "@/lib/pvAccess";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -165,10 +166,24 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: false, error: "Intervallo date non valido: 'Dal' è dopo 'Al'." }, { status: 400 });
     }
 
-    let effectivePvId = pv_id_qs;
-    if (session.role === "punto_vendita") {
-      effectivePvId = await requirePvIdForPuntoVendita(session.username);
+    const access = await resolvePvAccess(session);
+    if (isCashOnlyProfile(access)) throw new Error("FORBIDDEN");
+
+    // Nessuna query senza limitazione al perimetro dei PV autorizzati.
+    const { data: pvRows, error: pvError } = await supabaseAdmin
+      .from("pvs")
+      .select("id, is_reserved");
+    if (pvError) throw pvError;
+    const visiblePvIds = filterVisiblePvs(access, pvRows ?? []).map((pv) => pv.id);
+    const effectivePvId = session.role === "punto_vendita"
+      ? access.assignedPvId
+      : pv_id_qs || null;
+    if (effectivePvId) {
+      await requirePvAccess(access, effectivePvId, "read");
+    } else if (session.role === "punto_vendita") {
+      throw new Error("FORBIDDEN");
     }
+    if (visiblePvIds.length === 0) return NextResponse.json({ ok: true, rows: [] });
 
     let q = supabaseAdmin
       .from("inventories")
@@ -179,6 +194,7 @@ export async function GET(req: Request) {
       .limit(limitRows);
 
     if (effectivePvId) q = q.eq("pv_id", effectivePvId);
+    else q = q.in("pv_id", visiblePvIds);
 
     if (session.role === "punto_vendita") {
       q = q.is("category_id", null).is("subcategory_id", null);
@@ -321,6 +337,7 @@ export async function GET(req: Request) {
       .select("id, pv_id, category_id, subcategory_id, inventory_date, operatore, label, rapid_session_id, created_by_username, updated_at");
 
     if (effectivePvId) hq = hq.eq("pv_id", effectivePvId);
+    else hq = hq.in("pv_id", visiblePvIds);
 
     if (session.role === "punto_vendita") {
       hq = hq.is("category_id", null).is("subcategory_id", null);
@@ -444,7 +461,9 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: true, rows: out });
   } catch (e: any) {
     console.error("[inventories/list] UNCAUGHT", e);
-    return NextResponse.json({ ok: false, error: e?.message || "Errore server" }, { status: 500 });
+    const message = e instanceof Error ? e.message : "Errore server";
+    const status = message === "UNAUTHORIZED" ? 401 : message === "FORBIDDEN" ? 403 : 500;
+    return NextResponse.json({ ok: false, error: message }, { status });
   }
 }
 

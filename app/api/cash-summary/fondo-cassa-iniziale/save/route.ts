@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, requirePvAccess } from "@/lib/pvAccess";
 
 export const runtime = "nodejs";
 
@@ -58,6 +59,20 @@ export async function POST(req: Request) {
         { ok: false, error: "Fondo cassa iniziale obbligatorio" },
         { status: 400 }
       );
+    }
+
+    // L'accesso in sola lettura non permette modifiche al fondo cassa.
+    const access = await resolvePvAccess(session);
+    if (access.profile !== "standard") {
+      return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 403 });
+    }
+    try {
+      await requirePvAccess(access, pv_id, "full");
+    } catch (error: any) {
+      if (error?.message === "FORBIDDEN") {
+        return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 403 });
+      }
+      throw error;
     }
 
     const payload = {

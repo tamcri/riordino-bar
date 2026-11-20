@@ -4,8 +4,9 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { parseSessionValue, COOKIE_NAME } from "@/lib/auth";
 import UserTopBarClient from "../../components/UserTopBarClient";
+import { resolvePvAccess } from "@/lib/pvAccess";
 
-export default function PvLayout({ children }: { children: React.ReactNode }) {
+export default async function PvLayout({ children }: { children: React.ReactNode }) {
   const cookieStore = cookies();
   const raw = cookieStore.get(COOKIE_NAME)?.value;
   const session = parseSessionValue(raw);
@@ -18,6 +19,10 @@ export default function PvLayout({ children }: { children: React.ReactNode }) {
   if (role !== "punto_vendita") {
     redirect(role === "admin" ? "/admin" : "/user");
   }
+
+  // Il profilo autorizzativo viene letto dal database, non dai parametri della pagina.
+  const access = await resolvePvAccess(session);
+  const cashOnly = access.profile === "cash_operator";
 
   return (
     <div className="min-h-screen bg-gray-100">
@@ -39,6 +44,7 @@ export default function PvLayout({ children }: { children: React.ReactNode }) {
 
       <nav className="bg-white border-b">
         <div className="mx-auto max-w-6xl px-6 py-3 flex items-center gap-3 flex-wrap">
+          {!cashOnly && (<>
           <Link
             href="/pv/inventario"
             className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-emerald-600 text-white hover:bg-emerald-700"
@@ -74,6 +80,7 @@ export default function PvLayout({ children }: { children: React.ReactNode }) {
             Scarico Rimanenze
           </Link>
 
+          </>)}
           <Link
             href="/pv/riepilogo-incassato"
             className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-amber-600 text-white hover:bg-amber-700"
@@ -81,12 +88,14 @@ export default function PvLayout({ children }: { children: React.ReactNode }) {
             Riepilogo Incassato
           </Link>
 
+          {!cashOnly && (
           <Link
             href="/pv/turni"
             className="inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium bg-sky-700 text-white hover:bg-sky-800"
           >
             Turni
           </Link>
+          )}
         </div>
       </nav>
 

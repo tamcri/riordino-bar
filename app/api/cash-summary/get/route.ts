@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, requirePvAccess } from "@/lib/pvAccess";
 
 export const runtime = "nodejs";
 
@@ -41,13 +42,33 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
     }
 
-    const pv_id = await lookupPvIdFromUserTables(session.username);
+    const access = await resolvePvAccess(session);
+    if (access.profile !== "standard" && access.profile !== "cash_operator") {
+      return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 403 });
+    }
+    // Il profilo riservato usa soltanto il PV associato all'utente autenticato.
+    // Gli operatori storici mantengono il precedente recupero da app_users.
+    if (access.profile === "cash_operator" && !session.userId) {
+      return NextResponse.json({ ok: false, error: "Effettua nuovamente il login" }, { status: 401 });
+    }
+    const pv_id = access.profile === "cash_operator"
+      ? access.assignedPvId
+      : access.assignedPvId ?? await lookupPvIdFromUserTables(session.username);
 
     if (!pv_id) {
       return NextResponse.json(
         { ok: false, error: "PV non assegnato all'utente" },
         { status: 401 }
       );
+    }
+
+    try {
+      await requirePvAccess(access, pv_id, "read");
+    } catch (error) {
+      if (error instanceof Error && error.message === "FORBIDDEN") {
+        return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 403 });
+      }
+      throw error;
     }
 
     const { searchParams } = new URL(req.url);

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { canAccessPv, requirePvAccess, resolvePvAccess } from "@/lib/pvAccess";
 
 export const runtime = "nodejs";
 
@@ -194,20 +195,46 @@ export async function POST(req: Request) {
 
     let pv_id: string | null = null;
 
-    if (session.role === "punto_vendita") {
-      try {
-        pv_id = await requirePvIdForPuntoVendita(session.username);
-      } catch (e: any) {
-        return NextResponse.json(
-          { ok: false, error: e?.message || "PV non assegnato" },
-          { status: 401 }
-        );
-      }
-    } else {
+    if (session.role !== "punto_vendita") {
       return NextResponse.json(
         { ok: false, error: "Questa route al momento è riservata al PV" },
         { status: 403 }
       );
+    }
+
+    // Verifica l'utente reale e il profilo nel database prima di qualsiasi lettura o scrittura.
+    // Le sessioni degli account riservati devono contenere l'ID firmato al login.
+    const access = await resolvePvAccess(session);
+    if (access.profile !== "standard" && session.userId !== access.userId) {
+      return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
+    }
+
+    if (access.assignedPvId) {
+      pv_id = access.assignedPvId;
+      try {
+        await requirePvAccess(access, pv_id, "write");
+      } catch (e: any) {
+        if (e?.message === "FORBIDDEN") {
+          return NextResponse.json({ ok: false, error: "Accesso al PV negato" }, { status: 403 });
+        }
+        throw e;
+      }
+    } else if (access.profile === "standard") {
+      // Compatibilita' per i soli account PV storici senza pv_id in app_users.
+      // Nessun fallback per gli account riservati: ne' username ne' payload
+      // possono assegnare autonomamente l'accesso a un PV riservato.
+      pv_id = await requirePvIdForPuntoVendita(access.username);
+      const { data: legacyPv, error: legacyPvError } = await supabaseAdmin
+        .from("pvs")
+        .select("id, is_reserved")
+        .eq("id", pv_id)
+        .maybeSingle();
+      if (legacyPvError) throw legacyPvError;
+      if (!legacyPv || !canAccessPv({ ...access, assignedPvId: pv_id }, legacyPv, "write")) {
+        return NextResponse.json({ ok: false, error: "Accesso al PV negato" }, { status: 403 });
+      }
+    } else {
+      return NextResponse.json({ ok: false, error: "PV non assegnato" }, { status: 403 });
     }
 
     let fondo_cassa_iniziale: number;
@@ -437,7 +464,8 @@ export async function POST(req: Request) {
       const { error: updateErr } = await supabaseAdmin
         .from("pv_cash_summaries")
         .update(payload)
-        .eq("id", existing.id);
+        .eq("id", existing.id)
+        .eq("pv_id", pv_id);
 
       if (updateErr) {
         return NextResponse.json({ ok: false, error: updateErr.message }, { status: 500 });
@@ -490,7 +518,8 @@ export async function POST(req: Request) {
         is_closed: true,
         updated_at: new Date().toISOString(),
       })
-      .eq("id", existing.id);
+      .eq("id", existing.id)
+      .eq("pv_id", pv_id);
 
     if (versatoErr) {
       return NextResponse.json({ ok: false, error: versatoErr.message }, { status: 500 });

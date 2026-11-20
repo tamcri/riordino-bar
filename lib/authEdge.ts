@@ -1,10 +1,14 @@
 export const COOKIE_NAME = "rb_session";
 
 type SessionRole = "admin" | "amministrativo" | "punto_vendita";
+type SessionProfile = "standard" | "cash_readonly" | "cash_operator";
 
 export type SessionData = {
   username: string;
   role: SessionRole;
+  /** Identificativo DB; assente nelle sessioni create prima dell aggiornamento del login. */
+  userId?: string;
+  accessProfile?: SessionProfile;
   iat: number;
 };
 
@@ -60,6 +64,23 @@ export async function parseSessionValueEdge(value?: string | null): Promise<Sess
 
     if (!parsed?.username) return null;
     if (!["admin", "amministrativo", "punto_vendita"].includes(parsed.role)) return null;
+
+    if (parsed.accessProfile !== undefined &&
+        !["standard", "cash_readonly", "cash_operator"].includes(parsed.accessProfile)) return null;
+    if (parsed.accessProfile && parsed.accessProfile !== "standard" && !parsed.userId) return null;
+    if (parsed.accessProfile === "cash_readonly" && parsed.role !== "admin") return null;
+    if (parsed.accessProfile === "cash_operator" && parsed.role !== "punto_vendita") return null;
+
+    // Compatibilita con le sessioni esistenti: userId e ancora opzionale.
+    // Se presente, deve essere un UUID valido.
+    if (parsed.userId !== undefined) {
+      if (
+        typeof parsed.userId !== "string" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(parsed.userId)
+      ) {
+        return null;
+      }
+    }
 
     return parsed;
   } catch {

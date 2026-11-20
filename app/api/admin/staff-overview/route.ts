@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { requireRole } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, filterVisiblePvs } from "@/lib/pvAccess";
 
-type PvRow = { id: string; code: string | null; name: string | null };
+type PvRow = { id: string; code: string | null; name: string | null; is_reserved: boolean };
 type EmployeeRow = {
   id: string;
   pv_id: string;
@@ -27,19 +28,40 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    await requireRole(["admin"]);
+    const session = await requireRole(["admin"]);
+    const access = await resolvePvAccess(session);
+    // Questa API riguarda l'organico amministrativo, non i riepiloghi di cassa.
+    // I profili riservati non devono poterla interrogare, nemmeno per il PV assegnato.
+    if (access.profile !== "standard") throw new Error("FORBIDDEN");
 
-    const [{ data: pvs, error: pvsError }, { data: employees, error: employeesError }, { data: settings, error: settingsError }] =
-      await Promise.all([
-        supabaseAdmin.from("pvs").select("id, code, name").order("code", { ascending: true }),
-        supabaseAdmin
+    const { data: allPvs, error: pvsError } = await supabaseAdmin
+      .from("pvs")
+      .select("id, code, name, is_reserved")
+      .order("code", { ascending: true });
+    if (pvsError) throw new Error(pvsError.message);
+
+    const pvs = filterVisiblePvs(access, (allPvs ?? []) as PvRow[]);
+    const visiblePvIds = pvs.map((pv) => pv.id);
+    if (visiblePvIds.length === 0) {
+      return NextResponse.json({ ok: true, rows: [] });
+    }
+
+    // Filtra anche le query sottostanti: nessun nominativo o conteggio del PV
+    // riservato deve raggiungere la risposta di un admin ordinario.
+    const [
+      { data: employees, error: employeesError },
+      { data: settings, error: settingsError },
+    ] = await Promise.all([
+      supabaseAdmin
         .from("employees")
         .select("id, pv_id, name, active, counts_in_staff, contract_type, created_at, updated_at")
+        .in("pv_id", visiblePvIds)
         .order("name", { ascending: true }),
-        supabaseAdmin.from("pv_staff_settings").select("pv_id, min_employees, note"),
-      ]);
-
-    if (pvsError) throw new Error(pvsError.message);
+      supabaseAdmin
+        .from("pv_staff_settings")
+        .select("pv_id, min_employees, note")
+        .in("pv_id", visiblePvIds),
+    ]);
     if (employeesError) throw new Error(employeesError.message);
     if (settingsError) throw new Error(settingsError.message);
 
@@ -49,7 +71,7 @@ export async function GET() {
       settingMap.set(setting.pv_id, setting);
     }
 
-    const rows = ((pvs ?? []) as PvRow[]).map((pv) => {
+    const rows = pvs.map((pv) => {
       const pvEmployees = employeeRows.filter((employee) => employee.pv_id === pv.id);
 
 const staffEmployees = pvEmployees

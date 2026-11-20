@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, requirePvAccess } from "@/lib/pvAccess";
 import { getPvIdForSession } from "@/lib/pvLookup";
 import { isDateOnly, sanitizePvOrderRows } from "@/lib/pv-orders";
 
@@ -29,6 +30,12 @@ export async function POST(req: Request) {
 
     if (!session || session.role !== "punto_vendita") {
       return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
+    }
+
+    const access = await resolvePvAccess(session);
+    // Gli account dedicati agli incassi non possono usare ordini o inventari.
+    if (access.profile !== "standard") {
+      return NextResponse.json({ ok: false, error: "FORBIDDEN" }, { status: 403 });
     }
 
     const body = (await req.json().catch(() => null)) as Body | null;
@@ -67,6 +74,16 @@ export async function POST(req: Request) {
         { ok: false, error: "Utente PV senza pv_id assegnato" },
         { status: 400 }
       );
+    }
+
+    try {
+      await requirePvAccess(access, pv_id, "write");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "FORBIDDEN";
+      if (message === "FORBIDDEN" || message === "UNAUTHORIZED") {
+        return NextResponse.json({ ok: false, error: message }, { status: message === "FORBIDDEN" ? 403 : 401 });
+      }
+      throw error;
     }
 
     const { data: header, error: headerError } = await supabaseAdmin

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, requirePvAccess } from "@/lib/pvAccess";
 import { syncPvStockFromInventory } from "@/lib/deposits/syncPvStockFromInventory";
 import { mergePartialRecount } from "@/lib/progressivi/mergePartialRecount";
 
@@ -230,6 +231,17 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 401 });
   }
 
+  let access;
+  try {
+    access = await resolvePvAccess(session);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "UNAUTHORIZED";
+    return NextResponse.json({ ok: false, error: message }, { status: message === "UNAUTHORIZED" ? 401 : 500 });
+  }
+  if (access.profile !== "standard") {
+    return NextResponse.json({ ok: false, error: "FORBIDDEN" }, { status: 403 });
+  }
+
   const body = (await req.json().catch(() => null)) as Body | null;
   if (!body) return NextResponse.json({ ok: false, error: "Body non valido" }, { status: 400 });
 
@@ -347,6 +359,16 @@ export async function POST(req: Request) {
 
   if (!pv_id) {
     return NextResponse.json({ ok: false, error: "pv_id mancante" }, { status: 400 });
+  }
+
+  try {
+    await requirePvAccess(access, pv_id, "write");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "FORBIDDEN";
+    if (message === "FORBIDDEN" || message === "UNAUTHORIZED") {
+      return NextResponse.json({ ok: false, error: message }, { status: message === "FORBIDDEN" ? 403 : 401 });
+    }
+    throw error;
   }
 
   let existsQ = supabaseAdmin

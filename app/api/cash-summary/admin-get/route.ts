@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, requirePvAccess } from "@/lib/pvAccess";
 
 export const runtime = "nodejs";
 
@@ -58,6 +59,21 @@ export async function GET(req: Request) {
         { ok: false, error: "Riepilogo non trovato" },
         { status: 404 }
       );
+    }
+
+    // Verifica l'accesso al PV prima di leggere i dati collegati al riepilogo.
+    // Non rivelare l'esistenza di riepiloghi appartenenti a PV non autorizzati.
+    const access = await resolvePvAccess(session);
+    try {
+      await requirePvAccess(access, String(summary.pv_id), "read");
+    } catch (accessError: any) {
+      if (accessError?.message === "FORBIDDEN") {
+        return NextResponse.json(
+          { ok: false, error: "Riepilogo non trovato" },
+          { status: 404 }
+        );
+      }
+      throw accessError;
     }
 
     const { data: suppliers, error: suppliersErr } = await supabaseAdmin

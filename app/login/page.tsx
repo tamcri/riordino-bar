@@ -11,7 +11,7 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    // bootstrap admin al primo avvio (solo dev o prima installazione)
+    // Manteniamo il comportamento esistente del progetto.
     fetch("/api/auth/bootstrap", { method: "POST" }).catch(() => {});
   }, []);
 
@@ -26,27 +26,30 @@ export default function LoginPage() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ username, password }),
       });
-
-      const json = await res.json();
-
-      if (!json.ok) {
-        setMsg(json.error || "Errore login");
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.ok) {
+        setMsg(json?.error || "Errore login");
         return;
       }
 
-      // ✅ Redirect pulito e definitivo:
-      // - punto_vendita -> /pv/inventario (non /pv)
-      // - admin -> /admin
-      // - amministrativo -> /user
-      let to = "/user";
-
-      if (json.role === "punto_vendita") to = "/pv/inventario";
-      else if (json.role === "admin") to = "/admin";
-      else to = "/user";
-
-      router.replace(to);
-    } catch (err: any) {
-      setMsg(err?.message || "Errore login");
+      // La destinazione viene decisa dal server dopo aver verificato
+      // il profilo autorizzativo nel database.
+      const redirectTo = String(json.redirectTo ?? "");
+      const allowedDestinations = new Set([
+        "/admin",
+        "/user",
+        "/pv/inventario",
+        "/pv/riepilogo-incassato",
+        "/reserved-cash",
+      ]);
+      if (!allowedDestinations.has(redirectTo)) {
+        setMsg("Destinazione di accesso non valida.");
+        return;
+      }
+      router.replace(redirectTo);
+      router.refresh();
+    } catch (err: unknown) {
+      setMsg(err instanceof Error ? err.message : "Errore login");
     } finally {
       setLoading(false);
     }
@@ -74,19 +77,12 @@ export default function LoginPage() {
             onChange={(e) => setPassword(e.target.value)}
             autoComplete="current-password"
           />
-
-          <button
-            className="w-full rounded-xl bg-black text-white p-3 disabled:opacity-60"
-            disabled={loading}
-          >
+          <button className="w-full rounded-xl bg-black text-white p-3 disabled:opacity-60" disabled={loading}>
             {loading ? "Accesso..." : "Entra"}
           </button>
-
           {msg && <p className="text-sm text-red-600">{msg}</p>}
         </form>
       </div>
     </main>
   );
 }
-
-

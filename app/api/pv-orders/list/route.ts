@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { resolvePvAccess, requirePvAccess, filterVisiblePvs, isCashOnlyProfile } from "@/lib/pvAccess";
 import { getPvIdForSession } from "@/lib/pvLookup";
 import {
   isDateOnly,
@@ -30,17 +31,19 @@ export async function GET(req: Request) {
     const pv_id_param = norm(url.searchParams.get("pv_id"));
     const shipping_status_param = norm(url.searchParams.get("shipping_status"));
 
-    let pv_id: string | null = null;
-
-    if (session.role === "punto_vendita") {
-      const r = await getPvIdForSession(session);
-      pv_id = r.pv_id;
-      if (!pv_id) {
-        return NextResponse.json({ ok: false, error: "Utente PV senza pv_id" }, { status: 400 });
-      }
-    } else {
-      pv_id = pv_id_param || null;
-    }
+    const access = await resolvePvAccess(session);
+    if (isCashOnlyProfile(access)) throw new Error("FORBIDDEN");
+    const { data: pvRows, error: pvError } = await supabaseAdmin
+      .from("pvs")
+      .select("id, is_reserved");
+    if (pvError) throw pvError;
+    const visiblePvIds = filterVisiblePvs(access, pvRows ?? []).map((pv) => pv.id);
+    const pv_id = session.role === "punto_vendita"
+      ? access.assignedPvId
+      : pv_id_param || null;
+    if (pv_id) await requirePvAccess(access, pv_id, "read");
+    else if (session.role === "punto_vendita") throw new Error("FORBIDDEN");
+    if (visiblePvIds.length === 0) return NextResponse.json({ ok: true, rows: [] });
 
     let q = supabaseAdmin
       .from("pv_order_headers")
@@ -60,6 +63,7 @@ export async function GET(req: Request) {
       .limit(300);
 
     if (pv_id) q = q.eq("pv_id", pv_id);
+    else q = q.in("pv_id", visiblePvIds);
     if (isDateOnly(from)) q = q.gte("order_date", from);
     if (isDateOnly(to)) q = q.lte("order_date", to);
     if (isPvOrderShippingStatus(shipping_status_param)) {
@@ -119,9 +123,8 @@ export async function GET(req: Request) {
 
     return NextResponse.json({ ok: true, rows });
   } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: e?.message || "Errore server" },
-      { status: 500 }
-    );
+    const message = e instanceof Error ? e.message : "Errore server";
+    const status = message === "UNAUTHORIZED" ? 401 : message === "FORBIDDEN" ? 403 : 500;
+    return NextResponse.json({ ok: false, error: message }, { status });
   }
 }

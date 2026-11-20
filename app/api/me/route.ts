@@ -3,58 +3,24 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { COOKIE_NAME, parseSessionValue } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { canAccessPv, requirePvAccess, resolvePvAccess } from "@/lib/pvAccess";
 
 export const runtime = "nodejs";
 
-async function lookupPvInfo(
-  pv_id: string
-): Promise<{ pv_code: string | null; pv_name: string | null }> {
-  const { data, error } = await supabaseAdmin
-    .from("pvs")
-    .select("code, name")
-    .eq("id", pv_id)
-    .maybeSingle();
-
-  if (error || !data) return { pv_code: null, pv_name: null };
-
-  return {
-    pv_code: (data as any).code ?? null,
-    pv_name: (data as any).name ?? null,
-  };
-}
-
-function isAdminRole(role: any) {
-  const r = String(role || "").toLowerCase().trim();
-  return (
-    r === "admin" ||
-    r === "amministrativo" ||
-    r === "utente_amministrativo" ||
-    r === "superadmin"
-  );
-}
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export async function GET() {
   try {
-    const c = cookies();
-    const sessionRaw = c.get(COOKIE_NAME)?.value || "";
-    const session = parseSessionValue(sessionRaw);
-
+    const session = parseSessionValue(cookies().get(COOKIE_NAME)?.value ?? null);
     if (!session) {
       return NextResponse.json({ ok: false, error: "Non autenticato" }, { status: 401 });
     }
 
-    const role = (session as any).role ?? undefined;
-    const user_id = (session as any).user_id || (session as any).id || null;
-    const username = (session as any).username || null;
+    // Verifica identita', ruolo e profilo correnti sul database, non solo nel cookie.
+    const access = await resolvePvAccess(session);
+    const base = { role: access.role, username: access.username };
 
-    const base = {
-      role,
-      username: (session as any).username ?? undefined,
-    };
-
-    // ✅ ADMIN / AMMINISTRATIVO: non richiediamo pv_id
-    //    (potranno vedere tutti i PV o scegliere un PV dalla UI)
-    if (isAdminRole(role)) {
+    if (access.role === "admin" || access.role === "amministrativo") {
       return NextResponse.json({
         ok: true,
         ...base,
@@ -65,101 +31,88 @@ export async function GET() {
       });
     }
 
-    // ✅ 1) Punto vendita: prendo pv_id da app_users usando user_id
-    if (user_id) {
-      const { data: fromUsers, error: errUsers } = await supabaseAdmin
-        .from("app_users")
-        .select("pv_id")
-        .eq("id", user_id)
-        .maybeSingle();
-
-      if (!errUsers && fromUsers?.pv_id) {
-        const pvInfo = await lookupPvInfo(fromUsers.pv_id);
-        return NextResponse.json({
-          ok: true,
-          ...base,
-          pv_id: fromUsers.pv_id,
-          ...pvInfo,
-        });
-      }
+    if (access.role !== "punto_vendita") {
+      return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 403 });
     }
 
-    // ✅ 1B) Se non trovo per user_id, provo per username
-    if (username) {
-      const { data: uRow, error: uErr } = await supabaseAdmin
-        .from("app_users")
-        .select("pv_id")
-        .eq("username", username)
-        .maybeSingle();
-
-      if (!uErr && uRow?.pv_id) {
-        const pvInfo = await lookupPvInfo(uRow.pv_id);
-        return NextResponse.json({
-          ok: true,
-          ...base,
-          pv_id: uRow.pv_id,
-          ...pvInfo,
-          warning: "pv_id trovato cercando app_users per username (non per user_id).",
-        });
-      }
+    // Il profilo riservato non puo' utilizzare cookie vecchi o fallback sullo username.
+    if (access.profile === "cash_operator" && session.userId !== access.userId) {
+      return NextResponse.json({ ok: false, error: "Effettua nuovamente il login" }, { status: 401 });
     }
 
-    // ✅ 2) Fallback extra: deduco PV da pvs.code usando username (solo se username è tipo "A1-DIVERSIVO" o "A1-...")
-    if (username) {
-      const u = String(username).trim();
+    let pvId = access.assignedPvId;
+    let legacyFallback = false;
+    let warning: string | undefined;
 
-      const { data: byExact, error: errExact } = await supabaseAdmin
-        .from("pvs")
-        .select("id")
-        .eq("code", u)
-        .maybeSingle();
+    // Compatibilita' solo con gli account ordinari storici senza pv_id assegnato.
+    if (!pvId && access.profile === "standard") {
+      const username = access.username.trim();
+      const candidates = [username, username.split("-")[0]?.trim()]
+        .filter((value): value is string => Boolean(value));
 
-      if (!errExact && byExact?.id) {
-        const pvInfo = await lookupPvInfo(byExact.id);
-        return NextResponse.json({
-          ok: true,
-          ...base,
-          pv_id: byExact.id,
-          ...pvInfo,
-          warning:
-            `pv_id non trovato in app_users; dedotto da username (match esatto: ${u}). ` +
-            `Consigliato assegnare pv_id in app_users.`,
-        });
-      }
-
-      const prefix = u.split("-")[0]?.trim();
-      if (prefix) {
-        const { data: byPrefix, error: errPrefix } = await supabaseAdmin
+      for (const code of new Set(candidates)) {
+        const { data: legacyPv, error } = await supabaseAdmin
           .from("pvs")
-          .select("id")
-          .eq("code", prefix)
+          .select("id, code, name, is_reserved")
+          .eq("code", code)
           .maybeSingle();
-
-        if (!errPrefix && byPrefix?.id) {
-          const pvInfo = await lookupPvInfo(byPrefix.id);
-          return NextResponse.json({
-            ok: true,
-            ...base,
-            pv_id: byPrefix.id,
-            ...pvInfo,
-            warning:
-              `pv_id non trovato in app_users; dedotto da username (prefisso: ${prefix}). ` +
-              `Consigliato assegnare pv_id in app_users.`,
-          });
+        if (error) throw error;
+        if (legacyPv && !legacyPv.is_reserved) {
+          pvId = String(legacyPv.id);
+          legacyFallback = true;
+          warning = "pv_id dedotto dal codice nello username; consigliato assegnare pv_id in app_users.";
+          break;
         }
       }
     }
 
-    return NextResponse.json(
-      { ok: false, ...base, error: "PV non trovato per utente" },
-      { status: 404 }
-    );
-  } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: e?.message || "Errore server" },
-      { status: 500 }
-    );
+    if (!pvId || !UUID.test(pvId)) {
+      return NextResponse.json({ ok: false, ...base, error: "PV non trovato per utente" }, { status: 404 });
+    }
+
+    if (legacyFallback) {
+      // Non estendere mai il fallback ai PV riservati.
+      const { data: pv, error } = await supabaseAdmin
+        .from("pvs")
+        .select("id, code, name, is_reserved")
+        .eq("id", pvId)
+        .maybeSingle();
+      if (error) throw error;
+      if (!pv || pv.is_reserved || !canAccessPv({ ...access, assignedPvId: pvId }, pv, "read")) {
+        return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 403 });
+      }
+    } else {
+      try {
+        await requirePvAccess(access, pvId, "read");
+      } catch (error) {
+        if (error instanceof Error && error.message === "FORBIDDEN") {
+          return NextResponse.json({ ok: false, error: "Non autorizzato" }, { status: 403 });
+        }
+        throw error;
+      }
+    }
+
+    const { data: pv, error: pvError } = await supabaseAdmin
+      .from("pvs")
+      .select("code, name")
+      .eq("id", pvId)
+      .maybeSingle();
+    if (pvError) throw pvError;
+    if (!pv) {
+      return NextResponse.json({ ok: false, ...base, error: "PV non trovato per utente" }, { status: 404 });
+    }
+
+    return NextResponse.json({
+      ok: true,
+      ...base,
+      pv_id: pvId,
+      pv_code: pv.code ?? null,
+      pv_name: pv.name ?? null,
+      ...(warning ? { warning } : {}),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Errore server";
+    const status = message === "UNAUTHORIZED" ? 401 : message === "FORBIDDEN" ? 403 : 500;
+    return NextResponse.json({ ok: false, error: status === 500 ? "Errore server" : message }, { status });
   }
 }
-
-
